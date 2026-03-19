@@ -12,11 +12,24 @@
   let fitAddon = null;
   let ws = null;
   let tc = null;
+  let resizeCleanup = null;
+  let currentSessionId = null;
 
   const unsub = client.subscribe(v => { tc = v; });
 
+  function cleanup() {
+    if (resizeCleanup) { resizeCleanup(); resizeCleanup = null; }
+    if (currentSessionId && tc) { tc.detachSession(currentSessionId); }
+    ws = null;
+    if (term) { term.dispose(); term = null; }
+    fitAddon = null;
+  }
+
   function connect() {
     if (!tc || !sessionId) return;
+
+    cleanup();
+    currentSessionId = sessionId;
 
     term = new Terminal({
       theme: {
@@ -36,39 +49,31 @@
     term.open(termEl);
     fitAddon.fit();
 
-    // Attach to session via WS
     ws = tc.attachSession(sessionId, {
       onOutput: (data) => term.write(data),
       onClose: () => term.write('\r\n\x1b[33m[session disconnected]\x1b[0m\r\n')
     });
 
-    // Send user input to session
     term.onData((data) => tc.sendInput(sessionId, data));
 
-    // Handle resize
     const resizeObserver = new ResizeObserver(() => {
       if (fitAddon) fitAddon.fit();
     });
     resizeObserver.observe(termEl);
-
-    return () => resizeObserver.disconnect();
+    resizeCleanup = () => resizeObserver.disconnect();
   }
 
   onMount(() => {
-    const cleanup = connect();
-    return cleanup;
+    connect();
   });
 
   onDestroy(() => {
     unsub();
-    if (ws) tc?.detachSession(sessionId);
-    if (term) term.dispose();
+    cleanup();
   });
 
   // Reconnect when sessionId changes
   $: if (sessionId && termEl && tc) {
-    if (term) { term.dispose(); term = null; }
-    if (ws) { tc.detachSession(sessionId); ws = null; }
     connect();
   }
 </script>

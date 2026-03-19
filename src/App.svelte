@@ -12,14 +12,16 @@
   let showPalette = false;
 
   onMount(async () => {
-    tc = new TeleptClient({ token: '' });
+    const isDev = import.meta.env.DEV;
+    tc = new TeleptClient({ token: '', useProxy: isDev });
     try {
-      const res = await fetch('http://localhost:3848/api/meta');
+      const metaUrl = isDev ? '/api/meta' : `http://localhost:${3848}/api/meta`;
+      const res = await fetch(metaUrl);
       if (res.ok) {
         const meta = await res.json();
-        tc.token = meta.auth_token || '';
+        tc.token = meta.auth_token || meta.token || '';
       }
-    } catch {}
+    } catch (e) { console.warn('[aterm] meta fetch failed:', e); }
 
     client.set(tc);
 
@@ -27,7 +29,8 @@
       const list = await tc.getSessions();
       sessions.set(list);
       connected.set(true);
-    } catch {
+    } catch (e) {
+      console.warn('[aterm] initial session fetch failed:', e);
       connected.set(false);
     }
 

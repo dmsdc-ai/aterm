@@ -10,8 +10,14 @@ export class TeleptClient {
     this.host = options.host || 'localhost';
     this.port = options.port || DEFAULT_PORT;
     this.token = options.token || '';
-    this.baseUrl = `http://${this.host}:${this.port}`;
-    this.wsUrl = `ws://${this.host}:${this.port}`;
+    // In dev mode (Vite proxy), use relative URLs; in production, use full URLs
+    if (options.useProxy) {
+      this.baseUrl = '';
+      this.wsUrl = `ws://${location.host}`;
+    } else {
+      this.baseUrl = `http://${this.host}:${this.port}`;
+      this.wsUrl = `ws://${this.host}:${this.port}`;
+    }
     this.busWs = null;
     this.sessionWsMap = new Map(); // sessionId → WebSocket
     this.listeners = new Map();
@@ -25,9 +31,9 @@ export class TeleptClient {
       const res = await fetch(`${this.baseUrl}/api/meta`);
       if (res.ok) {
         const meta = await res.json();
-        this.token = meta.token || this.token;
+        this.token = meta.auth_token || meta.token || this.token;
       }
-    } catch {}
+    } catch (e) { console.warn('[telepty] token load failed:', e); }
     return this.token;
   }
 

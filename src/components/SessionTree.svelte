@@ -22,6 +22,12 @@
   function shortName(id) {
     return id.replace(/^aigentry-/, '').replace(/-claude$/, '');
   }
+
+  function sessionHost(s) {
+    const host = s.machine || s.host;
+    if (!host || host === 'localhost' || host === '127.0.0.1') return null;
+    return host;
+  }
 </script>
 
 <div class="tree">
@@ -36,6 +42,9 @@
       >
         <span class="icon" style="color: {statusColor(s)}">{statusIcon(s)}</span>
         <span class="name">{shortName(s.id)}</span>
+        {#if sessionHost(s)}
+          <span class="remote-badge">@{sessionHost(s)}</span>
+        {/if}
         <span class="clients">{s.active_clients}</span>
       </button>
     {/each}
@@ -56,4 +65,5 @@
   .icon { font-size: 10px; flex-shrink: 0; }
   .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .clients { font-size: 10px; color: #484f58; }
+  .remote-badge { font-size: 10px; color: #d2a8ff; flex-shrink: 0; }
 </style>
