@@ -1,0 +1,2 @@
+/* aterm global styles — minimal, dark theme handled in App.svelte */
+*, *::before, *::after { box-sizing: border-box; }
