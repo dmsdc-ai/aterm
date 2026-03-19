@@ -1,0 +1,90 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(npm test *)",
+      "Bash(npx *)",
+      "Bash(git *)",
+      "Bash(telepty *)",
+      "Bash(aigentry *)",
+      "Bash(node *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(wc *)",
+      "Bash(curl *)",
+      "Bash(gh *)",
+      "Bash(mkdir *)",
+      "mcp__deliberation__deliberation_start",
+      "mcp__deliberation__deliberation_respond",
+      "mcp__deliberation__deliberation_status",
+      "mcp__deliberation__deliberation_history",
+      "mcp__deliberation__deliberation_list",
+      "mcp__deliberation__deliberation_list_active",
+      "mcp__deliberation__deliberation_synthesize",
+      "mcp__deliberation__deliberation_context",
+      "mcp__deliberation__deliberation_cli_auto_turn",
+      "mcp__deliberation__deliberation_route_turn",
+      "mcp__deliberation__deliberation_run_until_blocked",
+      "mcp__deliberation__deliberation_speaker_candidates",
+      "mcp__deliberation__deliberation_confirm_speakers",
+      "mcp__deliberation__deliberation_inject_context",
+      "mcp__deliberation__deliberation_reset",
+      "mcp__deliberation__decision_start",
+      "mcp__deliberation__decision_respond",
+      "mcp__deliberation__decision_status",
+      "mcp__deliberation__decision_history",
+      "mcp__deliberation__decision_templates",
+      "mcp__aigentry-deliberation__deliberation_start",
+      "mcp__aigentry-deliberation__deliberation_respond",
+      "mcp__aigentry-deliberation__deliberation_status",
+      "mcp__aigentry-deliberation__deliberation_history",
+      "mcp__aigentry-deliberation__deliberation_list",
+      "mcp__aigentry-deliberation__deliberation_list_active",
+      "mcp__aigentry-deliberation__deliberation_synthesize",
+      "mcp__aigentry-deliberation__deliberation_context",
+      "mcp__aigentry-deliberation__deliberation_cli_auto_turn",
+      "mcp__aigentry-deliberation__deliberation_route_turn",
+      "mcp__aigentry-deliberation__deliberation_run_until_blocked",
+      "mcp__aigentry-deliberation__deliberation_speaker_candidates",
+      "mcp__aigentry-deliberation__deliberation_confirm_speakers",
+      "mcp__aigentry-deliberation__deliberation_inject_context",
+      "mcp__aigentry-deliberation__deliberation_reset",
+      "mcp__aigentry-deliberation__decision_start",
+      "mcp__aigentry-deliberation__decision_respond",
+      "mcp__aigentry-deliberation__decision_status",
+      "mcp__aigentry-deliberation__decision_history",
+      "mcp__aigentry-deliberation__decision_templates",
+      "mcp__plugin_oh-my-claudecode_t__lsp_diagnostics",
+      "mcp__plugin_oh-my-claudecode_t__lsp_diagnostics_directory",
+      "mcp__plugin_oh-my-claudecode_t__lsp_document_symbols",
+      "mcp__plugin_oh-my-claudecode_t__lsp_workspace_symbols",
+      "mcp__plugin_oh-my-claudecode_t__lsp_hover",
+      "mcp__plugin_oh-my-claudecode_t__lsp_goto_definition",
+      "mcp__plugin_oh-my-claudecode_t__lsp_find_references",
+      "mcp__plugin_oh-my-claudecode_t__lsp_code_actions",
+      "mcp__plugin_oh-my-claudecode_t__lsp_code_action_resolve",
+      "mcp__plugin_oh-my-claudecode_t__lsp_prepare_rename",
+      "mcp__plugin_oh-my-claudecode_t__lsp_rename",
+      "mcp__plugin_oh-my-claudecode_t__lsp_servers",
+      "mcp__plugin_oh-my-claudecode_t__ast_grep_search",
+      "mcp__plugin_oh-my-claudecode_t__ast_grep_replace",
+      "mcp__plugin_oh-my-claudecode_t__python_repl"
+    ]
+  },
+  "mcpServers": {
+    "deliberation": {
+      "command": "node",
+      "args": [
+        "/Users/duckyoungkim/.local/lib/mcp-deliberation/index.js"
+      ]
+    },
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    }
+  }
+}
