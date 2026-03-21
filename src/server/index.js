@@ -1,6 +1,7 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import ptyManager from './pty-manager.js';
@@ -10,6 +11,49 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '../../dist');
 // No default workspace — user creates sessions via + button
 const PORT = 3849;
+const SESSIONS_PATH = path.join(os.homedir(), '.aterm', 'sessions.json');
+
+// ── Session persistence ───────────────────────────────────────────────────────
+
+function saveSessions() {
+  const sessions = ptyManager.listWorkspaces().map(ws => ({
+    id: ws.id,
+    cwd: ws.cwd,
+    command: ws.command || 'claude',
+    args: ws.args || ['--dangerously-skip-permissions'],
+  }));
+  const data = { sessions };
+  try {
+    const dir = path.join(os.homedir(), '.aterm');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(SESSIONS_PATH, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.warn('[aterm] failed to save sessions:', e.message);
+  }
+}
+
+function restoreSessions() {
+  if (!fs.existsSync(SESSIONS_PATH)) return;
+  try {
+    const data = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf8'));
+    for (const s of data.sessions || []) {
+      try {
+        const args = [...(s.args || [])];
+        if (!args.includes('--continue')) args.push('--continue');
+        ptyManager.createWorkspace(s.id, {
+          cwd: s.cwd,
+          command: s.command || 'claude',
+          args,
+        });
+        console.log(`[aterm] restored session: ${s.id}`);
+      } catch (e) {
+        console.warn(`[aterm] failed to restore session ${s.id}:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.warn('[aterm] sessions.json read failed:', e.message);
+  }
+}
 
 let wss = null;
 let httpServer = null;
@@ -56,6 +100,7 @@ function handleRequest(req, res) {
           command: command || undefined,
           args: args || undefined,
         });
+        saveSessions();
         broadcast({ event: 'created', workspace: safeId });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, id: safeId }));
@@ -209,6 +254,7 @@ async function handleCommand(cmd) {
         cols: cmd.cols,
         rows: cmd.rows,
       });
+      saveSessions();
       // Broadcast creation event to all WS clients
       broadcast({ event: 'created', workspace: id });
       return { ok: true, id };
@@ -217,6 +263,7 @@ async function handleCommand(cmd) {
     case 'close-workspace': {
       if (!cmd.workspace) return { ok: false, error: 'Missing workspace id' };
       ptyManager.destroyWorkspace(cmd.workspace);
+      saveSessions();
       broadcast({ event: 'closed', workspace: cmd.workspace });
       return { ok: true };
     }
@@ -384,6 +431,7 @@ function stopWsServer() {
 async function startServer() {
   await start();
   await startWsServer();
+  restoreSessions();
 
   console.log(`[aterm] server ready (no default workspace — use + to create sessions)`);
   console.log(`  Unix socket: ${SOCKET_PATH}`);
