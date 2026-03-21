@@ -101,8 +101,15 @@
     term.loadAddon(fitAddon);
     term.open(termEl);
     fitAddon.fit();
+    term.focus();
 
     const myTerm = term;
+
+    // Send initial resize to server
+    if (ac) {
+      const { cols, rows } = term;
+      ac.resize(workspaceId, cols, rows).catch(() => {});
+    }
 
     // Subscribe to real-time PTY output
     unsubOutput = ac.onOutput(workspaceId, (data) => {
@@ -156,6 +163,7 @@
     term.loadAddon(fitAddon);
     term.open(termEl);
     fitAddon.fit();
+    term.focus();
 
     const myTerm = term;
 
@@ -238,7 +246,7 @@
       </span>
     </div>
   </div>
-  <div class="terminal-wrap" bind:this={termEl}></div>
+  <div class="terminal-wrap" bind:this={termEl} on:click={() => term && term.focus()}></div>
 </div>
 
 <style>
