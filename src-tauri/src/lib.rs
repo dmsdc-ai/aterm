@@ -30,22 +30,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // In dev: CARGO_MANIFEST_DIR = src-tauri/, parent = project root
-            // In prod: use executable dir
-            let project_root = if cfg!(debug_assertions) {
+            // In prod: Tauri resource_dir contains bundled server files
+            let server_script = if cfg!(debug_assertions) {
                 let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
                     .unwrap_or_else(|_| ".".to_string());
                 std::path::PathBuf::from(manifest_dir)
                     .parent()
                     .unwrap_or(std::path::Path::new("."))
-                    .to_path_buf()
+                    .join("src").join("server").join("index.js")
             } else {
-                std::env::current_exe()
-                    .unwrap_or_default()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .to_path_buf()
+                app.path().resource_dir().expect("no resource dir")
+                    .join("src").join("server").join("index.js")
             };
-            let server_script = project_root.join("src").join("server").join("index.js");
 
             println!("[aterm] Starting Node.js server: {:?}", server_script);
 

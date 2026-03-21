@@ -30,6 +30,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../src/server/index.js": "src/server/index.js",
+      "../src/server/pty-manager.js": "src/server/pty-manager.js",
+      "../src/server/socket-server.js": "src/server/socket-server.js"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
