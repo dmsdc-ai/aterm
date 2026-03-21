@@ -59,6 +59,55 @@
     --toggle-icon: #8a7e74;
   }
 
+  /* ── LIGHT MODE — warm cream ── */
+  [data-theme="light"] {
+    --bg-main: #faf6f0;
+    --bg-sidebar: #f0ebe3;
+    --bg-sidebar-hover: #e8e3db;
+    --bg-sidebar-selected: #e0dbd3;
+    --bg-inset: #f5f1eb;
+    --bg-timeline: #f7f3ed;
+    --bg-button: #ffffff;
+    --bg-button-hover: #f0ebe3;
+    --bg-button-border: #d4cfc7;
+    --bg-kbd: #ffffff;
+
+    --border-subtle: #e5e0d8;
+    --border-default: #d4cfc7;
+
+    --text-primary: #1a1a1a;
+    --text-secondary: #3d3d3d;
+    --text-tertiary: #666666;
+    --text-muted: #888888;
+    --text-disabled: #aaaaaa;
+
+    --accent: #d97706;
+    --accent-hover: #b45309;
+    --accent-subtle: rgba(217, 119, 6, 0.06);
+    --accent-muted: rgba(217, 119, 6, 0.12);
+
+    --status-active: #3da85e;
+    --status-danger: #d45555;
+    --status-warning: #c4952e;
+
+    --event-routed: #9b7fd0;
+    --event-synthesis: #c4952e;
+
+    --mascot-bright: #fde047;
+    --mascot-node: #fbbf24;
+    --mascot-line: #f59e0b;
+    --mascot-frame: rgba(217, 119, 6, 0.15);
+    --mascot-text: #92400e;
+
+    --toggle-bg: #e5e0d8;
+    --toggle-icon: #666666;
+  }
+
+  /* ── THEME TOGGLE ICON VISIBILITY ── */
+  [data-theme="dark"] .icon-sun  { display: block; }
+  [data-theme="dark"] .icon-moon { display: none; }
+  [data-theme="light"] .icon-sun  { display: none; }
+  [data-theme="light"] .icon-moon { display: block; }
 
   /* ── RESET ── */
   *, *::before, *::after {
@@ -225,6 +274,28 @@
     color: var(--text-disabled);
   }
 
+  .theme-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: var(--toggle-bg);
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .theme-toggle svg {
+    width: 14px;
+    height: 14px;
+    stroke: var(--toggle-icon);
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
 
   /* ── MAIN LAYOUT ── */
   .main {
@@ -604,6 +675,11 @@
       </div>
       <span class="header-separator"></span>
       <span class="shortcut-hint" aria-label="Command palette shortcut">&#8984;K</span>
+      <span class="header-separator"></span>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 14 14"><circle cx="7" cy="7" r="3"/><line x1="7" y1="0.5" x2="7" y2="2"/><line x1="7" y1="12" x2="7" y2="13.5"/><line x1="0.5" y1="7" x2="2" y2="7"/><line x1="12" y1="7" x2="13.5" y2="7"/><line x1="2.4" y1="2.4" x2="3.5" y2="3.5"/><line x1="10.5" y1="10.5" x2="11.6" y2="11.6"/><line x1="11.6" y1="2.4" x2="10.5" y2="3.5"/><line x1="3.5" y1="10.5" x2="2.4" y2="11.6"/></svg>
+        <svg class="icon-moon" viewBox="0 0 14 14"><path d="M12.5 7.8A5.5 5.5 0 1 1 6.2 1.5a4.5 4.5 0 0 0 6.3 6.3z"/></svg>
+      </button>
     </div>
   </header>
 
@@ -830,5 +906,13 @@
 </div>
 
 
+<script>
+  var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+  document.getElementById('theme-toggle').addEventListener('click', function() {
+    var t = document.documentElement.getAttribute('data-theme');
+    document.documentElement.setAttribute('data-theme', t === 'dark' ? 'light' : 'dark');
+  });
+</script>
 </body>
 </html>
