@@ -10,6 +10,7 @@
     "beforeBuildCommand": "npm run vite:build"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "aterm",
@@ -18,7 +19,8 @@
         "minWidth": 800,
         "minHeight": 500,
         "decorations": true,
-        "transparent": false
+        "transparent": false,
+        "devtools": true
       }
     ],
     "security": {
