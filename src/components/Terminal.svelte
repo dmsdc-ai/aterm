@@ -58,6 +58,46 @@
     currentSessionId = null;
   }
 
+  function getTermTheme() {
+    const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+    if (isDark) {
+      return {
+        background: '#131010',
+        foreground: '#e8e4e0',
+        cursor: '#d97706',
+        cursorAccent: '#131010',
+        selectionBackground: 'rgba(217, 119, 6, 0.25)',
+        black: '#504840', red: '#d96c6c', green: '#5cb97a', yellow: '#d4a853',
+        blue: '#d97706', magenta: '#b8a0d8', cyan: '#5cb0b8', white: '#b0a898',
+        brightBlack: '#6a6058', brightRed: '#e88080', brightGreen: '#70cc8a',
+        brightYellow: '#e8bb6a', brightBlue: '#f59e0b', brightMagenta: '#c8b0e8',
+        brightCyan: '#6ac8d0', brightWhite: '#e8e4e0',
+      };
+    } else {
+      return {
+        background: '#faf6f0',
+        foreground: '#1a1a1a',
+        cursor: '#d97706',
+        cursorAccent: '#faf6f0',
+        selectionBackground: 'rgba(217, 119, 6, 0.15)',
+        black: '#1a1a1a', red: '#d45555', green: '#3da85e', yellow: '#c4952e',
+        blue: '#b45309', magenta: '#9b7fd0', cyan: '#0891b2', white: '#666666',
+        brightBlack: '#3d3d3d', brightRed: '#e06060', brightGreen: '#4db870',
+        brightYellow: '#d4a040', brightBlue: '#d97706', brightMagenta: '#b090e0',
+        brightCyan: '#0ea5c9', brightWhite: '#1a1a1a',
+      };
+    }
+  }
+
+  // Watch for theme changes and update terminal
+  let themeObserver = null;
+  function watchTheme() {
+    themeObserver = new MutationObserver(() => {
+      if (term) term.options.theme = getTermTheme();
+    });
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  }
+
   function connect() {
     if (!ac || !workspaceId || !termEl) return;
 
@@ -66,29 +106,7 @@
     const myWsId = workspaceId;
 
     term = new Terminal({
-      theme: {
-        background: '#131010',
-        foreground: '#e8e4e0',
-        cursor: '#d97706',
-        cursorAccent: '#131010',
-        selectionBackground: 'rgba(217, 119, 6, 0.25)',
-        black: '#504840',
-        red: '#d96c6c',
-        green: '#5cb97a',
-        yellow: '#d4a853',
-        blue: '#d97706',
-        magenta: '#b8a0d8',
-        cyan: '#5cb0b8',
-        white: '#b0a898',
-        brightBlack: '#6a6058',
-        brightRed: '#e88080',
-        brightGreen: '#70cc8a',
-        brightYellow: '#e8bb6a',
-        brightBlue: '#f59e0b',
-        brightMagenta: '#c8b0e8',
-        brightCyan: '#6ac8d0',
-        brightWhite: '#e8e4e0',
-      },
+      theme: getTermTheme(),
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
       cursorBlink: true,
@@ -145,29 +163,7 @@
     currentSessionId = sid;
 
     term = new Terminal({
-      theme: {
-        background: '#131010',
-        foreground: '#e8e4e0',
-        cursor: '#d97706',
-        cursorAccent: '#131010',
-        selectionBackground: 'rgba(217, 119, 6, 0.25)',
-        black: '#504840',
-        red: '#d96c6c',
-        green: '#5cb97a',
-        yellow: '#d4a853',
-        blue: '#d97706',
-        magenta: '#b8a0d8',
-        cyan: '#5cb0b8',
-        white: '#b0a898',
-        brightBlack: '#6a6058',
-        brightRed: '#e88080',
-        brightGreen: '#70cc8a',
-        brightYellow: '#e8bb6a',
-        brightBlue: '#f59e0b',
-        brightMagenta: '#c8b0e8',
-        brightCyan: '#6ac8d0',
-        brightWhite: '#e8e4e0',
-      },
+      theme: getTermTheme(),
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
       cursorBlink: true,
@@ -212,11 +208,13 @@
 
   onMount(() => {
     mounted = true;
+    watchTheme();
     connect();
   });
 
   onDestroy(() => {
     mounted = false;
+    if (themeObserver) { themeObserver.disconnect(); themeObserver = null; }
     unsubClient();
     unsubTeleptClient();
     unsubViewMode();
@@ -353,11 +351,11 @@
   .terminal-wrap {
     flex: 1;
     padding: 6px 4px 4px;
-    background: #131010;
+    background: var(--bg-inset, #131010);
     overflow: hidden;
   }
 
   .terminal-wrap :global(.xterm) { height: 100%; }
-  .terminal-wrap :global(.xterm-viewport) { background: #131010 !important; }
-  .terminal-wrap :global(.xterm-screen) { background: #131010; }
+  .terminal-wrap :global(.xterm-viewport) { background: var(--bg-inset, #131010) !important; }
+  .terminal-wrap :global(.xterm-screen) { background: var(--bg-inset, #131010); }
 </style>
