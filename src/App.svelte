@@ -1,9 +1,11 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { AtermClient } from './lib/aterm-client.js';
+  import { TeleptClient } from './lib/telepty-client.js';
   import {
     atermClient, atermConnected, workspaces, activeWorkspaceId,
     refreshWorkspaces, addBusEvent,
+    client, sessions, teleptConnected, selectedSessionId, viewMode,
   } from './lib/stores.js';
   import SessionTree from './components/SessionTree.svelte';
   import Timeline from './components/Timeline.svelte';
@@ -11,10 +13,42 @@
   import CommandPalette from './components/CommandPalette.svelte';
 
   let ac = null;
+  let tc = null;
   let showPalette = false;
   let refreshTimer = null;
 
+  async function initTelepty() {
+    try {
+      tc = new TeleptClient({ useProxy: true });
+      await tc.loadToken();
+      const list = await tc.getSessions();
+      sessions.set(list);
+      teleptConnected.set(true);
+      client.set(tc);
+
+      // Connect to bus for real-time session events
+      tc.connectBus(async (msg) => {
+        addBusEvent(msg);
+        // Refresh session list on lifecycle events
+        if (msg.type === 'session_created' || msg.type === 'session_closed' ||
+            msg.type === 'session_started' || msg.type === 'session_stopped' ||
+            msg.event === 'created' || msg.event === 'closed') {
+          try {
+            const updated = await tc.getSessions();
+            sessions.set(updated);
+          } catch (e) {
+            console.warn('[App] telepty session refresh failed:', e.message);
+          }
+        }
+      });
+    } catch (e) {
+      console.warn('[App] telepty init failed (daemon may be offline):', e.message);
+      teleptConnected.set(false);
+    }
+  }
+
   onMount(() => {
+    // Init aterm client
     ac = new AtermClient();
     atermClient.set(ac);
 
@@ -45,11 +79,15 @@
 
     // Poll workspace list every 5s to catch external changes
     refreshTimer = setInterval(() => refreshWorkspaces(ac), 5000);
+
+    // Init telepty client (non-blocking — daemon may be offline)
+    initTelepty();
   });
 
   onDestroy(() => {
     if (refreshTimer) clearInterval(refreshTimer);
     if (ac) ac.destroy();
+    if (tc) tc.destroy();
   });
 
   function handleKeydown(e) {
@@ -78,7 +116,17 @@
     </div>
 
     <div class="header-center">
-      {#if $activeWorkspaceId}
+      {#if $selectedSessionId}
+        <div class="breadcrumb">
+          <span class="breadcrumb-icon" style="color: #3fb950;">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1"/>
+              <path d="M4 6L6 4L8 6" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span class="breadcrumb-text">{$selectedSessionId}</span>
+        </div>
+      {:else if $activeWorkspaceId}
         <div class="breadcrumb">
           <span class="breadcrumb-icon">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -108,7 +156,9 @@
     </aside>
 
     <main class="center">
-      {#if $activeWorkspaceId}
+      {#if $selectedSessionId}
+        <Terminal workspaceId={$activeWorkspaceId} sessionId={$selectedSessionId} />
+      {:else if $activeWorkspaceId}
         <Terminal workspaceId={$activeWorkspaceId} />
       {:else}
         <div class="empty">
@@ -124,7 +174,7 @@
                 <line x1="22" y1="36" x2="34" y2="36" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
               </svg>
               <p class="empty-title">No workspace selected</p>
-              <p class="empty-hint">Select a workspace or press <kbd>+</kbd> to create one</p>
+              <p class="empty-hint">Select a workspace or session from the sidebar</p>
             </div>
           {:else}
             <div class="empty-visual">

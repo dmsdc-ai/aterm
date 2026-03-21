@@ -14,8 +14,11 @@ export const selectedSessionId = writable(null);
 // Bus event log
 export const busEvents = writable([]);
 
-// Connection status
+// Connection status to telepty daemon
 export const connected = writable(false);
+
+// Alias for backward compatibility
+export const teleptConnected = connected;
 
 // Grouped sessions by project
 export const sessionTree = derived(sessions, ($sessions) => {
@@ -62,6 +65,12 @@ export const activeWorkspace = derived(
 
 // aterm connection status
 export const atermConnected = writable(false);
+
+// viewMode: 'session' when a telepty session is selected, 'workspace' otherwise
+export const viewMode = derived(
+  [activeWorkspaceId, selectedSessionId],
+  ([$wsId, $sessionId]) => $sessionId ? 'session' : 'workspace'
+);
 
 // Refresh workspace list from server
 export async function refreshWorkspaces(ac) {

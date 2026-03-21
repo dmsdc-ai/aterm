@@ -1,8 +1,50 @@
 <script>
-  import { workspaces, activeWorkspaceId, atermConnected, atermClient, refreshWorkspaces } from '../lib/stores.js';
+  import { workspaces, activeWorkspaceId, atermConnected, atermClient, refreshWorkspaces,
+           sessions, selectedSessionId, sessionTree, client, connected } from '../lib/stores.js';
+  import { onMount, onDestroy } from 'svelte';
+
+  let refreshInterval;
+
+  onMount(() => {
+    refreshTeleptySessions();
+    refreshInterval = setInterval(refreshTeleptySessions, 5000);
+  });
+
+  onDestroy(() => {
+    clearInterval(refreshInterval);
+  });
+
+  async function refreshTeleptySessions() {
+    let c;
+    const unsub = client.subscribe(v => { c = v; });
+    unsub();
+    if (!c) return;
+    try {
+      const list = await c.getSessions();
+      sessions.set(Array.isArray(list) ? list : (list.sessions || []));
+      connected.set(true);
+    } catch {
+      connected.set(false);
+    }
+  }
+
+  function selectSession(id) {
+    selectedSessionId.set(id);
+    activeWorkspaceId.set(null); // deselect workspace
+  }
 
   function selectWorkspace(id) {
     activeWorkspaceId.set(id);
+    selectedSessionId.set(null); // deselect session
+  }
+
+  function sessionName(s) {
+    return s.id || s.name || 'unknown';
+  }
+
+  function sessionStatus(s) {
+    if (s.status === 'active' || s.pid) return 'active';
+    return 'idle';
   }
 
   async function createWorkspace() {
@@ -54,6 +96,60 @@
 </script>
 
 <div class="tree">
+  <!-- Telepty Sessions Section -->
+  <div class="tree-header">
+    <div class="tree-header-left">
+      <svg class="tree-header-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1"/>
+        <path d="M6 3V6L8 8" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+      </svg>
+      <span class="tree-header-label">Sessions</span>
+    </div>
+    <div class="tree-header-right">
+      <span class="tree-header-count" class:offline={!$connected}>{$connected ? $sessions.length : '—'}</span>
+    </div>
+  </div>
+
+  {#if $connected}
+    {#each Object.entries($sessionTree) as [project, projectSessions]}
+      <div class="project-group">
+        <div class="project-label">{project}</div>
+        {#each projectSessions as s}
+          <div
+            class="workspace-row"
+            class:selected={$selectedSessionId === s.id}
+            on:click={() => selectSession(s.id)}
+            on:keydown={(e) => e.key === 'Enter' || e.key === ' ' ? selectSession(s.id) : null}
+            role="button"
+            tabindex="0"
+          >
+            {#if $selectedSessionId === s.id}
+              <span class="selection-bar"></span>
+            {/if}
+            <div class="ws-icon" class:active={sessionStatus(s) === 'active'}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1"/>
+                <path d="M5 7L7 5L9 7" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+                <line x1="7" y1="5" x2="7" y2="10" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+              </svg>
+              <span
+                class="ws-status-dot"
+                style="background: {sessionStatus(s) === 'active' ? '#3fb950' : '#d29922'}; box-shadow: 0 0 3px {sessionStatus(s) === 'active' ? '#3fb95088' : '#d2992288'};"
+              ></span>
+            </div>
+            <div class="ws-info">
+              <span class="ws-name">{sessionName(s)}</span>
+              <span class="ws-cwd">{s.host || 'Local'}{s.command ? ' · ' + s.command : ''}</span>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/each}
+  {:else}
+    <div class="offline-msg">telepty offline</div>
+  {/if}
+
+  <!-- Workspaces Section -->
   <div class="tree-header">
     <div class="tree-header-left">
       <svg class="tree-header-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -415,5 +511,29 @@
     background: var(--color-accent-blue-subtle);
     color: var(--color-accent-blue);
     border-color: var(--color-accent-blue-muted);
+  }
+
+  /* ── Telepty sessions ── */
+  .project-group {
+    margin-bottom: 4px;
+  }
+
+  .project-label {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-disabled);
+    padding: 6px 14px 2px;
+    text-transform: lowercase;
+  }
+
+  .offline-msg {
+    font-size: 11px;
+    color: var(--color-text-disabled);
+    padding: 12px 14px;
+    font-style: italic;
+  }
+
+  .tree-header-count.offline {
+    color: var(--color-danger);
   }
 </style>
