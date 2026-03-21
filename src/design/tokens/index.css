@@ -1,0 +1,11 @@
+/* ================================================================
+ * aterm Design System — Token Index
+ *
+ * Import this single file to get all design tokens.
+ * Usage: @import './design/tokens/index.css';
+ * ================================================================ */
+
+@import './colors.css';
+@import './spacing.css';
+@import './typography.css';
+@import './animations.css';

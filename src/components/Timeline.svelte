@@ -249,14 +249,30 @@
 </div>
 
 <style>
+  /* ── Keyframes ───────────────────────────────────────── */
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  @keyframes breathe {
+    0%, 100% { opacity: 0.3; transform: scale(1); }
+    50%       { opacity: 0.6; transform: scale(1.08); }
+  }
+
   /* ── Layout ─────────────────────────────────────────── */
   .timeline {
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: #0d1117;
-    color: #c9d1d9;
-    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+    background: var(--color-bg-base);
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
     font-size: 12px;
     overflow: hidden;
   }
@@ -267,24 +283,24 @@
     align-items: center;
     gap: 8px;
     padding: 10px 16px 8px;
-    border-bottom: 1px solid #21262d;
+    border-bottom: 1px solid var(--color-border-subtle);
     flex-shrink: 0;
   }
 
   .header-label {
     font-size: 10px;
     font-weight: 600;
-    color: #6e7681;
+    color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.8px;
   }
 
   .header-count {
     font-size: 10px;
-    color: #8b949e;
-    background: #21262d;
-    border: 1px solid #30363d;
-    border-radius: 10px;
+    color: var(--color-text-tertiary);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-pill);
     padding: 0 6px;
     line-height: 16px;
   }
@@ -293,7 +309,7 @@
   .session-info {
     padding: 8px 16px;
     flex-shrink: 0;
-    border-bottom: 1px solid #21262d;
+    border-bottom: 1px solid var(--color-border-subtle);
   }
 
   .info-grid {
@@ -305,7 +321,7 @@
 
   .info-key {
     font-size: 10px;
-    color: #484f58;
+    color: var(--color-border-strong);
     padding: 2px 0;
     align-self: start;
     padding-top: 3px;
@@ -313,14 +329,14 @@
 
   .info-val {
     font-size: 11px;
-    color: #8b949e;
+    color: var(--color-text-tertiary);
     padding: 2px 0;
     word-break: break-all;
   }
 
   .info-mono {
     font-size: 10px;
-    color: #6e7681;
+    color: var(--color-text-muted);
   }
 
   .info-truncate {
@@ -330,10 +346,10 @@
   }
 
   .remote-badge {
-    color: #d2a8ff;
-    background: #d2a8ff14;
-    border: 1px solid #d2a8ff22;
-    border-radius: 4px;
+    color: var(--color-event-routed);
+    background: rgba(210, 168, 255, 0.08);
+    border: 1px solid rgba(210, 168, 255, 0.13);
+    border-radius: var(--radius-md);
     padding: 0 5px;
     font-size: 10px;
     display: inline-block;
@@ -341,14 +357,14 @@
   }
 
   .local-badge {
-    color: #484f58;
+    color: var(--color-text-disabled);
     font-size: 10px;
   }
 
   /* ── Section divider ─────────────────────────────────── */
   .section-rule {
     height: 1px;
-    background: #21262d;
+    background: var(--color-border-subtle);
     margin: 0;
     flex-shrink: 0;
   }
@@ -370,8 +386,8 @@
   }
 
   .events::-webkit-scrollbar-thumb {
-    background: #21262d;
-    border-radius: 2px;
+    background: var(--color-border-subtle);
+    border-radius: var(--radius-xs);
   }
 
   .event-list {
@@ -391,12 +407,13 @@
     gap: 0;
     padding: 2px 12px 2px 16px;
     position: relative;
+    animation: fadeInUp var(--duration-normal) var(--ease-out) both;
   }
 
   /* Vertical line on the left */
   .tl-stem {
     width: 1px;
-    background: #21262d;
+    background: var(--color-border-subtle);
     margin-right: 12px;
     flex-shrink: 0;
     position: relative;
@@ -412,29 +429,31 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: #21262d;
-    border: 1px solid #30363d;
+    background: var(--color-border-subtle);
+    border: 1px solid var(--color-border-default);
+    transition: background var(--duration-normal) var(--ease-default),
+                border-color var(--duration-normal) var(--ease-default);
   }
 
   /* ── Chat bubbles ────────────────────────────────────── */
   .bubble {
     flex: 1;
-    background: #161b22;
-    border: 1px solid #21262d;
-    border-radius: 0 8px 8px 0;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
     padding: 7px 10px;
     margin-bottom: 4px;
     min-width: 0;
   }
 
   .inject-bubble {
-    border-left: 2px solid var(--accent, #58a6ff);
-    background: #161b22;
+    border-left: 2px solid var(--accent, var(--color-accent-blue));
+    background: var(--color-bg-elevated);
   }
 
   .routed-bubble {
-    border-left: 2px solid #d2a8ff;
-    background: #17141f;
+    border-left: 2px solid var(--color-event-routed);
+    background: var(--color-event-routed-bg);
   }
 
   .bubble-header {
@@ -457,26 +476,26 @@
   }
 
   .inject-to {
-    color: #6e7681;
+    color: var(--color-text-muted);
   }
 
   .routed-from {
-    color: #d2a8ff;
+    color: var(--color-event-routed);
   }
 
   .routed-to {
-    color: #6e7681;
+    color: var(--color-text-muted);
   }
 
   .route-arrow {
-    color: #30363d;
+    color: var(--color-border-default);
     font-size: 11px;
   }
 
   .type-chip {
     font-size: 9px;
     border: 1px solid;
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     padding: 0 4px;
     line-height: 14px;
     opacity: 0.8;
@@ -486,14 +505,14 @@
   .ev-time {
     margin-left: auto;
     font-size: 9px;
-    color: #30363d;
+    color: var(--color-border-default);
     white-space: nowrap;
     flex-shrink: 0;
   }
 
   .bubble-body {
     font-size: 11px;
-    color: #8b949e;
+    color: var(--color-text-tertiary);
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.55;
@@ -502,13 +521,14 @@
   /* ── Synthesis card ──────────────────────────────────── */
   .event-synthesis {
     flex: 1;
-    background: #16120a;
-    border: 1px solid #f0883e22;
-    border-left: 2px solid #f0883e;
-    border-radius: 0 8px 8px 0;
+    background: var(--color-event-synthesis-bg);
+    border: 1px solid rgba(240, 136, 62, 0.13);
+    border-left: 2px solid var(--color-event-synthesis);
+    border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
     padding: 8px 10px;
     margin-bottom: 4px;
     min-width: 0;
+    box-shadow: inset 2px 0 8px rgba(240, 136, 62, 0.1);
   }
 
   .synthesis-header {
@@ -523,22 +543,22 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.8px;
-    color: #f0883e;
-    background: #f0883e18;
-    border: 1px solid #f0883e33;
-    border-radius: 3px;
+    color: var(--color-event-synthesis);
+    background: rgba(240, 136, 62, 0.09);
+    border: 1px solid rgba(240, 136, 62, 0.2);
+    border-radius: var(--radius-sm);
     padding: 0 5px;
     line-height: 15px;
   }
 
   .synthesis-from {
     font-size: 10px;
-    color: #8b949e;
+    color: var(--color-text-tertiary);
   }
 
   .synthesis-body {
     font-size: 11px;
-    color: #d4a96a;
+    color: var(--color-event-synthesis-text);
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.55;
@@ -555,10 +575,11 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    background: #0d1117;
-    border: 1px solid #1c2128;
-    border-radius: 12px;
+    background: var(--color-bg-base);
+    border: 1px solid var(--color-bg-overlay);
+    border-radius: var(--radius-3xl);
     padding: 3px 10px;
+    animation: fadeIn var(--duration-fast) var(--ease-default);
   }
 
   .sys-dot {
@@ -570,27 +591,27 @@
 
   .sys-text {
     font-size: 10px;
-    color: #484f58;
+    color: var(--color-text-disabled);
     font-style: italic;
   }
 
   .sys-time {
     font-size: 9px;
-    color: #30363d;
+    color: var(--color-border-default);
   }
 
   /* ── Expand button ───────────────────────────────────── */
   .expand-btn {
     background: none;
     border: none;
-    color: #58a6ff;
+    color: var(--color-accent-blue);
     font-size: 10px;
     font-family: inherit;
     cursor: pointer;
     padding: 3px 0 0;
     display: block;
     opacity: 0.7;
-    transition: opacity 0.15s;
+    transition: opacity var(--duration-normal) var(--ease-default);
   }
 
   .expand-btn:hover {
@@ -610,18 +631,19 @@
 
   .empty-icon {
     font-size: 24px;
-    color: #21262d;
+    color: var(--color-border-subtle);
     line-height: 1;
+    animation: breathe 3s ease-in-out infinite;
   }
 
   .empty-text {
     font-size: 12px;
-    color: #484f58;
+    color: var(--color-text-disabled);
   }
 
   .empty-sub {
     font-size: 10px;
-    color: #30363d;
+    color: var(--color-border-default);
     text-align: center;
   }
 </style>

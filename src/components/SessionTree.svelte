@@ -114,8 +114,8 @@
 
 <style>
   .tree {
-    padding: 6px 0 12px;
-    font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+    padding: var(--space-3) 0 var(--space-5);
+    font-family: var(--font-mono);
   }
 
   /* ── Header ── */
@@ -123,9 +123,9 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 10px 8px 14px;
-    border-bottom: 1px solid #21262d;
-    margin-bottom: 4px;
+    padding: var(--space-4) 10px var(--space-4) 14px;
+    border-bottom: 1px solid var(--color-border-subtle);
+    margin-bottom: var(--space-2);
   }
 
   .tree-header-label {
@@ -133,23 +133,23 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: #8b949e;
+    color: var(--color-text-tertiary);
   }
 
   .tree-header-right {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-3);
   }
 
   .tree-header-count {
     font-size: 10px;
     font-weight: 500;
-    color: #484f58;
-    background: #21262d;
-    border: 1px solid #30363d;
+    color: var(--color-text-disabled);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
     border-radius: 8px;
-    padding: 0 6px;
+    padding: 0 var(--space-3);
     line-height: 16px;
   }
 
@@ -159,21 +159,21 @@
     justify-content: center;
     width: 20px;
     height: 20px;
-    background: #21262d;
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    color: #8b949e;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-md);
+    color: var(--color-text-tertiary);
     font-size: 14px;
     line-height: 1;
     cursor: pointer;
     padding: 0;
-    transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+    transition: background var(--duration-instant) ease, color var(--duration-instant) ease, border-color var(--duration-instant) ease;
   }
 
   .new-btn:hover:not(:disabled) {
-    background: #388bfd22;
-    color: #58a6ff;
-    border-color: #388bfd44;
+    background: var(--color-accent-blue-subtle);
+    color: var(--color-accent-blue);
+    border-color: var(--color-accent-blue-muted);
   }
 
   .new-btn:disabled {
@@ -186,24 +186,25 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-4);
     width: 100%;
     padding: 7px 10px 7px 18px;
     border: none;
     background: transparent;
-    color: #8b949e;
+    color: var(--color-text-tertiary);
     font-family: inherit;
     font-size: 12px;
     cursor: pointer;
     text-align: left;
-    transition: background 0.15s ease, color 0.15s ease;
+    transition: background var(--duration-normal) ease, color var(--duration-normal) ease;
     outline: none;
     user-select: none;
+    animation: fadeIn var(--duration-normal) var(--ease-out) both;
   }
 
   .workspace-row:hover {
-    background: #161b22;
-    color: #c9d1d9;
+    background: var(--color-bg-elevated);
+    color: var(--color-text-secondary);
   }
 
   .workspace-row:hover .close-btn {
@@ -211,12 +212,12 @@
   }
 
   .workspace-row.selected {
-    background: rgba(88, 166, 255, 0.08);
-    color: #e6edf3;
+    background: var(--color-accent-blue-subtle);
+    color: var(--color-text-primary);
   }
 
   .workspace-row.selected:hover {
-    background: rgba(88, 166, 255, 0.11);
+    background: var(--color-accent-blue-muted);
   }
 
   .selection-bar {
@@ -225,8 +226,9 @@
     top: 3px;
     bottom: 3px;
     width: 3px;
-    background: #58a6ff;
-    border-radius: 0 2px 2px 0;
+    background: var(--color-accent-blue);
+    border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+    transition: all var(--duration-normal) var(--ease-out);
   }
 
   .status-dot {
@@ -234,7 +236,7 @@
     height: 6px;
     border-radius: 50%;
     flex-shrink: 0;
-    transition: background 300ms ease, box-shadow 300ms ease;
+    transition: background var(--duration-slow) ease, box-shadow var(--duration-slow) ease;
   }
 
   .ws-info {
@@ -256,7 +258,7 @@
 
   .ws-cwd {
     font-size: 10px;
-    color: #6e7681;
+    color: var(--color-text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -272,19 +274,19 @@
     height: 16px;
     background: none;
     border: none;
-    color: #6e7681;
+    color: var(--color-text-muted);
     font-size: 14px;
     line-height: 1;
     cursor: pointer;
     padding: 0;
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     opacity: 0;
-    transition: opacity 80ms ease, background 80ms ease, color 80ms ease;
+    transition: opacity var(--duration-instant) ease, background var(--duration-instant) ease, color var(--duration-instant) ease;
   }
 
   .close-btn:hover {
-    background: rgba(248, 81, 73, 0.15);
-    color: #f85149;
+    background: var(--color-danger-muted);
+    color: var(--color-danger);
   }
 
   /* ── Empty state ── */
@@ -292,9 +294,10 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 6px;
+    gap: var(--space-3);
     padding: 32px 16px;
-    color: #484f58;
+    color: var(--color-text-disabled);
+    animation: fadeIn var(--duration-smooth) var(--ease-out);
   }
 
   .empty-icon {
@@ -304,25 +307,25 @@
 
   .empty-text {
     font-size: 11px;
-    color: #484f58;
+    color: var(--color-text-disabled);
   }
 
   .empty-new-btn {
-    margin-top: 4px;
-    background: #21262d;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #8b949e;
+    margin-top: var(--space-2);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-lg);
+    color: var(--color-text-tertiary);
     font-family: inherit;
     font-size: 11px;
-    padding: 4px 12px;
+    padding: var(--space-2) 12px;
     cursor: pointer;
-    transition: background 80ms ease, color 80ms ease;
+    transition: background var(--duration-instant) ease, color var(--duration-instant) ease;
   }
 
   .empty-new-btn:hover {
-    background: #388bfd22;
-    color: #58a6ff;
-    border-color: #388bfd44;
+    background: var(--color-accent-blue-subtle);
+    color: var(--color-accent-blue);
+    border-color: var(--color-accent-blue-muted);
   }
 </style>

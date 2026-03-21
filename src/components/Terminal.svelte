@@ -163,17 +163,17 @@
     flex-direction: column;
     flex: 1;
     overflow: hidden;
-    background: #000000;
+    background: var(--color-bg-inset);
   }
 
   .session-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 32px;
+    height: var(--session-header-height, 32px);
     padding: 0 14px;
-    background: #161b22;
-    border-bottom: 1px solid #30363d;
+    background: var(--color-bg-elevated);
+    border-bottom: 1px solid var(--color-border-default);
     flex-shrink: 0;
     user-select: none;
   }
@@ -181,7 +181,7 @@
   .session-identity {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-4);
   }
 
   .status-dot {
@@ -189,14 +189,14 @@
     height: 7px;
     border-radius: 50%;
     flex-shrink: 0;
-    transition: background 400ms ease, box-shadow 400ms ease;
+    transition: background var(--duration-gentle) ease, box-shadow var(--duration-gentle) ease;
   }
 
   .session-name {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 500;
-    color: #c9d1d9;
+    color: var(--color-text-secondary);
     letter-spacing: 0.01em;
   }
 
@@ -207,9 +207,9 @@
   }
 
   .session-cwd {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--font-mono);
     font-size: 10px;
-    color: #484f58;
+    color: var(--color-text-disabled);
     max-width: 300px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -217,21 +217,21 @@
   }
 
   .session-status-label {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 400;
     letter-spacing: 0.03em;
-    transition: color 400ms ease;
+    transition: color var(--duration-gentle) ease;
   }
 
   .terminal-wrap {
     flex: 1;
-    padding: 6px 4px 4px;
-    background: #000000;
+    padding: var(--space-3) var(--space-2) var(--space-2);
+    background: var(--color-bg-inset);
     overflow: hidden;
   }
 
   .terminal-wrap :global(.xterm) { height: 100%; }
-  .terminal-wrap :global(.xterm-viewport) { background: #000000 !important; }
-  .terminal-wrap :global(.xterm-screen) { background: #000000; }
+  .terminal-wrap :global(.xterm-viewport) { background: var(--color-bg-inset) !important; }
+  .terminal-wrap :global(.xterm-screen) { background: var(--color-bg-inset); }
 </style>

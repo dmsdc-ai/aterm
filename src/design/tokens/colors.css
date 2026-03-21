@@ -1,0 +1,86 @@
+/* ================================================================
+ * aterm Design Tokens — Colors
+ * GitHub Dark palette, systematized with semantic layers
+ * ================================================================ */
+
+:root {
+  /* ── Background Scale (darkest → lightest) ──────────────── */
+  --color-bg-base:        #0d1117;   /* page background */
+  --color-bg-elevated:    #161b22;   /* cards, panels, header */
+  --color-bg-overlay:     #1c2128;   /* dropdowns, tooltips */
+  --color-bg-raised:      #21262d;   /* buttons, badges, inputs */
+  --color-bg-inset:       #010409;   /* terminal, inset areas */
+
+  /* ── Border Scale ───────────────────────────────────────── */
+  --color-border-subtle:  #21262d;   /* section dividers */
+  --color-border-default: #30363d;   /* panel borders, inputs */
+  --color-border-strong:  #484f58;   /* emphasis borders */
+
+  /* ── Text Scale ─────────────────────────────────────────── */
+  --color-text-primary:   #e6edf3;   /* headings, selected items */
+  --color-text-secondary: #c9d1d9;   /* body text */
+  --color-text-tertiary:  #8b949e;   /* labels, meta info */
+  --color-text-muted:     #6e7681;   /* hints, timestamps */
+  --color-text-disabled:  #484f58;   /* disabled, placeholder */
+
+  /* ── Accent — Blue (primary action) ─────────────────────── */
+  --color-accent-blue:         #58a6ff;
+  --color-accent-blue-subtle:  rgba(88, 166, 255, 0.08);
+  --color-accent-blue-muted:   rgba(88, 166, 255, 0.15);
+  --color-accent-blue-strong:  #388bfd;
+
+  /* ── Semantic — Status ──────────────────────────────────── */
+  --color-success:             #3fb950;
+  --color-success-subtle:      rgba(63, 185, 80, 0.10);
+  --color-success-muted:       rgba(63, 185, 80, 0.20);
+
+  --color-danger:              #f85149;
+  --color-danger-subtle:       rgba(248, 81, 73, 0.10);
+  --color-danger-muted:        rgba(248, 81, 73, 0.15);
+
+  --color-warning:             #d29922;
+  --color-warning-subtle:      rgba(210, 153, 34, 0.10);
+
+  --color-info:                #58a6ff;
+
+  /* ── Semantic — Event types ─────────────────────────────── */
+  --color-event-inject:        #58a6ff;
+  --color-event-injection:     #3fb950;
+  --color-event-routed:        #d2a8ff;
+  --color-event-routed-bg:     #17141f;
+  --color-event-synthesis:     #f0883e;
+  --color-event-synthesis-bg:  #16120a;
+  --color-event-synthesis-text:#d4a96a;
+
+  /* ── Scrollbar ──────────────────────────────────────────── */
+  --color-scrollbar-thumb:     #30363d;
+  --color-scrollbar-hover:     #484f58;
+
+  /* ── Focus ──────────────────────────────────────────────── */
+  --color-focus-ring:          #58a6ff;
+
+  /* ── Overlay ────────────────────────────────────────────── */
+  --color-overlay-backdrop:    rgba(0, 0, 0, 0.72);
+
+  /* ── Header Gradient ────────────────────────────────────── */
+  --color-header-gradient-start: #1c2128;
+  --color-header-gradient-end:   #161b22;
+
+  /* ── xterm.js ANSI 16-color palette ─────────────────────── */
+  --term-black:          #484f58;
+  --term-red:            #f85149;
+  --term-green:          #3fb950;
+  --term-yellow:         #d29922;
+  --term-blue:           #58a6ff;
+  --term-magenta:        #bc8cff;
+  --term-cyan:           #39c5cf;
+  --term-white:          #b1bac4;
+  --term-bright-black:   #6e7681;
+  --term-bright-red:     #ff7b72;
+  --term-bright-green:   #56d364;
+  --term-bright-yellow:  #e3b341;
+  --term-bright-blue:    #79c0ff;
+  --term-bright-magenta: #d2a8ff;
+  --term-bright-cyan:    #56d4dd;
+  --term-bright-white:   #f0f6fc;
+}
