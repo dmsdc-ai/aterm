@@ -15,6 +15,7 @@
   let ac = null;
   let tc = null;
   let showPalette = false;
+  let showSettings = false;
   let refreshTimer = null;
   let theme = 'light';
 
@@ -77,14 +78,33 @@
 
   function initTheme() {
     const saved = localStorage.getItem('aterm-theme');
-    theme = saved || 'light';
-    document.documentElement.setAttribute('data-theme', theme);
+    if (saved === 'light' || saved === 'dark') {
+      theme = saved;
+      document.documentElement.setAttribute('data-theme', theme);
+    } else {
+      theme = 'system';
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+    }
   }
 
-  function toggleTheme() {
-    theme = theme === 'dark' ? 'light' : 'dark';
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('aterm-theme', theme);
+  function setTheme(value) {
+    theme = value;
+    localStorage.setItem('aterm-theme', value);
+    if (value === 'system') {
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+    } else {
+      document.documentElement.setAttribute('data-theme', value);
+    }
+  }
+
+  function handleSettingsClickOutside(e) {
+    const panel = document.querySelector('.settings-panel');
+    const btn = document.querySelector('.settings-btn');
+    if (panel && !panel.contains(e.target) && btn && !btn.contains(e.target)) {
+      showSettings = false;
+    }
   }
 
   async function initTelepty() {
@@ -166,7 +186,10 @@
       e.preventDefault();
       showPalette = !showPalette;
     }
-    if (e.key === 'Escape') showPalette = false;
+    if (e.key === 'Escape') {
+      showPalette = false;
+      showSettings = false;
+    }
   }
 </script>
 
@@ -192,22 +215,10 @@
       <span class="header-sep"></span>
       <span class="shortcut-hint">&#8984;K</span>
       <span class="header-sep"></span>
-      <button class="theme-toggle" on:click={toggleTheme} type="button" aria-label="Toggle theme">
-        <!-- sun icon — shown in dark mode -->
-        <svg class="icon-sun" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="7" cy="7" r="3"/>
-          <line x1="7" y1="0.5" x2="7" y2="2"/>
-          <line x1="7" y1="12" x2="7" y2="13.5"/>
-          <line x1="0.5" y1="7" x2="2" y2="7"/>
-          <line x1="12" y1="7" x2="13.5" y2="7"/>
-          <line x1="2.4" y1="2.4" x2="3.5" y2="3.5"/>
-          <line x1="10.5" y1="10.5" x2="11.6" y2="11.6"/>
-          <line x1="11.6" y1="2.4" x2="10.5" y2="3.5"/>
-          <line x1="3.5" y1="10.5" x2="2.4" y2="11.6"/>
-        </svg>
-        <!-- moon icon — shown in light mode -->
-        <svg class="icon-moon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12.5 7.8A5.5 5.5 0 1 1 6.2 1.5a4.5 4.5 0 0 0 6.3 6.3z"/>
+      <button class="settings-btn" on:click={() => showSettings = !showSettings} type="button" aria-label="Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+          <circle cx="12" cy="12" r="3"/>
         </svg>
       </button>
     </div>
@@ -268,6 +279,28 @@
       <Timeline />
     </aside>
   </div>
+
+  {#if showSettings}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="settings-overlay" on:mousedown={handleSettingsClickOutside}>
+      <div class="settings-panel">
+        <div class="settings-section">
+          <div class="settings-label">Theme</div>
+          <div class="theme-options">
+            <button class:active={theme === 'light'} on:click={() => setTheme('light')} type="button">
+              ☀ Light
+            </button>
+            <button class:active={theme === 'dark'} on:click={() => setTheme('dark')} type="button">
+              ☾ Dark
+            </button>
+            <button class:active={theme === 'system'} on:click={() => setTheme('system')} type="button">
+              ⚙ System
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if showPalette}
     <CommandPalette on:close={() => showPalette = false} />
@@ -359,7 +392,7 @@
     color: var(--text-disabled);
   }
 
-  .theme-toggle {
+  .settings-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -375,17 +408,72 @@
     color: var(--toggle-icon);
   }
 
-  .theme-toggle:hover  { background: var(--border-default); }
-  .theme-toggle:active { transform: scale(0.92); }
+  .settings-btn:hover  { background: var(--border-default); }
+  .settings-btn:active { transform: scale(0.92); }
 
-  .theme-toggle :global(svg) {
-    width: 14px;
-    height: 14px;
-    stroke: currentColor;
-    fill: none;
-    stroke-width: 1.5;
-    stroke-linecap: round;
-    stroke-linejoin: round;
+  .settings-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+  }
+
+  .settings-panel {
+    position: fixed;
+    top: 48px;
+    right: 16px;
+    width: 240px;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg, 12px);
+    padding: 16px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    z-index: 100;
+    animation: fadeIn 120ms ease;
+  }
+
+  .settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .settings-label {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+
+  .theme-options {
+    display: flex;
+    gap: 6px;
+  }
+
+  .theme-options button {
+    flex: 1;
+    padding: 6px 4px;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--bg-inset);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+    white-space: nowrap;
+  }
+
+  .theme-options button:hover {
+    background: var(--border-default);
+    color: var(--text-primary);
+  }
+
+  .theme-options button.active {
+    background: var(--accent, #d97706);
+    border-color: var(--accent, #d97706);
+    color: #fff;
   }
 
   /* ── Layout ── */
