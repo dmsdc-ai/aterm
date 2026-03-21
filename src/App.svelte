@@ -1,11 +1,9 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { AtermClient } from './lib/aterm-client.js';
-  import { TeleptClient } from './lib/telepty-client.js';
   import {
     atermClient, atermConnected, workspaces, activeWorkspaceId,
-    refreshWorkspaces, addBusEvent,
-    client, sessions, teleptConnected, selectedSessionId, viewMode,
+    refreshWorkspaces,
   } from './lib/stores.js';
   import SessionTree from './components/SessionTree.svelte';
   import Timeline from './components/Timeline.svelte';
@@ -13,7 +11,6 @@
   import CommandPalette from './components/CommandPalette.svelte';
 
   let ac = null;
-  let tc = null;
   let showPalette = false;
   let showSettings = false;
   let refreshTimer = null;
@@ -82,9 +79,8 @@
       theme = saved;
       document.documentElement.setAttribute('data-theme', theme);
     } else {
-      theme = 'system';
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+      theme = 'light';
+      document.documentElement.setAttribute('data-theme', 'light');
     }
   }
 
@@ -107,35 +103,30 @@
     }
   }
 
-  async function initTelepty() {
+  async function createWorkspaceFromFolder(event) {
+    const { cwd } = event.detail;
     try {
-      tc = new TeleptClient();
-      client.set(tc); // Set client immediately so Terminal can attach
-      await tc.loadToken().catch(() => {}); // Token is optional
-      try {
-        const list = await tc.getSessions();
-        sessions.set(Array.isArray(list) ? list : (list.sessions || []));
-      } catch (e) {
-        console.warn('[App] getSessions failed (CORS?), sessions will load from sidebar polling:', e.message);
-      }
-      teleptConnected.set(true);
-
-      tc.connectBus(async (msg) => {
-        addBusEvent(msg);
-        if (msg.type === 'session_created' || msg.type === 'session_closed' ||
-            msg.type === 'session_started' || msg.type === 'session_stopped' ||
-            msg.event === 'created' || msg.event === 'closed') {
-          try {
-            const updated = await tc.getSessions();
-            sessions.set(updated);
-          } catch (e) {
-            console.warn('[App] telepty session refresh failed:', e.message);
-          }
-        }
+      const response = await fetch('/api/create-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd, command: 'claude', args: ['--dangerously-skip-permissions'] }),
       });
+      const data = await response.json();
+      if (!data.ok) {
+        console.error('[App] createWorkspace failed:', data.error);
+      }
     } catch (e) {
-      console.warn('[App] telepty init failed (daemon may be offline):', e.message);
-      teleptConnected.set(false);
+      console.error('[App] createWorkspace failed:', e.message);
+    }
+    if (ac) {
+      await refreshWorkspaces(ac);
+      // Auto-select newest workspace
+      let list;
+      const unsub = workspaces.subscribe(v => { list = v; });
+      unsub();
+      if (list && list.length > 0) {
+        activeWorkspaceId.set(list[list.length - 1].id);
+      }
     }
   }
 
@@ -172,42 +163,13 @@
     ac.on('closed',  async () => { await refreshWorkspaces(ac); });
 
     refreshTimer = setInterval(() => refreshWorkspaces(ac), 5000);
-    initTelepty();
   });
 
   onDestroy(() => {
     if (refreshTimer) clearInterval(refreshTimer);
     if (ac) ac.destroy();
-    if (tc) tc.destroy();
   });
 
-  async function createSession(event) {
-    const { path, id } = event.detail;
-    try {
-      const response = await fetch('/api/create-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, cwd: path }),
-      });
-      const data = await response.json();
-      if (!data.ok) {
-        console.error('[App] createSession server error:', data.error);
-      }
-    } catch (e) {
-      console.error('[App] createSession failed:', e.message);
-    }
-    // Refresh session list and auto-select
-    if (tc) {
-      try {
-        const list = await tc.getSessions();
-        sessions.set(Array.isArray(list) ? list : (list.sessions || []));
-      } catch (e) {
-        console.warn('[App] getSessions after createSession failed:', e.message);
-      }
-    }
-    selectedSessionId.set(id);
-    activeWorkspaceId.set(null);
-  }
 
   function handleKeydown(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -248,7 +210,7 @@
   <!-- MAIN 3-PANEL -->
   <div class="panels">
     <aside class="sidebar" style="width: {sidebarWidth}px">
-      <SessionTree on:settings={() => showSettings = !showSettings} on:create-session={createSession} />
+      <SessionTree on:settings={() => showSettings = !showSettings} on:create-workspace={createWorkspaceFromFolder} />
     </aside>
 
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -261,9 +223,7 @@
     ></div>
 
     <main class="center">
-      {#if $selectedSessionId}
-        <Terminal workspaceId={$activeWorkspaceId} sessionId={$selectedSessionId} />
-      {:else if $activeWorkspaceId}
+      {#if $activeWorkspaceId}
         <Terminal workspaceId={$activeWorkspaceId} />
       {:else}
         <div class="empty">

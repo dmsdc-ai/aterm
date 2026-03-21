@@ -1,5 +1,8 @@
 <script>
-  import { busEvents, selectedSession } from '../lib/stores.js';
+  import { activeWorkspace } from '../lib/stores.js';
+
+  // Empty event list (telepty bus removed)
+  const busEvents = { subscribe: (fn) => { fn([]); return () => {}; } };
   import { afterUpdate } from 'svelte';
 
   let eventsEl;
@@ -81,29 +84,29 @@
   </div>
 
   <!-- Session info -->
-  {#if $selectedSession}
+  {#if $activeWorkspace}
     <div class="session-info">
       <div class="info-grid">
         <span class="info-key">id</span>
-        <span class="info-val">{$selectedSession.id}</span>
+        <span class="info-val">{$activeWorkspace.id}</span>
 
         <span class="info-key">cmd</span>
-        <span class="info-val info-mono">{$selectedSession.command || '—'}</span>
+        <span class="info-val info-mono">{$activeWorkspace.command || '—'}</span>
 
         <span class="info-key">cwd</span>
-        <span class="info-val info-mono info-truncate" title={$selectedSession.cwd}>{$selectedSession.cwd || '—'}</span>
+        <span class="info-val info-mono info-truncate" title={$activeWorkspace.cwd}>{$activeWorkspace.cwd || '—'}</span>
 
         <span class="info-key">clients</span>
-        <span class="info-val">{$selectedSession.active_clients ?? 0}</span>
+        <span class="info-val">{$activeWorkspace.active_clients ?? 0}</span>
 
         <span class="info-key">idle</span>
-        <span class="info-val">{$selectedSession.idleSeconds ?? 0}s</span>
+        <span class="info-val">{$activeWorkspace.idleSeconds ?? 0}s</span>
 
         <span class="info-key">machine</span>
-        {#if $selectedSession.machine && $selectedSession.machine !== 'localhost' && $selectedSession.machine !== '127.0.0.1'}
-          <span class="info-val remote-badge">{$selectedSession.machine}</span>
-        {:else if $selectedSession.host && $selectedSession.host !== 'localhost' && $selectedSession.host !== '127.0.0.1'}
-          <span class="info-val remote-badge">{$selectedSession.host}</span>
+        {#if $activeWorkspace.machine && $activeWorkspace.machine !== 'localhost' && $activeWorkspace.machine !== '127.0.0.1'}
+          <span class="info-val remote-badge">{$activeWorkspace.machine}</span>
+        {:else if $activeWorkspace.host && $activeWorkspace.host !== 'localhost' && $activeWorkspace.host !== '127.0.0.1'}
+          <span class="info-val remote-badge">{$activeWorkspace.host}</span>
         {:else}
           <span class="info-val local-badge">local</span>
         {/if}

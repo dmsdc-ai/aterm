@@ -1,41 +1,31 @@
 <script>
   import { onMount } from 'svelte';
   import { createEventDispatcher } from 'svelte';
-  import { sessions, client, selectedSessionId } from '../lib/stores.js';
+  import { workspaces, activeWorkspaceId, atermClient } from '../lib/stores.js';
 
   const dispatch = createEventDispatcher();
   let query = '';
   let inputEl;
-  let injectEl;
-  let tc = null;
-  client.subscribe(v => { tc = v; });
-
-  let injectMode = null;
-  let injectText = '';
 
   onMount(() => {
     inputEl?.focus();
   });
 
-  $: actions = buildActions(query, $sessions);
+  $: actions = buildActions(query, $workspaces);
 
-  function buildActions(q, sessionList) {
+  function buildActions(q, wsList) {
     const items = [];
     const lower = q.toLowerCase();
 
-    for (const s of sessionList) {
-      const name = s.id.replace(/^aigentry-/, '').replace(/-claude$/, '');
-      if (!q || name.includes(lower) || s.id.includes(lower)) {
-        items.push({ type: 'select', label: `Open ${name}`, id: s.id, category: 'session', glyph: '▸' });
-        items.push({ type: 'inject', label: `Inject to ${name}`, id: s.id, category: 'inject', glyph: '↗' });
+    for (const ws of wsList) {
+      const name = ws.cwd ? ws.cwd.split('/').pop() : ws.id;
+      if (!q || name.toLowerCase().includes(lower) || ws.id.toLowerCase().includes(lower)) {
+        items.push({ type: 'select', label: `Open ${name}`, id: ws.id, category: 'session', glyph: '▸' });
       }
     }
 
-    if (!q || 'broadcast'.includes(lower)) {
-      items.push({ type: 'broadcast', label: 'Broadcast to all sessions', category: 'action', glyph: '◈' });
-    }
-    if (!q || 'refresh'.includes(lower)) {
-      items.push({ type: 'refresh', label: 'Refresh session list', category: 'action', glyph: '↺' });
+    if (!q || 'new'.includes(lower) || 'create'.includes(lower)) {
+      items.push({ type: 'new', label: 'New session...', category: 'action', glyph: '+' });
     }
 
     return items.slice(0, 15);
@@ -44,75 +34,32 @@
   let selectedIndex = 0;
   $: if (actions.length > 0 && selectedIndex >= actions.length) selectedIndex = 0;
 
-  function startInject(action) {
-    if (action.type === 'inject') {
-      const name = action.id.replace(/^aigentry-/, '').replace(/-claude$/, '');
-      injectMode = { type: 'inject', id: action.id, label: `Inject to ${name}` };
-    } else if (action.type === 'broadcast') {
-      injectMode = { type: 'broadcast', label: 'Broadcast to all' };
-    }
-    injectText = '';
-    setTimeout(() => injectEl?.focus(), 0);
-  }
-
-  async function commitInject() {
-    if (!injectText.trim() || !injectMode) return;
-    if (injectMode.type === 'inject' && tc) {
-      await tc.inject(injectMode.id, injectText);
-    } else if (injectMode.type === 'broadcast' && tc) {
-      await tc.broadcast(injectText);
-    }
-    injectMode = null;
-    injectText = '';
-    dispatch('close');
-  }
-
-  function cancelInject() {
-    injectMode = null;
-    injectText = '';
-    setTimeout(() => inputEl?.focus(), 0);
-  }
-
-  async function execute(action) {
+  function execute(action) {
     if (action.type === 'select') {
-      selectedSessionId.set(action.id);
+      activeWorkspaceId.set(action.id);
       dispatch('close');
-    } else if (action.type === 'inject' || action.type === 'broadcast') {
-      startInject(action);
-    } else if (action.type === 'refresh') {
-      if (tc) {
-        const list = await tc.getSessions();
-        sessions.set(list);
-      }
+    } else if (action.type === 'new') {
       dispatch('close');
+      // Trigger new session dialog — handled by parent
     }
   }
 
   function handleKey(e) {
-    if (injectMode) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1, actions.length - 1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1, 0); }
     else if (e.key === 'Enter' && actions[selectedIndex]) { e.preventDefault(); execute(actions[selectedIndex]); }
     else if (e.key === 'Escape') dispatch('close');
   }
 
-  function handleInjectKey(e) {
-    if (e.key === 'Enter') { e.preventDefault(); commitInject(); }
-    else if (e.key === 'Escape') { e.preventDefault(); cancelInject(); }
-  }
-
-  // Category badge styles
   function categoryColor(cat) {
-    if (cat === 'session') return '#58a6ff22';
-    if (cat === 'inject') return '#3fb95022';
-    if (cat === 'action') return '#d2992222';
+    if (cat === 'session') return 'var(--accent-subtle, #d9770622)';
+    if (cat === 'action') return 'var(--accent-subtle, #d9770622)';
     return 'transparent';
   }
   function categoryTextColor(cat) {
-    if (cat === 'session') return '#58a6ff';
-    if (cat === 'inject') return '#3fb950';
-    if (cat === 'action') return '#d29922';
-    return '#8b949e';
+    if (cat === 'session') return 'var(--accent, #d97706)';
+    if (cat === 'action') return 'var(--text-secondary)';
+    return 'var(--text-tertiary)';
   }
 </script>
 
@@ -129,30 +76,6 @@
 >
   <div class="palette" on:click|stopPropagation role="presentation">
 
-    {#if injectMode}
-      <!-- Inject / Broadcast mode -->
-      <div class="inject-panel">
-        <div class="inject-top">
-          <span class="inject-glyph">↗</span>
-          <span class="inject-label">{injectMode.label}</span>
-          <button class="inject-cancel-btn" on:click={cancelInject}>esc</button>
-        </div>
-        <input
-          bind:this={injectEl}
-          bind:value={injectText}
-          on:keydown={handleInjectKey}
-          placeholder="Type your message and press Enter to send..."
-          class="inject-input"
-          autocomplete="off"
-          spellcheck="false"
-        />
-        <div class="inject-footer">
-          <span class="hint"><kbd>Enter</kbd> send</span>
-          <span class="hint"><kbd>Esc</kbd> cancel</span>
-        </div>
-      </div>
-
-    {:else}
       <!-- Search mode -->
       <div class="search-row">
         <span class="search-icon">
@@ -208,7 +131,6 @@
         <span class="hint"><kbd>Enter</kbd> select</span>
         <span class="hint"><kbd>Esc</kbd> close</span>
       </div>
-    {/if}
 
   </div>
 </div>

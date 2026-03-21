@@ -1,118 +1,48 @@
 <script>
-  import { workspaces, activeWorkspaceId, atermConnected, atermClient, refreshWorkspaces,
-           sessions, selectedSessionId, sessionTree, client, connected } from '../lib/stores.js';
-  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { workspaces, activeWorkspaceId, atermConnected, atermClient, refreshWorkspaces } from '../lib/stores.js';
+  import { onDestroy, createEventDispatcher } from 'svelte';
 
   const dispatch = createEventDispatcher();
   function onSettingsClick() { dispatch('settings'); }
 
-  let refreshInterval;
-
   async function openFolderDialog() {
     try {
-      // Use Tauri native dialog
       const { open } = await import('@tauri-apps/plugin-dialog');
       const folders = await open({ directory: true, multiple: true, title: 'Select project folders' });
       if (!folders || folders.length === 0) return;
 
       const folderList = Array.isArray(folders) ? folders : [folders];
-
-      let currentSessions;
-      const unsub = sessions.subscribe(v => { currentSessions = v; });
-      unsub();
-
       let firstNewId = null;
 
       for (const folderPath of folderList) {
-        const parts = folderPath.replace(/\/+$/, '').split('/');
-        const folderName = parts[parts.length - 1] || 'session';
-        const sessionId = folderName + '-claude';
-
-        // Check if session already exists
-        const existing = Array.isArray(currentSessions)
-          ? currentSessions.find(s => s.id === sessionId)
-          : null;
-
-        if (existing) {
-          if (!firstNewId) firstNewId = sessionId;
-          continue;
-        }
-
-        dispatch('create-session', { path: folderPath, id: sessionId });
-        if (!firstNewId) firstNewId = sessionId;
+        const id = await createWorkspaceFromPath(folderPath);
+        if (!firstNewId) firstNewId = id;
       }
 
-      // Auto-select first session
       if (firstNewId) {
-        selectedSessionId.set(firstNewId);
-        activeWorkspaceId.set(null);
+        activeWorkspaceId.set(firstNewId);
       }
     } catch (e) {
       console.warn('[SessionTree] folder dialog failed:', e.message);
       // Fallback: simple prompt for non-Tauri environments
       const path = window.prompt('Enter project path:');
       if (path) {
-        const parts = path.replace(/\/+$/, '').split('/');
-        const folderName = parts[parts.length - 1] || 'session';
-        dispatch('create-session', { path, id: folderName + '-claude' });
+        const id = await createWorkspaceFromPath(path);
+        if (id) activeWorkspaceId.set(id);
       }
     }
   }
 
-  onMount(() => {
-    refreshTeleptySessions();
-    refreshInterval = setInterval(refreshTeleptySessions, 5000);
-  });
-
-  onDestroy(() => {
-    clearInterval(refreshInterval);
-  });
-
-  async function refreshTeleptySessions() {
-    let c;
-    const unsub = client.subscribe(v => { c = v; });
-    unsub();
-    if (!c) return;
-    try {
-      const list = await c.getSessions();
-      sessions.set(Array.isArray(list) ? list : (list.sessions || []));
-      connected.set(true);
-    } catch {
-      connected.set(false);
-    }
-  }
-
-  function selectSession(id) {
-    selectedSessionId.set(id);
-    activeWorkspaceId.set(null);
+  async function createWorkspaceFromPath(folderPath) {
+    dispatch('create-workspace', { cwd: folderPath });
+    // Return a predictable id based on path so we can auto-select
+    // The actual id is assigned server-side; we'll just let App.svelte
+    // refresh the list and pick the newest workspace.
+    return null;
   }
 
   function selectWorkspace(id) {
     activeWorkspaceId.set(id);
-    selectedSessionId.set(null);
-  }
-
-  function sessionName(s) {
-    return s.id || s.name || 'unknown';
-  }
-
-  function sessionStatus(s) {
-    if (s.status === 'active' || s.pid) return 'active';
-    return 'idle';
-  }
-
-  async function createWorkspace() {
-    let ac;
-    const unsub = atermClient.subscribe(v => { ac = v; });
-    unsub();
-    if (!ac) return;
-    try {
-      const id = await ac.newWorkspace({});
-      await refreshWorkspaces(ac);
-      activeWorkspaceId.set(id);
-    } catch (e) {
-      console.warn('[SessionTree] createWorkspace failed:', e.message);
-    }
   }
 
   async function closeWorkspace(id, e) {
@@ -123,7 +53,10 @@
     if (!ac) return;
     try {
       await ac.closeWorkspace(id);
-      await refreshWorkspaces(ac);
+      let ac2;
+      const unsub2 = atermClient.subscribe(v => { ac2 = v; });
+      unsub2();
+      await refreshWorkspaces(ac2);
       activeWorkspaceId.update(cur => cur === id ? null : cur);
     } catch (err) {
       console.warn('[SessionTree] closeWorkspace failed:', err.message);
@@ -135,9 +68,12 @@
     return 'var(--status-active)';
   }
 
-  function shortId(id) {
-    if (id === 'default') return 'default';
-    return id.replace(/^ws-/, '').replace(/-[^-]+$/, '');
+  function sessionName(ws) {
+    if (ws.cwd) {
+      const parts = ws.cwd.replace(/\/+$/, '').split('/');
+      return parts[parts.length - 1] || ws.id;
+    }
+    return ws.id.replace(/^ws-/, '').replace(/-[^-]+$/, '') || ws.id;
   }
 
   function shortCwd(cwd) {
@@ -145,170 +81,59 @@
     const home = '/Users/' + (cwd.split('/')[2] || '');
     return cwd.replace(home, '~');
   }
-
-  // Map session name to Lucide SVG path(s) — 24x24 viewBox, stroke-width 1.5
-  function sessionIconPaths(name) {
-    const n = (name || '').toLowerCase();
-    if (n === 'orchestrator') return 'orchestrator';
-    if (n === 'amplify')      return 'amplify';
-    if (n === 'brain')        return 'brain';
-    if (n === 'deliberation') return 'deliberation';
-    if (n === 'devkit')       return 'devkit';
-    if (n === 'dustcraw')     return 'dustcraw';
-    if (n === 'registry')     return 'registry';
-    if (n === 'ssot')         return 'ssot';
-    if (n === 'telepty')      return 'telepty';
-    if (n === 'aterm')        return 'terminal';
-    return 'terminal';
-  }
 </script>
 
 <div class="tree">
 
   <!-- ── SESSIONS section ── -->
   <div class="section-header-row">
-    <span class="section-label" style="padding: 0; margin-bottom: 0;">Sessions</span>
+    <span class="section-label">Sessions</span>
     <button
       class="add-btn"
       on:click={openFolderDialog}
       title="New session"
-      aria-label="Create session"
-    >+</button>
-  </div>
-
-  {#if $connected}
-    {#each Object.entries($sessionTree) as [project, projectSessions]}
-      <div class="group-label">{project}</div>
-      {#each projectSessions as s}
-        {@const name = sessionName(s)}
-        {@const status = sessionStatus(s)}
-        {@const icon = sessionIconPaths(name)}
-        {@const isSelected = $selectedSessionId === s.id}
-        <div
-          class="session-row"
-          class:selected={isSelected}
-          class:state-running={status === 'active'}
-          class:state-idle={status !== 'active'}
-          on:click={() => selectSession(s.id)}
-          on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && selectSession(s.id)}
-          role="button"
-          tabindex="0"
-        >
-          <span class="session-icon">
-            {#if icon === 'orchestrator'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>
-              </svg>
-            {:else if icon === 'amplify'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="m3 11 18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>
-              </svg>
-            {:else if icon === 'brain'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-                <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-                <path d="M12 5v13"/>
-              </svg>
-            {:else if icon === 'deliberation'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-              </svg>
-            {:else if icon === 'devkit'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-              </svg>
-            {:else if icon === 'dustcraw'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/>
-                <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/>
-                <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/>
-                <path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/>
-                <path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/>
-                <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/>
-                <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/>
-              </svg>
-            {:else if icon === 'registry'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/>
-                <path d="M8.5 2h7"/><path d="M7 16.5h10"/>
-              </svg>
-            {:else if icon === 'ssot'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <rect width="8" height="4" x="8" y="2" rx="1" ry="1"/>
-                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
-                <path d="m9 14 2 2 4-4"/>
-              </svg>
-            {:else if icon === 'telepty'}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>
-              </svg>
-            {:else}
-              <!-- terminal (default) -->
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>
-              </svg>
-            {/if}
-          </span>
-          <div class="session-info">
-            <span class="session-name">{name}</span>
-            <span class="session-meta">{s.host || 'Local'}</span>
-          </div>
-        </div>
-      {/each}
-    {/each}
-  {:else}
-    <div class="offline-msg">telepty offline</div>
-  {/if}
-
-  <div class="section-spacer"></div>
-
-  <!-- ── WORKSPACES section ── -->
-  <div class="section-header-row">
-    <span class="section-label" style="padding: 0; margin-bottom: 0;">Workspaces</span>
-    <button
-      class="add-btn"
-      on:click={createWorkspace}
-      title="New workspace"
       disabled={!$atermConnected}
-      aria-label="Create workspace"
+      aria-label="Create session"
     >+</button>
   </div>
 
   {#each $workspaces as ws}
     <div
-      class="workspace-row"
+      class="session-row"
       class:selected={$activeWorkspaceId === ws.id}
+      class:state-running={ws.status !== 'dead'}
+      class:state-idle={ws.status === 'dead'}
       on:click={() => selectWorkspace(ws.id)}
       on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && selectWorkspace(ws.id)}
       role="button"
       tabindex="0"
     >
-      <span class="workspace-icon">
+      <span class="session-icon">
         <!-- terminal icon -->
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>
         </svg>
       </span>
-      <div class="workspace-info">
-        <span class="workspace-name">{shortId(ws.id)}</span>
-        <span class="workspace-meta">{ws.status === 'dead' ? 'Dead' : 'Active'}</span>
+      <div class="session-info">
+        <span class="session-name">{sessionName(ws)}</span>
+        <span class="session-meta">{ws.status === 'dead' ? 'dead' : 'active'}</span>
       </div>
       <button
         class="close-btn"
         on:click={(e) => closeWorkspace(ws.id, e)}
-        title="Close workspace"
+        title="Close session"
       >×</button>
     </div>
   {/each}
 
   {#if $workspaces.length === 0 && $atermConnected}
     <div class="empty-state">
-      <span class="empty-text">No workspaces yet</span>
-      <button class="empty-new-btn" on:click={createWorkspace}>
+      <span class="empty-text">No sessions yet</span>
+      <button class="empty-new-btn" on:click={openFolderDialog}>
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
           <path d="M5 1V9M1 5H9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
         </svg>
-        Create workspace
+        New session
       </button>
     </div>
   {/if}
@@ -339,7 +164,7 @@
     min-height: 100%;
   }
 
-  /* ── Section labels ── */
+  /* ── Section label ── */
   .section-label {
     font-family: var(--font-sans);
     font-size: 11px;
@@ -347,23 +172,9 @@
     color: var(--text-muted);
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    padding: 0 16px;
-    margin-bottom: 8px;
     user-select: none;
     -webkit-user-select: none;
   }
-
-  .group-label {
-    font-family: var(--font-sans);
-    font-size: 10px;
-    font-weight: 400;
-    color: var(--text-disabled);
-    padding: 4px 16px;
-    user-select: none;
-    -webkit-user-select: none;
-  }
-
-  .section-spacer { height: 20px; }
 
   .section-header-row {
     display: flex;
@@ -400,6 +211,8 @@
   }
 
   .session-row.selected:hover { background: var(--bg-sidebar-selected); }
+
+  .session-row:hover .close-btn { opacity: 1; }
 
   /* Icon states */
   .session-icon {
@@ -440,72 +253,6 @@
   .session-row.selected .session-name { color: var(--text-primary); }
 
   .session-meta {
-    font-family: var(--font-sans);
-    font-size: 10px;
-    color: var(--text-disabled);
-    flex-shrink: 0;
-    margin-left: auto;
-  }
-
-  /* ── Workspace rows ── */
-  .workspace-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 16px;
-    cursor: pointer;
-    transition: background 150ms ease;
-    position: relative;
-    outline: none;
-  }
-
-  .workspace-row:hover { background: var(--bg-sidebar-hover); }
-  .workspace-row:active {
-    background: var(--bg-sidebar-selected);
-    transform: scale(0.995);
-  }
-
-  .workspace-row.selected {
-    background: var(--bg-sidebar-selected);
-    border-left: 2px solid var(--accent);
-    padding-left: 14px;
-  }
-
-  .workspace-row:hover .close-btn { opacity: 1; }
-
-  .workspace-icon {
-    flex-shrink: 0;
-    width: 16px;
-    height: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-tertiary);
-  }
-
-  .workspace-icon :global(svg) { width: 16px; height: 16px; }
-
-  .workspace-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  .workspace-name {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    line-height: 1.4;
-  }
-
-  .workspace-row.selected .workspace-name { color: var(--text-primary); }
-
-  .workspace-meta {
     font-family: var(--font-sans);
     font-size: 10px;
     color: var(--text-disabled);
@@ -603,74 +350,6 @@
     background: var(--accent-subtle);
     color: var(--accent);
     border-color: var(--accent-muted);
-  }
-
-  /* ── New session input ── */
-  .new-session-input-wrap {
-    position: relative;
-    padding: 4px 12px 8px;
-  }
-
-  .new-session-input {
-    width: 100%;
-    box-sizing: border-box;
-    background: var(--bg-inset, #1a1614);
-    border: 1px solid var(--accent-muted, rgba(217,119,6,0.3));
-    border-radius: var(--radius-sm, 4px);
-    color: var(--text-primary);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    padding: 5px 8px;
-    outline: none;
-    transition: border-color 150ms ease;
-  }
-
-  .new-session-input:focus {
-    border-color: var(--accent, #d97706);
-  }
-
-  .new-session-input::placeholder {
-    color: var(--text-disabled);
-  }
-
-  .path-suggestions {
-    position: absolute;
-    top: calc(100% - 4px);
-    left: 12px;
-    right: 12px;
-    background: var(--bg-sidebar, #1e1a17);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm, 4px);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    z-index: 50;
-    max-height: 180px;
-    overflow-y: auto;
-  }
-
-  .suggestion-item {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    padding: 5px 8px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    transition: background 100ms ease;
-  }
-
-  .suggestion-item:hover,
-  .suggestion-item.active {
-    background: var(--bg-sidebar-hover);
-    color: var(--text-primary);
-  }
-
-  /* ── Telepty offline ── */
-  .offline-msg {
-    font-size: 11px;
-    color: var(--text-disabled);
-    padding: 12px 16px;
-    font-style: italic;
   }
 
   /* ── Bottom ── */

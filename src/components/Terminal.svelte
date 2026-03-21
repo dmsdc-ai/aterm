@@ -2,11 +2,10 @@
   import { onMount, onDestroy } from 'svelte';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
-  import { atermClient, activeWorkspace, selectedSessionId, selectedSession, client, viewMode } from '../lib/stores.js';
+  import { atermClient, activeWorkspace } from '../lib/stores.js';
   import '@xterm/xterm/css/xterm.css';
 
   export let workspaceId;
-  export let sessionId = null;
 
   let termEl;
   let term = null;
@@ -14,21 +13,12 @@
   let unsubOutput = null;
   let resizeCleanup = null;
   let currentWorkspaceId = null;
-  let currentSessionId = null;
   let ac = null;
-  let tc = null; // telepty client
   let mounted = false;
-  let mode = 'workspace'; // 'workspace' | 'session'
 
   const unsubClient = atermClient.subscribe(v => {
     ac = v;
-    if (mounted && workspaceId && termEl && ac && mode === 'workspace') connect();
-  });
-
-  const unsubTeleptClient = client.subscribe(v => { tc = v; });
-
-  const unsubViewMode = viewMode.subscribe(v => {
-    mode = v;
+    if (mounted && workspaceId && termEl && ac) connect();
   });
 
   function statusColor(ws) {
@@ -51,11 +41,9 @@
   function cleanup() {
     if (resizeCleanup) { resizeCleanup(); resizeCleanup = null; }
     if (unsubOutput) { unsubOutput(); unsubOutput = null; }
-    if (currentSessionId && tc) { tc.detachSession(currentSessionId); }
     if (term) { term.dispose(); term = null; }
     fitAddon = null;
     currentWorkspaceId = null;
-    currentSessionId = null;
   }
 
   function getTermTheme() {
@@ -156,56 +144,6 @@
     resizeCleanup = () => resizeObserver.disconnect();
   }
 
-  function connectSession(sid) {
-    if (!tc || !sid || !termEl) return;
-
-    cleanup();
-    currentSessionId = sid;
-
-    term = new Terminal({
-      theme: getTermTheme(),
-      fontSize: 13,
-      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-      cursorBlink: true,
-      scrollback: 5000,
-      lineHeight: 1.4,
-    });
-
-    fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(termEl);
-    fitAddon.fit();
-    term.focus();
-
-    const myTerm = term;
-
-    tc.attachSession(sid, {
-      onOutput: (data) => {
-        if (currentSessionId === sid && term === myTerm) {
-          term.write(data);
-        }
-      },
-      onClose: () => {
-        if (currentSessionId === sid && term === myTerm) {
-          term.write('\r\n[session disconnected]\r\n');
-        }
-      }
-    });
-
-    term.onData((data) => {
-      if (currentSessionId === sid && tc) {
-        tc.sendInput(sid, data);
-      }
-    });
-
-    const resizeObserver = new ResizeObserver(() => {
-      if (!fitAddon || !term) return;
-      fitAddon.fit();
-    });
-    resizeObserver.observe(termEl);
-    resizeCleanup = () => resizeObserver.disconnect();
-  }
-
   onMount(() => {
     mounted = true;
     watchTheme();
@@ -216,47 +154,30 @@
     mounted = false;
     if (themeObserver) { themeObserver.disconnect(); themeObserver = null; }
     unsubClient();
-    unsubTeleptClient();
-    unsubViewMode();
     cleanup();
   });
 
   // Reconnect when workspaceId changes
-  $: if (mounted && workspaceId && termEl && ac && workspaceId !== currentWorkspaceId && mode === 'workspace') {
+  $: if (mounted && workspaceId && termEl && ac && workspaceId !== currentWorkspaceId) {
     connect();
-  }
-
-  // Connect to telepty session when sessionId changes
-  $: if (mounted && sessionId && termEl && tc && sessionId !== currentSessionId && mode === 'session') {
-    connectSession(sessionId);
   }
 </script>
 
 <div class="terminal-panel">
   <div class="session-header">
     <div class="session-identity">
-      {#if mode === 'session' && sessionId}
-        <span class="status-dot" style="background: var(--status-active); box-shadow: 0 0 5px rgba(92,185,122,0.53);"></span>
-        <span class="session-badge">SESSION</span>
-        <span class="session-name">{sessionId}</span>
-      {:else}
-        <span
-          class="status-dot"
-          style="background: {statusColor($activeWorkspace)}; box-shadow: 0 0 5px {statusColor($activeWorkspace)}88;"
-        ></span>
-        <span class="session-badge ws-badge">WORKSPACE</span>
-        <span class="session-name">{shortId(workspaceId)}</span>
-      {/if}
+      <span
+        class="status-dot"
+        style="background: {statusColor($activeWorkspace)}; box-shadow: 0 0 5px {statusColor($activeWorkspace)}88;"
+      ></span>
+      <span class="session-name">{shortId(workspaceId)}</span>
     </div>
     <div class="session-meta">
-      {#if mode === 'workspace' && $activeWorkspace?.cwd}
+      {#if $activeWorkspace?.cwd}
         <span class="session-cwd">{$activeWorkspace.cwd}</span>
       {/if}
-      {#if mode === 'session' && $selectedSession}
-        <span class="session-cwd">{$selectedSession.host || 'Local'}</span>
-      {/if}
-      <span class="session-status-label" style="color: {mode === 'session' ? '#3fb950' : statusColor($activeWorkspace)};">
-        {mode === 'session' ? 'attached' : statusLabel($activeWorkspace)}
+      <span class="session-status-label" style="color: {statusColor($activeWorkspace)};">
+        {statusLabel($activeWorkspace)}
       </span>
     </div>
   </div>
