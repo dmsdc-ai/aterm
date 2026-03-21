@@ -107,12 +107,15 @@ aigentry 에코시스템 공식 디자인 시스템. 모든 UI 컴포넌트는 �
 
 ## Brand
 
-### aigentry Mascot: `·⣿·`
-- 텍스트 기반 마스코트 (CSS only, SVG 불필요)
-- 구성: 청록 눈(`·`, #06b6d4) + 금색 브라유 코어(`⣿`, #d4a574)
-- 폰트: monospace, letter-spacing: -0.05em
-- animate=true: 코어 pulse (opacity 1↔0.6, 2s), 클릭 시 윙크, 눈 마우스 트래킹
-- 원본: `~/projects/aigentry-registry/frontend/src/components/mascot/AigentryMascot.tsx`
+### aigentry Mascot (Pixel Art SVG)
+- **형태:** 사각형 픽셀 아트 (SVG inline, 동그라미 없음)
+- **구성:** 청록 사각 눈 2개 + 금색 2x4 사각형 그리드 코어
+- **눈 색상:** 다크 #06b6d4 / 라이트 #0891b2
+- **코어 색상:** 다크 #d4a574 / 라이트 #996515
+- **SVG viewBox:** `0 0 24 28` — 눈 (4x4 rect x2) + 코어 (4x4 rect x8)
+- **animate:** 코어 pulse (opacity 1↔0.6, 2s)
+- **원본 참고:** `~/projects/aigentry-registry/frontend/src/components/mascot/AigentryMascot.tsx`
+- **프로필 참고:** `~/Downloads/aigentry-profile-v3.png`
 
 **배치 위치:**
 | 위치 | 크기 | animate |
@@ -147,6 +150,20 @@ aigentry 에코시스템 공식 디자인 시스템. 모든 UI 컴포넌트는 �
 | Workspace row | bg → sidebar-hover | scale(0.995) + bg → selected | — | 2px accent outline |
 | + 버튼 | bg → button-hover | scale(0.9) + accent color | — | 2px accent outline |
 | 테마 토글 | bg → border-default | scale(0.92) | — | 2px accent outline |
+
+### Brand Rule: 동그라미 금지, 사각형만
+
+**절대 규칙: aigentry 에코시스템에서 동그라미(circle) 패턴 사용 금지.**
+
+| 요소 | ❌ 금지 | ✅ 사용 |
+|------|--------|--------|
+| 마스코트 | 동그란 dot | 사각형 픽셀 |
+| 상태 표시 | ● (circle) | ■ (square, border-radius: 1px) |
+| 아이콘 형태 | 원형 기반 | 사각형 기반 |
+| 레전드 dot | 둥근 점 | 사각 점 |
+| 버튼 | — | border-radius OK (도형 자체는 사각형) |
+
+**이유:** aigentry 브랜드 아이덴티티 = 픽셀 아트 = 사각형
 
 ### Ecosystem Tone
 - 따뜻한 다크 브라운 (차가운 네이비/차콜 아님)
