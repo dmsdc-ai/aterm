@@ -7,6 +7,17 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    proxy: {
+      '/telepty': {
+        target: 'http://localhost:3849',
+        changeOrigin: true,
+        ws: true,
+      },
+      '/api': {
+        target: 'http://localhost:3849',
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     outDir: 'dist',

@@ -8,117 +8,53 @@
 
   let refreshInterval;
 
-  // New session input state
-  let showNewSessionInput = false;
-  let newSessionPath = '';
-  let newSessionInputEl;
-  let pathSuggestions = [];
-  let suggestionIndex = -1;
-
-  function openNewSessionInput() {
-    showNewSessionInput = true;
-    newSessionPath = '';
-    pathSuggestions = [];
-    suggestionIndex = -1;
-    // Auto-focus after Svelte renders
-    setTimeout(() => { if (newSessionInputEl) newSessionInputEl.focus(); }, 30);
-  }
-
-  function closeNewSessionInput() {
-    showNewSessionInput = false;
-    newSessionPath = '';
-    pathSuggestions = [];
-    suggestionIndex = -1;
-  }
-
-  async function fetchSuggestions(input) {
-    if (!input || input.length < 2) { pathSuggestions = []; return; }
+  async function openFolderDialog() {
     try {
-      const res = await fetch(`/api/suggest-paths?q=${encodeURIComponent(input)}`);
-      if (res.ok) {
-        const data = await res.json();
-        pathSuggestions = data.paths || [];
+      // Use Tauri native dialog
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const folders = await open({ directory: true, multiple: true, title: 'Select project folders' });
+      if (!folders || folders.length === 0) return;
+
+      const folderList = Array.isArray(folders) ? folders : [folders];
+
+      let currentSessions;
+      const unsub = sessions.subscribe(v => { currentSessions = v; });
+      unsub();
+
+      let firstNewId = null;
+
+      for (const folderPath of folderList) {
+        const parts = folderPath.replace(/\/+$/, '').split('/');
+        const folderName = parts[parts.length - 1] || 'session';
+        const sessionId = folderName + '-claude';
+
+        // Check if session already exists
+        const existing = Array.isArray(currentSessions)
+          ? currentSessions.find(s => s.id === sessionId)
+          : null;
+
+        if (existing) {
+          if (!firstNewId) firstNewId = sessionId;
+          continue;
+        }
+
+        dispatch('create-session', { path: folderPath, id: sessionId });
+        if (!firstNewId) firstNewId = sessionId;
       }
-    } catch {
-      pathSuggestions = [];
-    }
-  }
 
-  function handleNewSessionInput(e) {
-    newSessionPath = e.target.value;
-    suggestionIndex = -1;
-    fetchSuggestions(newSessionPath);
-  }
-
-  function selectSuggestion(p) {
-    newSessionPath = p;
-    pathSuggestions = [];
-    suggestionIndex = -1;
-    if (newSessionInputEl) newSessionInputEl.focus();
-  }
-
-  async function confirmNewSession() {
-    const rawPath = newSessionPath.trim();
-    if (!rawPath) { closeNewSessionInput(); return; }
-
-    // Expand ~ to home
-    const path = rawPath.startsWith('~/')
-      ? rawPath.replace('~', '/Users/' + (rawPath.split('/')[0] || ''))
-      : rawPath;
-
-    // Extract folder name
-    const parts = path.replace(/\/+$/, '').split('/');
-    const folderName = parts[parts.length - 1] || 'session';
-    const sessionId = folderName + '-claude';
-
-    // Check if session already exists
-    let currentSessions;
-    const unsub = sessions.subscribe(v => { currentSessions = v; });
-    unsub();
-    const existing = Array.isArray(currentSessions)
-      ? currentSessions.find(s => s.id === sessionId)
-      : null;
-
-    if (existing) {
-      selectedSessionId.set(sessionId);
-      activeWorkspaceId.set(null);
-      closeNewSessionInput();
-      return;
-    }
-
-    dispatch('create-session', { path, id: sessionId });
-    closeNewSessionInput();
-  }
-
-  function handleNewSessionKey(e) {
-    if (e.key === 'Escape') {
-      closeNewSessionInput();
-      return;
-    }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (pathSuggestions.length > 0) {
-        suggestionIndex = Math.min(suggestionIndex + 1, pathSuggestions.length - 1);
-        newSessionPath = pathSuggestions[suggestionIndex];
+      // Auto-select first session
+      if (firstNewId) {
+        selectedSessionId.set(firstNewId);
+        activeWorkspaceId.set(null);
       }
-      return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (pathSuggestions.length > 0 && suggestionIndex > 0) {
-        suggestionIndex = Math.max(suggestionIndex - 1, 0);
-        newSessionPath = pathSuggestions[suggestionIndex];
-      }
-      return;
-    }
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      if (suggestionIndex >= 0 && pathSuggestions[suggestionIndex]) {
-        newSessionPath = pathSuggestions[suggestionIndex];
-        pathSuggestions = [];
-        suggestionIndex = -1;
-      } else {
-        confirmNewSession();
+    } catch (e) {
+      console.warn('[SessionTree] folder dialog failed:', e.message);
+      // Fallback: simple prompt for non-Tauri environments
+      const path = window.prompt('Enter project path:');
+      if (path) {
+        const parts = path.replace(/\/+$/, '').split('/');
+        const folderName = parts[parts.length - 1] || 'session';
+        dispatch('create-session', { path, id: folderName + '-claude' });
       }
     }
   }
@@ -234,38 +170,11 @@
     <span class="section-label" style="padding: 0; margin-bottom: 0;">Sessions</span>
     <button
       class="add-btn"
-      on:click={openNewSessionInput}
+      on:click={openFolderDialog}
       title="New session"
       aria-label="Create session"
     >+</button>
   </div>
-
-  {#if showNewSessionInput}
-    <div class="new-session-input-wrap">
-      <input
-        type="text"
-        class="new-session-input"
-        placeholder="Enter project path..."
-        value={newSessionPath}
-        bind:this={newSessionInputEl}
-        on:input={handleNewSessionInput}
-        on:keydown={handleNewSessionKey}
-      />
-      {#if pathSuggestions.length > 0}
-        <div class="path-suggestions">
-          {#each pathSuggestions as suggestion, i}
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-              class="suggestion-item"
-              class:active={i === suggestionIndex}
-              on:click={() => selectSuggestion(suggestion)}
-            >{suggestion}</div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-  {/if}
 
   {#if $connected}
     {#each Object.entries($sessionTree) as [project, projectSessions]}

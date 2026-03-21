@@ -8,6 +8,7 @@ struct ServerProcess(Mutex<Option<std::process::Child>>);
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // In dev: CARGO_MANIFEST_DIR = src-tauri/, parent = project root
             // In prod: use executable dir
