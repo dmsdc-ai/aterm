@@ -161,7 +161,10 @@
       });
 
       ac.on('disconnected', () => {
-        atermConnected.set(false);
+        // Delay setting disconnected to avoid flickering on brief reconnects
+        setTimeout(() => {
+          if (ac && !ac.connected) atermConnected.set(false);
+        }, 2000);
       });
 
       ac.on('created', async () => { try { await refreshWorkspaces(ac); } catch {} });

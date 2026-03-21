@@ -20,13 +20,18 @@ export const activeWorkspace = derived(
 // aterm connection status
 export const atermConnected = writable(false);
 
-// Refresh workspace list from server
+// Refresh workspace list from server (only updates store if changed)
+let _lastWorkspacesJson = '';
 export async function refreshWorkspaces(ac) {
   if (!ac) return;
   try {
     const list = await ac.listWorkspaces();
-    workspaces.set(list);
+    const json = JSON.stringify(list);
+    if (json !== _lastWorkspacesJson) {
+      _lastWorkspacesJson = json;
+      workspaces.set(list);
+    }
   } catch (e) {
-    console.warn('[stores] refreshWorkspaces failed:', e.message);
+    // Don't warn on every poll failure — just skip
   }
 }
