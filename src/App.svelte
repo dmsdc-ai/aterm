@@ -19,7 +19,7 @@
 
   async function initTelepty() {
     try {
-      tc = new TeleptClient({ useProxy: true });
+      tc = new TeleptClient();
       await tc.loadToken();
       const list = await tc.getSessions();
       sessions.set(list);
