@@ -5,44 +5,25 @@
   let eventsEl;
   let expandedEvents = new Set();
 
-  // Events that spam the timeline with no signal value
   const NOISE_TYPES = new Set([
-    'session_health',
-    'health',
-    'ping',
-    'pong',
-    'heartbeat',
-    'keepalive',
+    'session_health', 'health', 'ping', 'pong', 'heartbeat', 'keepalive',
   ]);
 
-  // Only these event types are meaningful enough to display
   const SIGNAL_TYPES = new Set([
-    'inject',
-    'injection',
-    'inject_written',
-    'message_routed',
-    'synthesis',
-    'session_register',
-    'session_exit',
-    'status_change',
+    'inject', 'injection', 'inject_written', 'message_routed',
+    'synthesis', 'session_register', 'session_exit', 'status_change',
   ]);
 
   const TRUNCATE_LEN = 200;
 
   function isSignal(e) {
     if (NOISE_TYPES.has(e.type)) return false;
-    // If we have an explicit allowlist hit, always show
     if (SIGNAL_TYPES.has(e.type)) return true;
-    // For unknown types: show them — they're not noise we know about
     return true;
   }
 
-  // HH:MM only — clean, no seconds
   function formatTime(ts) {
-    return new Date(ts).toLocaleTimeString('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+    return new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
   }
 
   function eventKind(e) {
@@ -53,14 +34,14 @@
   }
 
   function eventAccent(e) {
-    if (e.type === 'inject_written' || e.type === 'inject') return '#58a6ff';
-    if (e.type === 'injection') return '#3fb950';
-    if (e.type === 'message_routed') return '#d2a8ff';
-    if (e.type === 'synthesis') return '#f0883e';
-    if (e.type === 'session_register') return '#3fb950';
-    if (e.type === 'session_exit') return '#f85149';
-    if (e.type === 'status_change') return '#d29922';
-    return '#484f58';
+    if (e.type === 'inject_written' || e.type === 'inject') return 'var(--accent)';
+    if (e.type === 'injection')      return 'var(--status-active)';
+    if (e.type === 'message_routed') return 'var(--event-routed)';
+    if (e.type === 'synthesis')      return 'var(--event-synthesis)';
+    if (e.type === 'session_register') return 'var(--status-active)';
+    if (e.type === 'session_exit')   return 'var(--status-danger)';
+    if (e.type === 'status_change')  return 'var(--status-warning)';
+    return 'var(--text-disabled)';
   }
 
   function messageContent(e) {
@@ -69,8 +50,8 @@
 
   function systemLabel(e) {
     if (e.type === 'session_register') return `${e.session_id || e.id || 'session'} joined`;
-    if (e.type === 'session_exit') return `${e.session_id || e.id || 'session'} left`;
-    if (e.type === 'status_change') return `status → ${e.status || e.state || '?'}`;
+    if (e.type === 'session_exit')     return `${e.session_id || e.id || 'session'} left`;
+    if (e.type === 'status_change')    return `status → ${e.status || e.state || '?'}`;
     return e.type || 'event';
   }
 
@@ -86,22 +67,14 @@
   $: filteredEvents = $busEvents.filter(isSignal).slice(-60);
 
   afterUpdate(() => {
-    if (eventsEl) {
-      eventsEl.scrollTop = eventsEl.scrollHeight;
-    }
+    if (eventsEl) eventsEl.scrollTop = eventsEl.scrollHeight;
   });
 </script>
 
 <div class="timeline">
   <!-- Header -->
   <div class="panel-header">
-    <div class="header-left">
-      <svg class="header-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
-        <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1"/>
-        <path d="M6 3.5V6L7.5 7.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
-      </svg>
-      <span class="header-label">Timeline</span>
-    </div>
+    <span class="header-label">Timeline</span>
     {#if filteredEvents.length > 0}
       <span class="header-count">{filteredEvents.length}</span>
     {/if}
@@ -144,31 +117,26 @@
   <div class="events" bind:this={eventsEl}>
     {#if filteredEvents.length === 0}
       <div class="empty-state">
-        <div class="empty-visual">
-          <svg class="empty-illustration" width="40" height="40" viewBox="0 0 40 40" fill="none">
-            <path d="M20 4V36" stroke="currentColor" stroke-width="1" stroke-dasharray="2 3"/>
-            <circle cx="20" cy="10" r="4" stroke="currentColor" stroke-width="1"/>
-            <circle cx="20" cy="22" r="4" stroke="currentColor" stroke-width="1" opacity="0.5"/>
-            <circle cx="20" cy="34" r="4" stroke="currentColor" stroke-width="1" opacity="0.25"/>
-          </svg>
-        </div>
+        <svg width="2" height="40" viewBox="0 0 2 40" fill="none" class="empty-line">
+          <line x1="1" y1="0" x2="1" y2="40" stroke="currentColor" stroke-opacity="0.25" stroke-width="1" stroke-dasharray="2 4"/>
+        </svg>
         <div class="empty-content">
           <div class="empty-text">Waiting for events</div>
-          <div class="empty-sub">Events from inject, synthesis, and routing will appear here</div>
+          <div class="empty-sub">Events will appear as agents communicate</div>
         </div>
         <div class="empty-legend">
-          <span class="legend-item">
-            <span class="legend-dot" style="background: var(--color-accent-blue)"></span>
-            inject
-          </span>
-          <span class="legend-item">
-            <span class="legend-dot" style="background: var(--color-event-routed)"></span>
-            routed
-          </span>
-          <span class="legend-item">
-            <span class="legend-dot" style="background: var(--color-event-synthesis)"></span>
-            synthesis
-          </span>
+          <div class="legend-item">
+            <span class="legend-dot" style="background: var(--accent)"></span>
+            <span class="legend-label">inject</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background: var(--event-routed)"></span>
+            <span class="legend-label">routed</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-dot" style="background: var(--event-synthesis)"></span>
+            <span class="legend-label">synthesis</span>
+          </div>
         </div>
       </div>
     {:else}
@@ -185,7 +153,6 @@
             : content}
 
           {#if kind === 'system'}
-            <!-- Telegram-style centered system message -->
             <div class="sys-row">
               <div class="sys-pill">
                 <span class="sys-dot" style="background: {accent}"></span>
@@ -195,7 +162,6 @@
             </div>
 
           {:else if kind === 'synthesis'}
-            <!-- Synthesis: full-width highlighted card -->
             <div class="event-row">
               <div class="tl-stem"></div>
               <div class="event-synthesis">
@@ -218,7 +184,6 @@
             </div>
 
           {:else if kind === 'routed'}
-            <!-- Message routed: purple bubble -->
             <div class="event-row">
               <div class="tl-stem"></div>
               <div class="bubble routed-bubble">
@@ -240,10 +205,9 @@
             </div>
 
           {:else}
-            <!-- inject / inject_written / injection: blue/green bubble -->
             <div class="event-row">
               <div class="tl-stem"></div>
-              <div class="bubble inject-bubble" style="--accent: {accent}">
+              <div class="bubble inject-bubble" style="--ev-accent: {accent}">
                 <div class="bubble-header">
                   <span class="agent-tag inject-from" style="color: {accent}">
                     {event.from || event.source || event.type}
@@ -269,8 +233,6 @@
             </div>
           {/if}
         {/each}
-
-        <!-- Bottom anchor for scroll -->
         <div class="scroll-anchor"></div>
       </div>
     {/if}
@@ -278,78 +240,67 @@
 </div>
 
 <style>
-  /* ── Keyframes ───────────────────────────────────────── */
   @keyframes fadeInUp {
     from { opacity: 0; transform: translateY(6px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-
   @keyframes fadeIn {
     from { opacity: 0; }
     to   { opacity: 1; }
   }
-
   @keyframes breathe {
-    0%, 100% { opacity: 0.3; transform: scale(1); }
-    50%       { opacity: 0.6; transform: scale(1.08); }
+    0%, 100% { opacity: 0.3; }
+    50%       { opacity: 0.6; }
   }
 
-  /* ── Layout ─────────────────────────────────────────── */
+  /* ── Layout ── */
   .timeline {
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--color-bg-base);
-    color: var(--color-text-secondary);
+    background: var(--bg-timeline);
+    color: var(--text-secondary);
     font-family: var(--font-mono);
     font-size: 12px;
     overflow: hidden;
   }
 
-  /* ── Header ──────────────────────────────────────────── */
+  /* ── Header ── */
   .panel-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    padding: 10px 16px 8px;
-    border-bottom: 1px solid var(--color-border-subtle);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .header-icon {
-    color: var(--color-text-disabled);
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .header-label {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--color-text-muted);
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
   }
 
   .header-count {
     font-size: 10px;
-    color: var(--color-text-tertiary);
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-default);
+    color: var(--text-tertiary);
+    background: var(--bg-button);
+    border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     padding: 0 6px;
     line-height: 16px;
   }
 
-  /* ── Session info grid ───────────────────────────────── */
+  /* ── Session info ── */
   .session-info {
     padding: 8px 16px;
     flex-shrink: 0;
-    border-bottom: 1px solid var(--color-border-subtle);
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   .info-grid {
@@ -361,7 +312,7 @@
 
   .info-key {
     font-size: 10px;
-    color: var(--color-border-strong);
+    color: var(--text-disabled);
     padding: 2px 0;
     align-self: start;
     padding-top: 3px;
@@ -369,26 +320,18 @@
 
   .info-val {
     font-size: 11px;
-    color: var(--color-text-tertiary);
+    color: var(--text-tertiary);
     padding: 2px 0;
     word-break: break-all;
   }
 
-  .info-mono {
-    font-size: 10px;
-    color: var(--color-text-muted);
-  }
-
-  .info-truncate {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .info-mono    { font-size: 10px; color: var(--text-muted); }
+  .info-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .remote-badge {
-    color: var(--color-event-routed);
-    background: rgba(210, 168, 255, 0.08);
-    border: 1px solid rgba(210, 168, 255, 0.13);
+    color: var(--event-routed);
+    background: rgba(184, 160, 216, 0.08);
+    border: 1px solid rgba(184, 160, 216, 0.13);
     border-radius: var(--radius-md);
     padding: 0 5px;
     font-size: 10px;
@@ -396,20 +339,16 @@
     line-height: 18px;
   }
 
-  .local-badge {
-    color: var(--color-text-disabled);
-    font-size: 10px;
-  }
+  .local-badge { color: var(--text-disabled); font-size: 10px; }
 
-  /* ── Section divider ─────────────────────────────────── */
+  /* ── Section rule ── */
   .section-rule {
     height: 1px;
-    background: var(--color-border-subtle);
-    margin: 0;
+    background: var(--border-subtle);
     flex-shrink: 0;
   }
 
-  /* ── Event scroll container ──────────────────────────── */
+  /* ── Events scroll container ── */
   .events {
     flex: 1;
     overflow-y: auto;
@@ -417,18 +356,9 @@
     padding: 8px 0 0;
   }
 
-  .events::-webkit-scrollbar {
-    width: 4px;
-  }
-
-  .events::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .events::-webkit-scrollbar-thumb {
-    background: var(--color-border-subtle);
-    border-radius: var(--radius-xs);
-  }
+  .events::-webkit-scrollbar       { width: 4px; }
+  .events::-webkit-scrollbar-track { background: transparent; }
+  .events::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 3px; }
 
   .event-list {
     display: flex;
@@ -436,34 +366,26 @@
     padding-bottom: 16px;
   }
 
-  .scroll-anchor {
-    height: 1px;
-  }
+  .scroll-anchor { height: 1px; }
 
-  /* ── Timeline spine: each event row ─────────────────── */
+  /* ── Timeline event rows ── */
   .event-row {
     display: flex;
     align-items: stretch;
-    gap: 0;
     padding: 2px 12px 2px 16px;
     position: relative;
-    animation-name: fadeInUp;
-    animation-duration: 150ms;
-    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
-    animation-fill-mode: both;
+    animation: fadeInUp 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
-  /* Vertical line on the left */
   .tl-stem {
     width: 1px;
-    background: var(--color-border-subtle);
+    background: var(--border-subtle);
     margin-right: 12px;
     flex-shrink: 0;
     position: relative;
     min-height: 100%;
   }
 
-  /* Dot on the stem — pseudo element attached to the bubble via sibling */
   .tl-stem::before {
     content: '';
     position: absolute;
@@ -472,17 +394,15 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--color-border-subtle);
-    border: 1px solid var(--color-border-default);
-    transition: background var(--duration-normal) var(--ease-default),
-                border-color var(--duration-normal) var(--ease-default);
+    background: var(--border-subtle);
+    border: 1px solid var(--border-default);
   }
 
-  /* ── Chat bubbles ────────────────────────────────────── */
+  /* ── Chat bubbles ── */
   .bubble {
     flex: 1;
-    background: var(--color-bg-elevated);
-    border: 1px solid var(--color-border-subtle);
+    background: var(--bg-sidebar-hover);
+    border: 1px solid var(--border-subtle);
     border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
     padding: 7px 10px;
     margin-bottom: 4px;
@@ -490,13 +410,13 @@
   }
 
   .inject-bubble {
-    border-left: 2px solid var(--accent, var(--color-accent-blue));
-    background: var(--color-bg-elevated);
+    border-left: 2px solid var(--ev-accent, var(--accent));
+    background: var(--bg-sidebar-hover);
   }
 
   .routed-bubble {
-    border-left: 2px solid var(--color-event-routed);
-    background: var(--color-event-routed-bg);
+    border-left: 2px solid var(--event-routed);
+    background: var(--event-routed-bg);
   }
 
   .bubble-header {
@@ -514,26 +434,11 @@
     white-space: nowrap;
   }
 
-  .inject-from {
-    /* color set inline */
-  }
+  .inject-to   { color: var(--text-muted); }
+  .routed-from { color: var(--event-routed); }
+  .routed-to   { color: var(--text-muted); }
 
-  .inject-to {
-    color: var(--color-text-muted);
-  }
-
-  .routed-from {
-    color: var(--color-event-routed);
-  }
-
-  .routed-to {
-    color: var(--color-text-muted);
-  }
-
-  .route-arrow {
-    color: var(--color-border-default);
-    font-size: 11px;
-  }
+  .route-arrow { color: var(--border-default); font-size: 11px; }
 
   .type-chip {
     font-size: 9px;
@@ -548,31 +453,31 @@
   .ev-time {
     margin-left: auto;
     font-size: 9px;
-    color: var(--color-border-default);
+    color: var(--border-default);
     white-space: nowrap;
     flex-shrink: 0;
   }
 
   .bubble-body {
     font-size: 11px;
-    color: var(--color-text-tertiary);
+    color: var(--text-tertiary);
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.55;
   }
 
-  /* ── Synthesis card ──────────────────────────────────── */
+  /* ── Synthesis card ── */
   .event-synthesis {
     flex: 1;
-    background: var(--color-event-synthesis-bg);
-    border: 1px solid rgba(240, 136, 62, 0.13);
-    border-left: 2px solid var(--color-event-synthesis);
+    background: var(--event-synthesis-bg);
+    border: 1px solid rgba(212, 168, 83, 0.13);
+    border-left: 2px solid var(--event-synthesis);
     border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
     padding: 8px 10px;
     margin-bottom: 4px;
     min-width: 0;
     overflow: hidden;
-    box-shadow: inset 2px 0 8px rgba(240, 136, 62, 0.1);
+    box-shadow: inset 2px 0 8px rgba(212, 168, 83, 0.08);
   }
 
   .synthesis-header {
@@ -587,28 +492,25 @@
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.8px;
-    color: var(--color-event-synthesis);
-    background: rgba(240, 136, 62, 0.09);
-    border: 1px solid rgba(240, 136, 62, 0.2);
+    color: var(--event-synthesis);
+    background: rgba(212, 168, 83, 0.09);
+    border: 1px solid rgba(212, 168, 83, 0.2);
     border-radius: var(--radius-sm);
     padding: 0 5px;
     line-height: 15px;
   }
 
-  .synthesis-from {
-    font-size: 10px;
-    color: var(--color-text-tertiary);
-  }
+  .synthesis-from { font-size: 10px; color: var(--text-tertiary); }
 
   .synthesis-body {
     font-size: 11px;
-    color: var(--color-event-synthesis-text);
+    color: var(--event-synthesis-text);
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.55;
   }
 
-  /* ── System messages (centered pill) ────────────────── */
+  /* ── System messages ── */
   .sys-row {
     display: flex;
     justify-content: center;
@@ -619,73 +521,45 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    background: var(--color-bg-base);
-    border: 1px solid var(--color-bg-overlay);
-    border-radius: var(--radius-3xl);
+    background: var(--bg-timeline);
+    border: 1px solid var(--border-subtle);
+    border-radius: 24px;
     padding: 3px 10px;
-    animation-name: fadeIn;
-    animation-duration: 100ms;
-    animation-timing-function: ease;
+    animation: fadeIn 100ms ease;
   }
 
-  .sys-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
+  .sys-dot  { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+  .sys-text { font-size: 10px; color: var(--text-disabled); font-style: italic; }
+  .sys-time { font-size: 9px; color: var(--border-default); }
 
-  .sys-text {
-    font-size: 10px;
-    color: var(--color-text-disabled);
-    font-style: italic;
-  }
-
-  .sys-time {
-    font-size: 9px;
-    color: var(--color-border-default);
-  }
-
-  /* ── Expand button ───────────────────────────────────── */
+  /* ── Expand button ── */
   .expand-btn {
     background: none;
     border: none;
-    color: var(--color-accent-blue);
+    color: var(--accent);
     font-size: 10px;
     font-family: inherit;
     cursor: pointer;
     padding: 3px 0 0;
     display: block;
     opacity: 0.7;
-    transition: opacity var(--duration-normal) var(--ease-default);
+    transition: opacity 150ms ease;
   }
 
-  .expand-btn:hover {
-    opacity: 1;
-    text-decoration: underline;
-  }
+  .expand-btn:hover { opacity: 1; text-decoration: underline; }
 
-  /* ── Empty state ─────────────────────────────────────── */
+  /* ── Empty state ── */
   .empty-state {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     padding: 48px 24px;
-    gap: 16px;
-    animation-name: fadeIn;
-    animation-duration: 200ms;
-    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    gap: 14px;
+    animation: fadeIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
-  .empty-visual {
-    color: var(--color-border-default);
-    animation: breathe 3s ease-in-out infinite;
-  }
-
-  .empty-illustration {
-    opacity: 0.5;
-  }
+  .empty-line { color: var(--text-disabled); }
 
   .empty-content {
     display: flex;
@@ -695,42 +569,46 @@
   }
 
   .empty-text {
+    font-family: var(--font-sans);
     font-size: 12px;
     font-weight: 500;
-    color: var(--color-text-muted);
+    color: var(--text-muted);
   }
 
   .empty-sub {
+    font-family: var(--font-sans);
     font-size: 10px;
-    color: var(--color-text-disabled);
+    color: var(--text-disabled);
     text-align: center;
-    max-width: 200px;
+    max-width: 180px;
     line-height: 1.4;
   }
 
   .empty-legend {
     display: flex;
-    gap: 12px;
-    padding: 6px 12px;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-default);
-    border-radius: var(--radius-pill);
+    align-items: center;
+    gap: 16px;
+    margin-top: 6px;
   }
 
   .legend-item {
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 9px;
-    color: var(--color-text-disabled);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    gap: 5px;
   }
 
   .legend-dot {
     width: 5px;
     height: 5px;
-    border-radius: 50%;
+    border-radius: 1px;
     flex-shrink: 0;
+  }
+
+  .legend-label {
+    font-family: var(--font-sans);
+    font-size: 9px;
+    color: var(--text-disabled);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
 </style>

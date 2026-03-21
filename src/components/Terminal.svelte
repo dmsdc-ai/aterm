@@ -32,9 +32,9 @@
   });
 
   function statusColor(ws) {
-    if (!ws) return '#484f58';
-    if (ws.status === 'dead') return '#f85149';
-    return '#3fb950';
+    if (!ws) return 'var(--text-disabled)';
+    if (ws.status === 'dead') return 'var(--status-danger)';
+    return 'var(--status-active)';
   }
 
   function statusLabel(ws) {
@@ -67,27 +67,27 @@
 
     term = new Terminal({
       theme: {
-        background: '#000000',
-        foreground: '#e6edf3',
-        cursor: '#58a6ff',
-        cursorAccent: '#000000',
-        selectionBackground: '#1f6feb55',
-        black: '#484f58',
-        red: '#f85149',
-        green: '#3fb950',
-        yellow: '#d29922',
-        blue: '#58a6ff',
-        magenta: '#bc8cff',
-        cyan: '#39c5cf',
-        white: '#b1bac4',
-        brightBlack: '#6e7681',
-        brightRed: '#ff7b72',
-        brightGreen: '#56d364',
-        brightYellow: '#e3b341',
-        brightBlue: '#79c0ff',
-        brightMagenta: '#d2a8ff',
-        brightCyan: '#56d4dd',
-        brightWhite: '#f0f6fc',
+        background: '#131010',
+        foreground: '#e8e4e0',
+        cursor: '#d97706',
+        cursorAccent: '#131010',
+        selectionBackground: 'rgba(217, 119, 6, 0.25)',
+        black: '#504840',
+        red: '#d96c6c',
+        green: '#5cb97a',
+        yellow: '#d4a853',
+        blue: '#d97706',
+        magenta: '#b8a0d8',
+        cyan: '#5cb0b8',
+        white: '#b0a898',
+        brightBlack: '#6a6058',
+        brightRed: '#e88080',
+        brightGreen: '#70cc8a',
+        brightYellow: '#e8bb6a',
+        brightBlue: '#f59e0b',
+        brightMagenta: '#c8b0e8',
+        brightCyan: '#6ac8d0',
+        brightWhite: '#e8e4e0',
       },
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
@@ -146,11 +146,27 @@
 
     term = new Terminal({
       theme: {
-        background: '#000000',
-        foreground: '#e6edf3',
-        cursor: '#58a6ff',
-        cursorAccent: '#000000',
-        selectionBackground: '#1f6feb55',
+        background: '#131010',
+        foreground: '#e8e4e0',
+        cursor: '#d97706',
+        cursorAccent: '#131010',
+        selectionBackground: 'rgba(217, 119, 6, 0.25)',
+        black: '#504840',
+        red: '#d96c6c',
+        green: '#5cb97a',
+        yellow: '#d4a853',
+        blue: '#d97706',
+        magenta: '#b8a0d8',
+        cyan: '#5cb0b8',
+        white: '#b0a898',
+        brightBlack: '#6a6058',
+        brightRed: '#e88080',
+        brightGreen: '#70cc8a',
+        brightYellow: '#e8bb6a',
+        brightBlue: '#f59e0b',
+        brightMagenta: '#c8b0e8',
+        brightCyan: '#6ac8d0',
+        brightWhite: '#e8e4e0',
       },
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
@@ -222,7 +238,7 @@
   <div class="session-header">
     <div class="session-identity">
       {#if mode === 'session' && sessionId}
-        <span class="status-dot" style="background: #3fb950; box-shadow: 0 0 5px #3fb95088;"></span>
+        <span class="status-dot" style="background: var(--status-active); box-shadow: 0 0 5px rgba(92,185,122,0.53);"></span>
         <span class="session-badge">SESSION</span>
         <span class="session-name">{sessionId}</span>
       {:else}
@@ -255,25 +271,26 @@
     flex-direction: column;
     flex: 1;
     overflow: hidden;
-    background: var(--color-bg-inset);
+    background: var(--bg-inset);
   }
 
   .session-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: var(--session-header-height, 32px);
+    height: 32px;
     padding: 0 14px;
-    background: var(--color-bg-elevated);
-    border-bottom: 1px solid var(--color-border-default);
+    background: var(--bg-sidebar);
+    border-bottom: 1px solid var(--border-default);
     flex-shrink: 0;
     user-select: none;
+    -webkit-user-select: none;
   }
 
   .session-identity {
     display: flex;
     align-items: center;
-    gap: var(--space-4);
+    gap: 8px;
   }
 
   .status-dot {
@@ -281,31 +298,31 @@
     height: 7px;
     border-radius: 50%;
     flex-shrink: 0;
-    transition: background var(--duration-gentle) ease, box-shadow var(--duration-gentle) ease;
+    transition: background 400ms ease, box-shadow 400ms ease;
   }
 
   .session-badge {
     font-size: 9px;
     font-weight: 600;
     letter-spacing: 0.06em;
-    color: #3fb950;
-    background: rgba(63, 185, 80, 0.1);
-    border: 1px solid rgba(63, 185, 80, 0.2);
+    color: var(--status-active);
+    background: rgba(92, 185, 122, 0.1);
+    border: 1px solid rgba(92, 185, 122, 0.2);
     border-radius: 3px;
     padding: 1px 5px;
   }
 
   .session-badge.ws-badge {
-    color: #58a6ff;
-    background: rgba(88, 166, 255, 0.1);
-    border-color: rgba(88, 166, 255, 0.2);
+    color: var(--accent);
+    background: var(--accent-subtle);
+    border-color: var(--accent-muted);
   }
 
   .session-name {
     font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 500;
-    color: var(--color-text-secondary);
+    color: var(--text-secondary);
     letter-spacing: 0.01em;
   }
 
@@ -318,7 +335,7 @@
   .session-cwd {
     font-family: var(--font-mono);
     font-size: 10px;
-    color: var(--color-text-disabled);
+    color: var(--text-disabled);
     max-width: 300px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -330,17 +347,17 @@
     font-size: 11px;
     font-weight: 400;
     letter-spacing: 0.03em;
-    transition: color var(--duration-gentle) ease;
+    transition: color 400ms ease;
   }
 
   .terminal-wrap {
     flex: 1;
-    padding: var(--space-3) var(--space-2) var(--space-2);
-    background: var(--color-bg-inset);
+    padding: 6px 4px 4px;
+    background: #131010;
     overflow: hidden;
   }
 
   .terminal-wrap :global(.xterm) { height: 100%; }
-  .terminal-wrap :global(.xterm-viewport) { background: var(--color-bg-inset) !important; }
-  .terminal-wrap :global(.xterm-screen) { background: var(--color-bg-inset); }
+  .terminal-wrap :global(.xterm-viewport) { background: #131010 !important; }
+  .terminal-wrap :global(.xterm-screen) { background: #131010; }
 </style>

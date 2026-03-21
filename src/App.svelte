@@ -16,6 +16,18 @@
   let tc = null;
   let showPalette = false;
   let refreshTimer = null;
+  let theme = 'dark';
+
+  function initTheme() {
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    theme = prefersDark ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+  }
+
+  function toggleTheme() {
+    theme = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', theme);
+  }
 
   async function initTelepty() {
     try {
@@ -26,10 +38,8 @@
       teleptConnected.set(true);
       client.set(tc);
 
-      // Connect to bus for real-time session events
       tc.connectBus(async (msg) => {
         addBusEvent(msg);
-        // Refresh session list on lifecycle events
         if (msg.type === 'session_created' || msg.type === 'session_closed' ||
             msg.type === 'session_started' || msg.type === 'session_stopped' ||
             msg.event === 'created' || msg.event === 'closed') {
@@ -48,14 +58,14 @@
   }
 
   onMount(() => {
-    // Init aterm client
+    initTheme();
+
     ac = new AtermClient();
     atermClient.set(ac);
 
     ac.on('connected', async () => {
       atermConnected.set(true);
       await refreshWorkspaces(ac);
-      // Auto-select first workspace if none selected
       activeWorkspaceId.update(cur => {
         if (cur) return cur;
         let list;
@@ -69,18 +79,10 @@
       atermConnected.set(false);
     });
 
-    // Workspace lifecycle events from server
-    ac.on('created', async () => {
-      await refreshWorkspaces(ac);
-    });
-    ac.on('closed', async () => {
-      await refreshWorkspaces(ac);
-    });
+    ac.on('created', async () => { await refreshWorkspaces(ac); });
+    ac.on('closed',  async () => { await refreshWorkspaces(ac); });
 
-    // Poll workspace list every 5s to catch external changes
     refreshTimer = setInterval(() => refreshWorkspaces(ac), 5000);
-
-    // Init telepty client (non-blocking — daemon may be offline)
     initTelepty();
   });
 
@@ -102,54 +104,47 @@
 <svelte:window on:keydown={handleKeydown} />
 
 <div class="app">
+  <!-- HEADER — 48px -->
   <header class="header">
     <div class="header-left">
-      <span class="logo">
-        <svg class="logo-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <rect x="1" y="2" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.2"/>
-          <path d="M4 7L6.5 9.5L4 12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-          <line x1="8" y1="12" x2="12" y2="12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-        </svg>
-        <span class="logo-text">aterm</span>
-        <span class="logo-version">v1</span>
+      <span class="mascot mascot-sm">
+        <span class="mascot-eye">·</span><span class="mascot-core">⣿</span><span class="mascot-eye">·</span>
       </span>
+      <span class="header-title">aterm</span>
     </div>
 
-    <div class="header-center">
-      {#if $selectedSessionId}
-        <div class="breadcrumb">
-          <span class="breadcrumb-icon" style="color: #3fb950;">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1"/>
-              <path d="M4 6L6 4L8 6" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
-            </svg>
-          </span>
-          <span class="breadcrumb-text">{$selectedSessionId}</span>
-        </div>
-      {:else if $activeWorkspaceId}
-        <div class="breadcrumb">
-          <span class="breadcrumb-icon">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <rect x="1" y="1.5" width="10" height="9" rx="1.5" stroke="currentColor" stroke-width="1"/>
-              <path d="M1 4.5H11" stroke="currentColor" stroke-width="1"/>
-            </svg>
-          </span>
-          <span class="breadcrumb-text">{$activeWorkspaceId === 'default' ? 'default' : $activeWorkspaceId.replace(/^ws-/, '').replace(/-[^-]+$/, '')}</span>
-        </div>
-      {/if}
-    </div>
+    <div class="header-center"></div>
 
     <div class="header-right">
-      <span class="status" class:online={$atermConnected} class:offline={!$atermConnected}>
-        <span class="status-dot-indicator"></span>
-        {$atermConnected ? 'Connected' : 'Disconnected'}
-      </span>
-      <button class="palette-btn" on:click={() => showPalette = true}>
-        <span class="palette-key">⌘K</span>
+      <div class="connection-status">
+        <span class="connection-dot" class:online={$atermConnected} class:offline={!$atermConnected}></span>
+        <span class="connection-label">{$atermConnected ? 'Connected' : 'Disconnected'}</span>
+      </div>
+      <span class="header-sep"></span>
+      <span class="shortcut-hint">&#8984;K</span>
+      <span class="header-sep"></span>
+      <button class="theme-toggle" on:click={toggleTheme} type="button" aria-label="Toggle theme">
+        <!-- sun icon — shown in dark mode -->
+        <svg class="icon-sun" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="7" cy="7" r="3"/>
+          <line x1="7" y1="0.5" x2="7" y2="2"/>
+          <line x1="7" y1="12" x2="7" y2="13.5"/>
+          <line x1="0.5" y1="7" x2="2" y2="7"/>
+          <line x1="12" y1="7" x2="13.5" y2="7"/>
+          <line x1="2.4" y1="2.4" x2="3.5" y2="3.5"/>
+          <line x1="10.5" y1="10.5" x2="11.6" y2="11.6"/>
+          <line x1="11.6" y1="2.4" x2="10.5" y2="3.5"/>
+          <line x1="3.5" y1="10.5" x2="2.4" y2="11.6"/>
+        </svg>
+        <!-- moon icon — shown in light mode -->
+        <svg class="icon-moon" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12.5 7.8A5.5 5.5 0 1 1 6.2 1.5a4.5 4.5 0 0 0 6.3 6.3z"/>
+        </svg>
       </button>
     </div>
   </header>
 
+  <!-- MAIN 3-PANEL -->
   <div class="panels">
     <aside class="sidebar">
       <SessionTree />
@@ -163,21 +158,15 @@
       {:else}
         <div class="empty">
           {#if $atermConnected}
-            <div class="empty-visual">
-              <svg class="empty-terminal-icon" width="48" height="48" viewBox="0 0 48 48" fill="none">
-                <rect x="4" y="8" width="40" height="32" rx="4" stroke="currentColor" stroke-width="1.5"/>
-                <path d="M4 16H44" stroke="currentColor" stroke-width="1.5"/>
-                <circle cx="10" cy="12" r="1.5" fill="currentColor"/>
-                <circle cx="15" cy="12" r="1.5" fill="currentColor"/>
-                <circle cx="20" cy="12" r="1.5" fill="currentColor"/>
-                <path d="M12 24L18 30L12 36" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                <line x1="22" y1="36" x2="34" y2="36" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
+            <div class="center-empty">
+              <span class="mascot mascot-lg pulse">
+                <span class="mascot-eye">·</span><span class="mascot-core">⣿</span><span class="mascot-eye">·</span>
+              </span>
               <p class="empty-title">No workspace selected</p>
-              <p class="empty-hint">Select a workspace or session from the sidebar</p>
+              <p class="empty-hint">Select a workspace or press <kbd>+</kbd> to create one</p>
             </div>
           {:else}
-            <div class="empty-visual">
+            <div class="center-empty">
               <div class="connecting-dots">
                 <span class="dot"></span><span class="dot"></span><span class="dot"></span>
               </div>
@@ -199,230 +188,203 @@
 </div>
 
 <style>
-  :global(body) {
-    margin: 0;
-    background: var(--color-bg-base);
-    color: var(--color-text-primary);
-    font-family: var(--font-sans);
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    animation: fadeIn 200ms ease;
   }
-  .app { display: flex; flex-direction: column; height: 100vh; }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  /* ── Header ── */
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 44px;
-    padding: 0 16px;
-    background: linear-gradient(180deg, var(--color-header-gradient-start) 0%, var(--color-header-gradient-end) 100%);
-    border-bottom: 1px solid var(--color-border-default);
-    box-shadow: 0 1px 0 rgba(88, 166, 255, 0.05);
+    height: 48px;
+    min-height: 48px;
+    padding: 0 20px;
+    background: var(--bg-sidebar);
+    border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
     user-select: none;
+    -webkit-user-select: none;
   }
 
   .header-left {
     display: flex;
     align-items: center;
+    gap: 10px;
   }
+
+  .header-title {
+    font-family: var(--font-sans);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+  }
+
+  .header-center { flex: 1; }
 
   .header-right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
   }
 
-  .logo {
+  .connection-status {
     display: flex;
     align-items: center;
-    gap: 5px;
-    font-family: var(--font-sans);
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--color-text-primary);
-    letter-spacing: -0.01em;
+    gap: 6px;
   }
 
-  .logo-icon {
-    color: var(--color-accent-blue);
-    flex-shrink: 0;
-  }
-
-  .logo-text {
-    background: linear-gradient(135deg, var(--color-text-primary) 0%, var(--color-accent-blue) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-  }
-
-  .logo-version {
-    font-size: 9px;
-    font-weight: 500;
-    color: var(--color-text-disabled);
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-default);
-    border-radius: var(--radius-sm);
-    padding: 0 4px;
-    line-height: 14px;
-    letter-spacing: 0.02em;
-  }
-
-  .status {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-family: var(--font-sans);
-    font-size: 11px;
-    font-weight: 500;
-    padding: 3px 9px 3px 7px;
-    border-radius: var(--radius-pill);
-    letter-spacing: 0.01em;
-    transition: background var(--duration-smooth) ease, color var(--duration-smooth) ease;
-  }
-
-  .status-dot-indicator {
+  .connection-dot {
     width: 6px;
     height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    transition: background var(--duration-smooth) ease, box-shadow var(--duration-smooth) ease;
+    border-radius: 1px;
+    background: var(--text-disabled);
+    transition: background 200ms ease;
   }
 
-  .online {
-    background: var(--color-success-subtle);
-    color: var(--color-success);
-    border: 1px solid var(--color-success-muted);
+  .connection-dot.online  { background: var(--status-active); }
+  .connection-dot.offline { background: var(--status-danger); }
+
+  .connection-label {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--text-tertiary);
   }
 
-  .online .status-dot-indicator {
-    background: var(--color-success);
-    box-shadow: var(--shadow-glow-green);
-    animation: statusPulse 2s ease-in-out infinite;
+  .header-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--border-subtle);
   }
 
-  @keyframes statusPulse {
-    0%, 100% { box-shadow: 0 0 4px rgba(63, 185, 80, 0.4); }
-    50%      { box-shadow: 0 0 8px rgba(63, 185, 80, 0.7); }
+  .shortcut-hint {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-disabled);
   }
 
-  .offline {
-    background: var(--color-danger-subtle);
-    color: var(--color-danger);
-    border: 1px solid var(--color-danger-muted);
-  }
-
-  .offline .status-dot-indicator {
-    background: var(--color-danger);
-    box-shadow: var(--shadow-glow-red);
-  }
-
-  .palette-btn {
+  .theme-toggle {
     display: flex;
     align-items: center;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-default);
-    border-bottom-color: var(--color-border-strong);
-    color: var(--color-text-tertiary);
-    padding: 3px 9px;
-    border-radius: var(--radius-lg);
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: var(--toggle-bg);
+    border: none;
+    border-radius: var(--radius-md);
     cursor: pointer;
-    font-family: var(--font-sans);
-    transition: background var(--duration-fast) ease, color var(--duration-fast) ease, border-color var(--duration-fast) ease;
+    padding: 0;
+    flex-shrink: 0;
+    transition: background 150ms ease;
+    color: var(--toggle-icon);
   }
 
-  .palette-btn:hover {
-    background: var(--color-border-default);
-    color: var(--color-text-secondary);
-    border-color: var(--color-border-strong);
+  .theme-toggle:hover  { background: var(--border-default); }
+  .theme-toggle:active { transform: scale(0.92); }
+
+  .theme-toggle :global(svg) {
+    width: 14px;
+    height: 14px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
-  .palette-key {
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.02em;
+  /* ── Layout ── */
+  .panels {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
   }
 
-  .panels { display: flex; flex: 1; overflow: hidden; }
-  .sidebar { width: var(--sidebar-width); border-right: 1px solid var(--color-border-default); overflow-y: auto; }
-  .center { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  .inspector { width: var(--inspector-width); border-left: 1px solid var(--color-border-default); overflow-y: auto; }
+  .sidebar {
+    width: 250px;
+    min-width: 250px;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border-subtle);
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .center {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-inset);
+  }
+
+  .inspector {
+    width: 280px;
+    min-width: 280px;
+    background: var(--bg-timeline);
+    border-left: 1px solid var(--border-subtle);
+    overflow-y: auto;
+  }
+
+  /* ── Empty / connecting state ── */
   .empty {
     display: flex;
     align-items: center;
     justify-content: center;
     height: 100%;
-    color: var(--color-text-disabled);
-    font-family: var(--font-sans);
-    font-size: 13px;
-  }
-  kbd {
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-default);
-    border-radius: var(--radius-md);
-    padding: 2px 6px;
-    font-size: 12px;
-    color: var(--color-text-tertiary);
   }
 
-  .header-center {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .breadcrumb {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 10px;
-    background: var(--color-bg-raised);
-    border: 1px solid var(--color-border-default);
-    border-radius: var(--radius-lg);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--color-text-tertiary);
-    max-width: 300px;
-  }
-
-  .breadcrumb-icon {
-    display: flex;
-    align-items: center;
-    color: var(--color-text-disabled);
-    flex-shrink: 0;
-  }
-
-  .breadcrumb-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .empty-visual {
+  .center-empty {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 12px;
-  }
-
-  .empty-terminal-icon {
-    color: var(--color-border-default);
-    opacity: 0.5;
+    animation: fadeIn 400ms ease;
   }
 
   .empty-title {
     margin: 0;
     font-family: var(--font-sans);
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--color-text-muted);
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-top: 8px;
   }
 
   .empty-hint {
     margin: 0;
     font-family: var(--font-sans);
-    font-size: 12px;
-    color: var(--color-text-disabled);
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .empty-hint :global(kbd) {
+    display: inline-block;
+    background: var(--bg-kbd);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: var(--font-sans);
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  kbd {
+    display: inline-block;
+    background: var(--bg-kbd);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: var(--font-sans);
+    font-size: 11px;
+    color: var(--text-tertiary);
   }
 
   .connecting-dots {
@@ -434,7 +396,7 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--color-text-disabled);
+    background: var(--text-disabled);
     animation: dotBounce 1.4s ease-in-out infinite;
   }
 
@@ -443,6 +405,6 @@
 
   @keyframes dotBounce {
     0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-    40% { opacity: 1; transform: scale(1.2); }
+    40%           { opacity: 1;   transform: scale(1.2); }
   }
 </style>

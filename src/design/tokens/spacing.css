@@ -30,11 +30,11 @@
   --gap-section:         var(--space-8);   /* 16px — between sections */
 
   /* ── Layout Dimensions ──────────────────────────────────── */
-  --header-height:       40px;
+  --header-height:         48px;
   --session-header-height: 32px;
-  --sidebar-width:       240px;
-  --inspector-width:     280px;
-  --palette-width:       520px;
+  --sidebar-width:         250px;
+  --inspector-width:       280px;
+  --palette-width:         520px;
 
   /* ── Border Radius ──────────────────────────────────────── */
   --radius-xs:   2px;   /* selection bars */
