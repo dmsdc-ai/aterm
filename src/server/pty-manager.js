@@ -23,11 +23,12 @@ class PtyManager {
     }
 
     const shell = options.command || process.env.SHELL || '/bin/bash';
+    const args = options.args || [];
     const cwd = options.cwd || os.homedir();
     const cols = options.cols || 80;
     const rows = options.rows || 24;
 
-    const ptyProcess = pty.spawn(shell, [], {
+    const ptyProcess = pty.spawn(shell, args, {
       name: 'xterm-256color',
       cols,
       rows,

@@ -2,7 +2,6 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { exec } from 'child_process';
 import { WebSocketServer } from 'ws';
 import ptyManager from './pty-manager.js';
 import { start, stop, SOCKET_PATH } from './socket-server.js';
@@ -29,39 +28,8 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2',
 };
 
-const TELEPTY_HOST = 'localhost';
-const TELEPTY_PORT = 3848;
-
-// Proxy /telepty/* → localhost:3848/api/*
-function proxyTelepty(req, res) {
-  const targetPath = req.url.replace(/^\/telepty/, '/api');
-  const options = {
-    hostname: TELEPTY_HOST,
-    port: TELEPTY_PORT,
-    path: targetPath,
-    method: req.method,
-    headers: { ...req.headers, host: `${TELEPTY_HOST}:${TELEPTY_PORT}` },
-  };
-
-  const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res);
-  });
-
-  proxyReq.on('error', () => {
-    res.writeHead(502);
-    res.end(JSON.stringify({ error: 'telepty daemon unreachable' }));
-  });
-
-  req.pipe(proxyReq);
-}
-
 function handleRequest(req, res) {
-  if (req.url.startsWith('/telepty/')) {
-    return proxyTelepty(req, res);
-  }
-
-  // POST /api/create-session — launch telepty allow for a new claude session
+  // POST /api/create-session — create a workspace with claude via node-pty
   if (req.url === '/api/create-session' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => { body += chunk; });
@@ -72,24 +40,29 @@ function handleRequest(req, res) {
         res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
         return;
       }
-      const { id, cwd } = parsed;
-      if (!id || !cwd) {
+      const { cwd, command, args } = parsed;
+      if (!cwd) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'Missing id or cwd' }));
+        res.end(JSON.stringify({ ok: false, error: 'Missing cwd' }));
         return;
       }
-      // Sanitise: only allow safe characters in id
+      // Generate id from folder name
+      const folderName = cwd.replace(/\/+$/, '').split('/').pop() || 'session';
+      const id = parsed.id || `${folderName}-${Date.now().toString(36)}`;
       const safeId = id.replace(/[^a-zA-Z0-9_\-\.]/g, '');
-      const cmd = `telepty allow --id ${safeId} claude --dangerously-skip-permissions`;
-      exec(cmd, { cwd }, (err, _stdout, stderr) => {
-        if (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
-        } else {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, id: safeId }));
-        }
-      });
+      try {
+        ptyManager.createWorkspace(safeId, {
+          cwd,
+          command: command || undefined,
+          args: args || undefined,
+        });
+        broadcast({ event: 'created', workspace: safeId });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, id: safeId }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
     });
     return;
   }
@@ -326,37 +299,10 @@ function startWsServer() {
     httpServer = http.createServer(handleRequest);
     wss = new WebSocketServer({ noServer: true });
 
-    // Handle WS upgrade: /telepty/ → proxy to telepty daemon, others → aterm WS
     httpServer.on('upgrade', (req, socket, head) => {
-      if (req.url.startsWith('/telepty/')) {
-        // Proxy WS to telepty daemon
-        const targetPath = req.url.replace(/^\/telepty/, '/api');
-        const proxyReq = http.request({
-          hostname: TELEPTY_HOST,
-          port: TELEPTY_PORT,
-          path: targetPath,
-          method: 'GET',
-          headers: { ...req.headers, host: `${TELEPTY_HOST}:${TELEPTY_PORT}` },
-        });
-
-        proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
-          socket.write(
-            `HTTP/1.1 101 Switching Protocols\r\n` +
-            Object.entries(proxyRes.headers).map(([k, v]) => `${k}: ${v}`).join('\r\n') +
-            '\r\n\r\n'
-          );
-          proxySocket.pipe(socket);
-          socket.pipe(proxySocket);
-        });
-
-        proxyReq.on('error', () => socket.destroy());
-        proxyReq.end();
-      } else {
-        // aterm WS
-        wss.handleUpgrade(req, socket, head, (ws) => {
-          wss.emit('connection', ws, req);
-        });
-      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
     });
 
     wss.on('connection', (ws) => {
