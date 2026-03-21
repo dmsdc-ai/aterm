@@ -447,7 +447,10 @@
     gap: 0;
     padding: 2px 12px 2px 16px;
     position: relative;
-    animation: fadeInUp var(--duration-normal) var(--ease-out) both;
+    animation-name: fadeInUp;
+    animation-duration: 150ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    animation-fill-mode: both;
   }
 
   /* Vertical line on the left */
@@ -568,6 +571,7 @@
     padding: 8px 10px;
     margin-bottom: 4px;
     min-width: 0;
+    overflow: hidden;
     box-shadow: inset 2px 0 8px rgba(240, 136, 62, 0.1);
   }
 
@@ -619,7 +623,9 @@
     border: 1px solid var(--color-bg-overlay);
     border-radius: var(--radius-3xl);
     padding: 3px 10px;
-    animation: fadeIn var(--duration-fast) var(--ease-default);
+    animation-name: fadeIn;
+    animation-duration: 100ms;
+    animation-timing-function: ease;
   }
 
   .sys-dot {
@@ -667,7 +673,9 @@
     justify-content: center;
     padding: 48px 24px;
     gap: 16px;
-    animation: fadeIn var(--duration-smooth) var(--ease-out);
+    animation-name: fadeIn;
+    animation-duration: 200ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .empty-visual {

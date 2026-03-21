@@ -227,7 +227,7 @@
 
   .overlay {
     position: fixed;
-    inset: 0;
+    top: 0; right: 0; bottom: 0; left: 0;
     background: var(--color-overlay-backdrop);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
@@ -236,7 +236,9 @@
     align-items: flex-start;
     padding-top: 18vh;
     z-index: 100;
-    animation: fadeIn var(--duration-fast) var(--ease-default);
+    animation-name: fadeIn;
+    animation-duration: 100ms;
+    animation-timing-function: ease;
   }
 
   .palette {
@@ -246,7 +248,10 @@
     border-radius: var(--radius-2xl);
     overflow: hidden;
     box-shadow: var(--shadow-palette);
-    animation: fadeInScale var(--duration-smooth) var(--ease-spring) both;
+    animation-name: fadeInScale;
+    animation-duration: 200ms;
+    animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation-fill-mode: both;
   }
 
   /* ── Search row ── */

@@ -3,29 +3,25 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "main": "./out/main/index.js",
   "bin": {
     "aterm": "./bin/aterm.js"
   },
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "server": "node src/server/index.js",
-    "web:dev": "vite --config vite.config.js",
-    "web:build": "vite build --config vite.config.js"
+    "vite:dev": "vite",
+    "vite:build": "vite build",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "server": "node src/server/index.js"
   },
   "devDependencies": {
-    "@electron-toolkit/preload": "^3.0.2",
-    "@electron-toolkit/utils": "^4.0.0",
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
-    "electron": "^41.0.3",
-    "electron-vite": "^5.0.0",
+    "@tauri-apps/cli": "^2.10.1",
     "svelte": "^5.53.12",
     "vite": "^7.3.1"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
+    "@tauri-apps/api": "^2.10.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",

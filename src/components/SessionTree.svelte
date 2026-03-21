@@ -333,7 +333,10 @@
     transition: background var(--duration-normal) ease, color var(--duration-normal) ease;
     outline: none;
     user-select: none;
-    animation: fadeIn var(--duration-normal) var(--ease-out) both;
+    animation-name: fadeIn;
+    animation-duration: 150ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    animation-fill-mode: both;
   }
 
   .workspace-row:hover {
@@ -472,7 +475,9 @@
     gap: 10px;
     padding: 40px 16px;
     color: var(--color-text-disabled);
-    animation: fadeIn var(--duration-smooth) var(--ease-out);
+    animation-name: fadeIn;
+    animation-duration: 200ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .empty-illustration {
