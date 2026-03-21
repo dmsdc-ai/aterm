@@ -286,6 +286,13 @@
     cursor: pointer;
     padding: 0;
     flex-shrink: 0;
+    transition: background 150ms ease;
+  }
+  .theme-toggle:hover {
+    background: var(--border-default);
+  }
+  .theme-toggle:active {
+    transform: scale(0.92);
   }
   .theme-toggle svg {
     width: 14px;
@@ -352,6 +359,10 @@
   }
   .session-row:hover {
     background: var(--bg-sidebar-hover);
+  }
+  .session-row:active {
+    background: var(--bg-sidebar-selected);
+    transform: scale(0.995);
   }
 
   .session-row.selected {
@@ -465,6 +476,11 @@
     background: var(--bg-button-hover);
     color: var(--text-secondary);
   }
+  .add-btn:active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+    transform: scale(0.9);
+  }
 
   /* Workspace rows */
   .workspace-row {
@@ -478,6 +494,10 @@
   }
   .workspace-row:hover {
     background: var(--bg-sidebar-hover);
+  }
+  .workspace-row:active {
+    background: var(--bg-sidebar-selected);
+    transform: scale(0.995);
   }
 
   .workspace-icon {

@@ -123,6 +123,31 @@ aigentry 에코시스템 공식 디자인 시스템. 모든 UI 컴포넌트는 �
 
 **Favicon:** 🔶 (`getMascotEmoji()` → `'🔶'`)
 
+## UI/UX Principles Checklist
+
+모든 aterm UI 컴포넌트는 아래 원칙을 준수합니다.
+
+| # | 원칙 | 상태 | 적용 방법 |
+|---|------|------|----------|
+| 1 | **Signifiers** | ✅ | hover bg 변화, active scale(0.995), selected 좌측 오렌지 바, cursor:pointer |
+| 2 | **Visual Hierarchy** | ✅ | 마스코트 56px > 타이틀 18px/600 > 본문 13px/400 > 라벨 11px/uppercase |
+| 3 | **Grouping/Proximity** | ✅ | 섹션 간 20px spacer, 관련 요소 gap 8px, 비관련 시각적 분리 |
+| 4 | **Color Theory** | ✅ | 시맨틱: success #5cb97a, danger #d96c6c, warning #d4a853, accent #d97706 |
+| 5 | **Typography** | ✅ | 2폰트 (sans=UI, mono=코드), 5단계 텍스트 위계 (primary→disabled) |
+| 6 | **Spacing** | ✅ | padding 일관 (6px rows, 16px sections, 20px section gaps) |
+| 7 | **Consistency** | ✅ | 모든 session/workspace row 동일 패턴, 모든 label 동일 스타일 |
+| 8 | **Affordance** | ✅ | 버튼 cursor:pointer, + 버튼 명확, 토글 아이콘 직관적 (☀/🌙) |
+| 9 | **Feedback** | ✅ | hover→bg변화, active→scale축소, focus-visible→오렌지 outline, pulse→상태표시 |
+
+### 필수 인터랙션 패턴
+
+| 요소 | hover | active/pressed | selected | focus-visible |
+|------|-------|---------------|----------|---------------|
+| Session row | bg → sidebar-hover | scale(0.995) + bg → selected | 좌측 2px 오렌지 바 | 2px accent outline |
+| Workspace row | bg → sidebar-hover | scale(0.995) + bg → selected | — | 2px accent outline |
+| + 버튼 | bg → button-hover | scale(0.9) + accent color | — | 2px accent outline |
+| 테마 토글 | bg → border-default | scale(0.92) | — | 2px accent outline |
+
 ### Ecosystem Tone
 - 따뜻한 다크 브라운 (차가운 네이비/차콜 아님)
 - 오렌지/앰버 액센트 (파란색 아님)
