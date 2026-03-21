@@ -181,6 +181,34 @@
     if (tc) tc.destroy();
   });
 
+  async function createSession(event) {
+    const { path, id } = event.detail;
+    try {
+      const response = await fetch('/api/create-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, cwd: path }),
+      });
+      const data = await response.json();
+      if (!data.ok) {
+        console.error('[App] createSession server error:', data.error);
+      }
+    } catch (e) {
+      console.error('[App] createSession failed:', e.message);
+    }
+    // Refresh session list and auto-select
+    if (tc) {
+      try {
+        const list = await tc.getSessions();
+        sessions.set(Array.isArray(list) ? list : (list.sessions || []));
+      } catch (e) {
+        console.warn('[App] getSessions after createSession failed:', e.message);
+      }
+    }
+    selectedSessionId.set(id);
+    activeWorkspaceId.set(null);
+  }
+
   function handleKeydown(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
@@ -220,7 +248,7 @@
   <!-- MAIN 3-PANEL -->
   <div class="panels">
     <aside class="sidebar" style="width: {sidebarWidth}px">
-      <SessionTree on:settings={() => showSettings = !showSettings} />
+      <SessionTree on:settings={() => showSettings = !showSettings} on:create-session={createSession} />
     </aside>
 
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->

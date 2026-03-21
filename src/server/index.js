@@ -2,6 +2,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { exec } from 'child_process';
 import { WebSocketServer } from 'ws';
 import ptyManager from './pty-manager.js';
 import { start, stop, SOCKET_PATH } from './socket-server.js';
@@ -59,6 +60,87 @@ function handleRequest(req, res) {
   if (req.url.startsWith('/telepty/')) {
     return proxyTelepty(req, res);
   }
+
+  // POST /api/create-session — launch telepty allow for a new claude session
+  if (req.url === '/api/create-session' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+        return;
+      }
+      const { id, cwd } = parsed;
+      if (!id || !cwd) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Missing id or cwd' }));
+        return;
+      }
+      // Sanitise: only allow safe characters in id
+      const safeId = id.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+      const cmd = `telepty allow --id ${safeId} claude --dangerously-skip-permissions`;
+      exec(cmd, { cwd }, (err, _stdout, stderr) => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, id: safeId }));
+        }
+      });
+    });
+    return;
+  }
+
+  // GET /api/suggest-paths?q=... — return matching subdirs under ~/projects
+  if (req.url.startsWith('/api/suggest-paths') && req.method === 'GET') {
+    const urlObj = new URL(req.url, `http://localhost`);
+    const q = (urlObj.searchParams.get('q') || '').trim();
+    const homeDir = process.env.HOME || '/root';
+
+    // If query looks like an absolute path, list children of the deepest existing dir
+    if (q.startsWith('/') || q.startsWith('~')) {
+      const expanded = q.startsWith('~') ? q.replace('~', homeDir) : q;
+      // List children of parent dir whose name starts with last segment
+      const parts = expanded.replace(/\/+$/, '').split('/');
+      const base = parts.slice(0, -1).join('/') || '/';
+      const prefix = parts[parts.length - 1] || '';
+      fs.readdir(base, { withFileTypes: true }, (err, entries) => {
+        if (err) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ paths: [] }));
+          return;
+        }
+        const matches = entries
+          .filter(e => e.isDirectory() && e.name.startsWith(prefix) && !e.name.startsWith('.'))
+          .slice(0, 10)
+          .map(e => path.join(base, e.name).replace(homeDir, '~'));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ paths: matches }));
+      });
+    } else {
+      // Default: list ~/projects/* matching query
+      const projectsDir = path.join(homeDir, 'projects');
+      fs.readdir(projectsDir, { withFileTypes: true }, (err, entries) => {
+        if (err) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ paths: [] }));
+          return;
+        }
+        const lower = q.toLowerCase();
+        const matches = entries
+          .filter(e => e.isDirectory() && e.name.toLowerCase().includes(lower) && !e.name.startsWith('.'))
+          .slice(0, 10)
+          .map(e => `~/projects/${e.name}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ paths: matches }));
+      });
+    }
+    return;
+  }
+
   return serveStatic(req, res);
 }
 

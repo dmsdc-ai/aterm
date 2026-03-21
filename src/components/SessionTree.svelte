@@ -8,6 +8,121 @@
 
   let refreshInterval;
 
+  // New session input state
+  let showNewSessionInput = false;
+  let newSessionPath = '';
+  let newSessionInputEl;
+  let pathSuggestions = [];
+  let suggestionIndex = -1;
+
+  function openNewSessionInput() {
+    showNewSessionInput = true;
+    newSessionPath = '';
+    pathSuggestions = [];
+    suggestionIndex = -1;
+    // Auto-focus after Svelte renders
+    setTimeout(() => { if (newSessionInputEl) newSessionInputEl.focus(); }, 30);
+  }
+
+  function closeNewSessionInput() {
+    showNewSessionInput = false;
+    newSessionPath = '';
+    pathSuggestions = [];
+    suggestionIndex = -1;
+  }
+
+  async function fetchSuggestions(input) {
+    if (!input || input.length < 2) { pathSuggestions = []; return; }
+    try {
+      const res = await fetch(`/api/suggest-paths?q=${encodeURIComponent(input)}`);
+      if (res.ok) {
+        const data = await res.json();
+        pathSuggestions = data.paths || [];
+      }
+    } catch {
+      pathSuggestions = [];
+    }
+  }
+
+  function handleNewSessionInput(e) {
+    newSessionPath = e.target.value;
+    suggestionIndex = -1;
+    fetchSuggestions(newSessionPath);
+  }
+
+  function selectSuggestion(p) {
+    newSessionPath = p;
+    pathSuggestions = [];
+    suggestionIndex = -1;
+    if (newSessionInputEl) newSessionInputEl.focus();
+  }
+
+  async function confirmNewSession() {
+    const rawPath = newSessionPath.trim();
+    if (!rawPath) { closeNewSessionInput(); return; }
+
+    // Expand ~ to home
+    const path = rawPath.startsWith('~/')
+      ? rawPath.replace('~', '/Users/' + (rawPath.split('/')[0] || ''))
+      : rawPath;
+
+    // Extract folder name
+    const parts = path.replace(/\/+$/, '').split('/');
+    const folderName = parts[parts.length - 1] || 'session';
+    const sessionId = folderName + '-claude';
+
+    // Check if session already exists
+    let currentSessions;
+    const unsub = sessions.subscribe(v => { currentSessions = v; });
+    unsub();
+    const existing = Array.isArray(currentSessions)
+      ? currentSessions.find(s => s.id === sessionId)
+      : null;
+
+    if (existing) {
+      selectedSessionId.set(sessionId);
+      activeWorkspaceId.set(null);
+      closeNewSessionInput();
+      return;
+    }
+
+    dispatch('create-session', { path, id: sessionId });
+    closeNewSessionInput();
+  }
+
+  function handleNewSessionKey(e) {
+    if (e.key === 'Escape') {
+      closeNewSessionInput();
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (pathSuggestions.length > 0) {
+        suggestionIndex = Math.min(suggestionIndex + 1, pathSuggestions.length - 1);
+        newSessionPath = pathSuggestions[suggestionIndex];
+      }
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (pathSuggestions.length > 0 && suggestionIndex > 0) {
+        suggestionIndex = Math.max(suggestionIndex - 1, 0);
+        newSessionPath = pathSuggestions[suggestionIndex];
+      }
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (suggestionIndex >= 0 && pathSuggestions[suggestionIndex]) {
+        newSessionPath = pathSuggestions[suggestionIndex];
+        pathSuggestions = [];
+        suggestionIndex = -1;
+      } else {
+        confirmNewSession();
+      }
+    }
+  }
+
   onMount(() => {
     refreshTeleptySessions();
     refreshInterval = setInterval(refreshTeleptySessions, 5000);
@@ -115,7 +230,42 @@
 <div class="tree">
 
   <!-- ── SESSIONS section ── -->
-  <div class="section-label">Sessions</div>
+  <div class="section-header-row">
+    <span class="section-label" style="padding: 0; margin-bottom: 0;">Sessions</span>
+    <button
+      class="add-btn"
+      on:click={openNewSessionInput}
+      title="New session"
+      aria-label="Create session"
+    >+</button>
+  </div>
+
+  {#if showNewSessionInput}
+    <div class="new-session-input-wrap">
+      <input
+        type="text"
+        class="new-session-input"
+        placeholder="Enter project path..."
+        value={newSessionPath}
+        bind:this={newSessionInputEl}
+        on:input={handleNewSessionInput}
+        on:keydown={handleNewSessionKey}
+      />
+      {#if pathSuggestions.length > 0}
+        <div class="path-suggestions">
+          {#each pathSuggestions as suggestion, i}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="suggestion-item"
+              class:active={i === suggestionIndex}
+              on:click={() => selectSuggestion(suggestion)}
+            >{suggestion}</div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   {#if $connected}
     {#each Object.entries($sessionTree) as [project, projectSessions]}
@@ -544,6 +694,66 @@
     background: var(--accent-subtle);
     color: var(--accent);
     border-color: var(--accent-muted);
+  }
+
+  /* ── New session input ── */
+  .new-session-input-wrap {
+    position: relative;
+    padding: 4px 12px 8px;
+  }
+
+  .new-session-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg-inset, #1a1614);
+    border: 1px solid var(--accent-muted, rgba(217,119,6,0.3));
+    border-radius: var(--radius-sm, 4px);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 5px 8px;
+    outline: none;
+    transition: border-color 150ms ease;
+  }
+
+  .new-session-input:focus {
+    border-color: var(--accent, #d97706);
+  }
+
+  .new-session-input::placeholder {
+    color: var(--text-disabled);
+  }
+
+  .path-suggestions {
+    position: absolute;
+    top: calc(100% - 4px);
+    left: 12px;
+    right: 12px;
+    background: var(--bg-sidebar, #1e1a17);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm, 4px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    z-index: 50;
+    max-height: 180px;
+    overflow-y: auto;
+  }
+
+  .suggestion-item {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 5px 8px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 100ms ease;
+  }
+
+  .suggestion-item:hover,
+  .suggestion-item.active {
+    background: var(--bg-sidebar-hover);
+    color: var(--text-primary);
   }
 
   /* ── Telepty offline ── */
