@@ -25,6 +25,18 @@
         var el = document.getElementById('loader-error');
         if (el) { el.style.display='block'; el.textContent = 'Error: ' + (e.reason?.message || e.reason); }
       });
+      // Auto-reload if app doesn't mount within 5 seconds
+      window.__atermMountTimeout = setTimeout(function() {
+        var loader = document.getElementById('loader');
+        if (loader && loader.style.display !== 'none') {
+          var el = document.getElementById('loader-error');
+          if (el) { el.style.display='block'; el.textContent = 'Retrying...'; }
+          setTimeout(function() { location.reload(); }, 500);
+        }
+      }, 5000);
+      window.__atermClearMountTimeout = function() {
+        clearTimeout(window.__atermMountTimeout);
+      };
     </script>
     <script type="module" src="./src/main.js"></script>
   </body>

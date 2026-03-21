@@ -9,7 +9,8 @@ try {
     target: document.getElementById('app'),
   })
 
-  // Remove loading spinner after successful mount
+  // Clear auto-reload timeout and remove loading spinner
+  if (window.__atermClearMountTimeout) window.__atermClearMountTimeout()
   const loader = document.getElementById('loader')
   if (loader) loader.remove()
 } catch (e) {

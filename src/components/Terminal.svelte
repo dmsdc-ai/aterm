@@ -12,9 +12,11 @@
   let fitAddon = null;
   let unsubOutput = null;
   let resizeCleanup = null;
+  let compositionCleanup = null;
   let currentWorkspaceId = null;
   let ac = null;
   let mounted = false;
+  let isComposing = false;
 
   const unsubClient = atermClient.subscribe(v => {
     ac = v;
@@ -40,10 +42,12 @@
 
   function cleanup() {
     if (resizeCleanup) { resizeCleanup(); resizeCleanup = null; }
+    if (compositionCleanup) { compositionCleanup(); compositionCleanup = null; }
     if (unsubOutput) { unsubOutput(); unsubOutput = null; }
     if (term) { term.dispose(); term = null; }
     fitAddon = null;
     currentWorkspaceId = null;
+    isComposing = false;
   }
 
   function getTermTheme() {
@@ -98,8 +102,6 @@
       return;
     }
 
-    console.log('[Terminal] connecting to workspace:', workspaceId, 'ac.connected:', ac.connected);
-
     cleanup();
     currentWorkspaceId = workspaceId;
     const myWsId = workspaceId;
@@ -119,27 +121,54 @@
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(termEl);
-    fitAddon.fit();
-    term.focus();
+
+    // Bug fix 2: delay fit/focus/resize until DOM is ready
+    requestAnimationFrame(() => {
+      if (currentWorkspaceId !== myWsId || !fitAddon || !term) return;
+      fitAddon.fit();
+      term.focus();
+      if (ac) {
+        const { cols, rows } = term;
+        ac.resize(workspaceId, cols, rows).catch(() => {});
+      }
+    });
 
     const myTerm = term;
 
-    // Send initial resize to server
-    if (ac) {
-      const { cols, rows } = term;
-      ac.resize(workspaceId, cols, rows).catch(() => {});
+    // Bug fix 1: IME composition handling for Korean
+    const textarea = termEl.querySelector('.xterm-helper-textarea');
+    if (textarea) {
+      const onCompositionStart = () => { isComposing = true; };
+      const onCompositionEnd = (e) => {
+        isComposing = false;
+        if (e.data && currentWorkspaceId === myWsId && ac) {
+          ac.send(workspaceId, e.data).catch(() => {});
+        }
+      };
+      textarea.addEventListener('compositionstart', onCompositionStart);
+      textarea.addEventListener('compositionend', onCompositionEnd);
+      compositionCleanup = () => {
+        textarea.removeEventListener('compositionstart', onCompositionStart);
+        textarea.removeEventListener('compositionend', onCompositionEnd);
+      };
     }
 
+    // Suppress key events during IME composition
+    term.attachCustomKeyEventHandler((e) => {
+      if (isComposing) return false;
+      return true;
+    });
+
     // Subscribe to real-time PTY output
-    console.log('[Terminal] subscribing to PTY output for:', workspaceId);
     unsubOutput = ac.onOutput(workspaceId, (data) => {
       if (currentWorkspaceId === myWsId && term === myTerm) {
         term.write(data);
       }
     });
 
-    // Send terminal input to workspace
+    // Send terminal input to workspace (skip during IME composition)
     term.onData((data) => {
+      if (isComposing) return;
       if (currentWorkspaceId === myWsId && ac) {
         ac.send(workspaceId, data).catch(() => {});
       }
