@@ -170,29 +170,32 @@
     50% { opacity: 0.6; }
   }
 
-  /* ── MASCOT (pixel art SVG) ── */
+  /* ── MASCOT (·⣿· text-based, from registry AigentryMascot.tsx) ── */
   .mascot {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    vertical-align: middle;
+    display: inline-block;
+    font-family: var(--font-mono);
+    line-height: 1;
     user-select: none;
+    letter-spacing: -0.05em;
+    vertical-align: middle;
   }
 
-  .mascot svg {
-    display: block;
+  .mascot-eye {
+    color: var(--mascot-eye);
   }
 
-  .mascot-eye-pixel { fill: var(--mascot-eye); }
-  .mascot-core-pixel { fill: var(--mascot-core); }
+  .mascot-core {
+    color: var(--mascot-core);
+  }
 
-  .mascot.pulse .mascot-core-pixel {
+  .mascot.pulse .mascot-core {
+    display: inline-block;
     animation: mascot-core-pulse 2s ease-in-out infinite;
   }
 
   /* Sizes */
-  .mascot-sm svg { width: 16px; height: 18px; }
-  .mascot-lg svg { width: 56px; height: 64px; }
+  .mascot-sm { font-size: 14px; }
+  .mascot-lg { font-size: 48px; letter-spacing: 0.02em; }
 
 
   /* ── APP SHELL ── */
@@ -683,7 +686,7 @@
   <!-- HEADER — 48px -->
   <header class="header">
     <div class="header-left">
-      <span class="mascot mascot-sm"><svg viewBox="0 0 24 28"><rect class="mascot-eye-pixel" x="2" y="8" width="4" height="4"/><rect class="mascot-eye-pixel" x="18" y="8" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="4" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="4" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="9" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="9" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="14" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="14" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="19" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="19" width="4" height="4"/></svg></span>
+      <span class="mascot mascot-sm"><span class="mascot-eye">·</span><span class="mascot-core">⣿</span><span class="mascot-eye">·</span></span>
       <span class="header-title">aterm</span>
     </div>
 
@@ -878,7 +881,7 @@
 
       <div style="flex:1"></div>
       <div style="padding: 16px; text-align: center;">
-        <span class="mascot mascot-sm pulse"><svg viewBox="0 0 24 28"><rect class="mascot-eye-pixel" x="2" y="8" width="4" height="4"/><rect class="mascot-eye-pixel" x="18" y="8" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="4" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="4" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="9" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="9" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="14" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="14" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="19" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="19" width="4" height="4"/></svg></span>
+        <span class="mascot mascot-sm pulse"><svg viewBox="0 0 22 24"><rect class="mascot-eye-pixel" x="2" y="7" width="3" height="3"/><rect class="mascot-eye-pixel" x="17" y="7" width="3" height="3"/><rect class="mascot-core-pixel" x="7" y="1" width="4" height="4"/><rect class="mascot-core-pixel" x="11" y="1" width="4" height="4"/><rect class="mascot-core-pixel" x="7" y="6" width="4" height="4"/><rect class="mascot-core-pixel" x="11" y="6" width="4" height="4"/><rect class="mascot-core-pixel" x="7" y="11" width="4" height="4"/><rect class="mascot-core-pixel" x="11" y="11" width="4" height="4"/><rect class="mascot-core-pixel" x="7" y="16" width="4" height="4"/><rect class="mascot-core-pixel" x="11" y="16" width="4" height="4"/></svg></span>
       </div>
     </aside>
 
@@ -886,7 +889,7 @@
     <main class="center">
       <div class="center-empty">
 
-        <span class="mascot mascot-lg pulse"><svg viewBox="0 0 24 28"><rect class="mascot-eye-pixel" x="2" y="8" width="4" height="4"/><rect class="mascot-eye-pixel" x="18" y="8" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="4" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="4" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="9" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="9" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="14" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="14" width="4" height="4"/><rect class="mascot-core-pixel" x="8" y="19" width="4" height="4"/><rect class="mascot-core-pixel" x="12" y="19" width="4" height="4"/></svg></span>
+        <span class="mascot mascot-lg pulse"><span class="mascot-eye">·</span><span class="mascot-core">⣿</span><span class="mascot-eye">·</span></span>
         <span class="center-empty-title">No workspace selected</span>
         <span class="center-empty-hint">Select a workspace or press <kbd>+</kbd> to create one</span>
       </div>
