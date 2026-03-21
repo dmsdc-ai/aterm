@@ -1,9 +1,17 @@
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 
-// https://vite.dev/config/
+/**
+ * Standalone web mode config (npm run web:dev / web:build).
+ * Uses the same renderer source but runs against the standalone WS server.
+ */
 export default defineConfig({
+  root: 'src/renderer',
   plugins: [svelte()],
+  build: {
+    outDir: '../../dist',
+    emptyOutDir: true,
+  },
   server: {
     proxy: {
       // Legacy telepty daemon (HTTP + WS)
@@ -17,7 +25,6 @@ export default defineConfig({
         target: 'ws://localhost:3849',
         changeOrigin: true,
         ws: true,
-        // Rewrite the path: /aterm-ws → / (ws server listens at root)
         rewrite: (path) => path.replace(/^\/aterm-ws/, ''),
       },
     },
