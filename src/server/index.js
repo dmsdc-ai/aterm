@@ -1,11 +1,65 @@
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import ptyManager from './pty-manager.js';
 import { start, stop, SOCKET_PATH } from './socket-server.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIST_DIR = path.resolve(__dirname, '../../dist');
 const DEFAULT_WORKSPACE_ID = 'default';
-const WS_PORT = 3849;
+const PORT = 3849;
 
 let wss = null;
+let httpServer = null;
+
+// ── MIME types for static file serving ──────────────────────────────────────
+
+const MIME_TYPES = {
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
+
+function serveStatic(req, res) {
+  let urlPath = req.url.split('?')[0];
+  if (urlPath === '/') urlPath = '/index.html';
+
+  const filePath = path.join(DIST_DIR, urlPath);
+  // Prevent directory traversal
+  if (!filePath.startsWith(DIST_DIR)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      // SPA fallback: serve index.html for any non-file route
+      fs.readFile(path.join(DIST_DIR, 'index.html'), (err2, indexData) => {
+        if (err2) {
+          res.writeHead(404);
+          res.end('Not found');
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(indexData);
+      });
+      return;
+    }
+    const ext = path.extname(filePath);
+    const mime = MIME_TYPES[ext] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': mime });
+    res.end(data);
+  });
+}
 
 // ── WebSocket helpers ────────────────────────────────────────────────────────
 
@@ -153,7 +207,8 @@ function unsubscribeAll(ws) {
 
 function startWsServer() {
   return new Promise((resolve) => {
-    wss = new WebSocketServer({ port: WS_PORT });
+    httpServer = http.createServer(serveStatic);
+    wss = new WebSocketServer({ server: httpServer });
 
     wss.on('connection', (ws) => {
       ws.on('message', async (raw) => {
@@ -198,14 +253,20 @@ function startWsServer() {
       });
     });
 
-    wss.on('listening', () => {
-      console.log(`[ws-server] listening on ws://localhost:${WS_PORT}`);
+    httpServer.listen(PORT, () => {
+      const hasDist = fs.existsSync(path.join(DIST_DIR, 'index.html'));
+      console.log(`[aterm] listening on http://localhost:${PORT}`);
+      if (hasDist) {
+        console.log(`[aterm] serving UI from ${DIST_DIR}`);
+      } else {
+        console.log(`[aterm] no dist/ found — run 'npm run build' for UI. WS-only mode.`);
+      }
       resolve();
     });
 
-    wss.on('error', (err) => {
-      console.error('[ws-server] error:', err.message);
-      resolve(); // Don't hard-fail the whole server
+    httpServer.on('error', (err) => {
+      console.error('[aterm] http server error:', err.message);
+      resolve();
     });
   });
 }
@@ -213,7 +274,13 @@ function startWsServer() {
 function stopWsServer() {
   return new Promise((resolve) => {
     if (!wss) return resolve();
-    wss.close(() => resolve());
+    wss.close(() => {
+      if (httpServer) {
+        httpServer.close(() => resolve());
+      } else {
+        resolve();
+      }
+    });
   });
 }
 
@@ -233,7 +300,7 @@ async function startServer() {
 
   console.log(`[aterm] server ready`);
   console.log(`  Unix socket: ${SOCKET_PATH}`);
-  console.log(`  WebSocket:   ws://localhost:${WS_PORT}`);
+  console.log(`  HTTP + WS:   http://localhost:${PORT}`);
 }
 
 async function stopServer() {
