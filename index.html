@@ -7,16 +7,15 @@
     <title>aterm</title>
   </head>
   <body>
-    <div id="app">
-      <!-- Loading spinner — visible until Svelte mounts and removes it -->
-      <div id="loader" style="display:flex;align-items:center;justify-content:center;height:100vh;background:#faf6f0;flex-direction:column;gap:16px;font-family:-apple-system,system-ui,sans-serif;">
-        <div style="font-family:monospace;font-size:32px;letter-spacing:-0.05em;color:#d4a574;">
-          <span style="color:#06b6d4;">·</span><span style="color:#d4a574;">⣿</span><span style="color:#06b6d4;">·</span>
-        </div>
-        <div style="font-size:14px;color:#8a7e74;">Loading aterm...</div>
-        <div id="loader-error" style="display:none;color:#d96c6c;font-size:11px;max-width:400px;text-align:center;padding:8px;"></div>
+    <!-- Loading spinner — visible until Svelte mounts -->
+    <div id="loader" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#faf6f0;flex-direction:column;gap:16px;font-family:-apple-system,system-ui,sans-serif;z-index:9999;">
+      <div style="font-family:monospace;font-size:32px;letter-spacing:-0.05em;color:#d4a574;">
+        <span style="color:#06b6d4;">·</span><span style="color:#d4a574;">⣿</span><span style="color:#06b6d4;">·</span>
       </div>
+      <div style="font-size:14px;color:#8a7e74;">Loading aterm...</div>
+      <div id="loader-error" style="display:none;color:#d96c6c;font-size:11px;max-width:400px;text-align:center;padding:8px;"></div>
     </div>
+    <div id="app"></div>
     <script>
       window.addEventListener('error', function(e) {
         var el = document.getElementById('loader-error');
