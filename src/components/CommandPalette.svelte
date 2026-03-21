@@ -10,8 +10,7 @@
   let tc = null;
   client.subscribe(v => { tc = v; });
 
-  // Inline inject/broadcast state
-  let injectMode = null; // null | { type: 'inject'|'broadcast', id?: string, label: string }
+  let injectMode = null;
   let injectText = '';
 
   onMount(() => {
@@ -27,16 +26,16 @@
     for (const s of sessionList) {
       const name = s.id.replace(/^aigentry-/, '').replace(/-claude$/, '');
       if (!q || name.includes(lower) || s.id.includes(lower)) {
-        items.push({ type: 'select', label: `Open ${name}`, id: s.id, icon: '▸' });
-        items.push({ type: 'inject', label: `Inject to ${name}`, id: s.id, icon: '→' });
+        items.push({ type: 'select', label: `Open ${name}`, id: s.id, category: 'session', glyph: '▸' });
+        items.push({ type: 'inject', label: `Inject to ${name}`, id: s.id, category: 'inject', glyph: '↗' });
       }
     }
 
     if (!q || 'broadcast'.includes(lower)) {
-      items.push({ type: 'broadcast', label: 'Broadcast to all', icon: '📢' });
+      items.push({ type: 'broadcast', label: 'Broadcast to all sessions', category: 'action', glyph: '◈' });
     }
     if (!q || 'refresh'.includes(lower)) {
-      items.push({ type: 'refresh', label: 'Refresh sessions', icon: '↻' });
+      items.push({ type: 'refresh', label: 'Refresh session list', category: 'action', glyph: '↺' });
     }
 
     return items.slice(0, 15);
@@ -48,12 +47,11 @@
   function startInject(action) {
     if (action.type === 'inject') {
       const name = action.id.replace(/^aigentry-/, '').replace(/-claude$/, '');
-      injectMode = { type: 'inject', id: action.id, label: `Message to ${name}:` };
+      injectMode = { type: 'inject', id: action.id, label: `Inject to ${name}` };
     } else if (action.type === 'broadcast') {
-      injectMode = { type: 'broadcast', label: 'Broadcast to all:' };
+      injectMode = { type: 'broadcast', label: 'Broadcast to all' };
     }
     injectText = '';
-    // Focus the inject input on next tick
     setTimeout(() => injectEl?.focus(), 0);
   }
 
@@ -72,7 +70,6 @@
   function cancelInject() {
     injectMode = null;
     injectText = '';
-    // Return focus to main input
     setTimeout(() => inputEl?.focus(), 0);
   }
 
@@ -92,7 +89,7 @@
   }
 
   function handleKey(e) {
-    if (injectMode) return; // Let inject input handle its own keys
+    if (injectMode) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1, actions.length - 1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1, 0); }
     else if (e.key === 'Enter' && actions[selectedIndex]) { e.preventDefault(); execute(actions[selectedIndex]); }
@@ -103,81 +100,384 @@
     if (e.key === 'Enter') { e.preventDefault(); commitInject(); }
     else if (e.key === 'Escape') { e.preventDefault(); cancelInject(); }
   }
+
+  // Category badge styles
+  function categoryColor(cat) {
+    if (cat === 'session') return '#58a6ff22';
+    if (cat === 'inject') return '#3fb95022';
+    if (cat === 'action') return '#d2992222';
+    return 'transparent';
+  }
+  function categoryTextColor(cat) {
+    if (cat === 'session') return '#58a6ff';
+    if (cat === 'inject') return '#3fb950';
+    if (cat === 'action') return '#d29922';
+    return '#8b949e';
+  }
 </script>
 
 <svelte:window on:keydown={handleKey} />
 
-<div class="overlay" on:click={() => dispatch('close')} role="dialog">
+<div
+  class="overlay"
+  on:click={() => dispatch('close')}
+  on:keydown={(e) => e.key === 'Escape' && dispatch('close')}
+  role="dialog"
+  aria-modal="true"
+  aria-label="Command palette"
+  tabindex="-1"
+>
   <div class="palette" on:click|stopPropagation role="presentation">
+
     {#if injectMode}
-      <div class="inject-header">
-        <span class="inject-label">{injectMode.label}</span>
+      <!-- Inject / Broadcast mode -->
+      <div class="inject-panel">
+        <div class="inject-top">
+          <span class="inject-glyph">↗</span>
+          <span class="inject-label">{injectMode.label}</span>
+          <button class="inject-cancel-btn" on:click={cancelInject}>esc</button>
+        </div>
+        <input
+          bind:this={injectEl}
+          bind:value={injectText}
+          on:keydown={handleInjectKey}
+          placeholder="Type your message and press Enter to send..."
+          class="inject-input"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div class="inject-footer">
+          <span class="hint"><kbd>Enter</kbd> send</span>
+          <span class="hint"><kbd>Esc</kbd> cancel</span>
+        </div>
       </div>
-      <input
-        bind:this={injectEl}
-        bind:value={injectText}
-        on:keydown={handleInjectKey}
-        placeholder="Type message, Enter to send, Esc to cancel"
-        class="input inject-input"
-      />
+
     {:else}
-      <input
-        bind:this={inputEl}
-        bind:value={query}
-        on:keydown={handleKey}
-        placeholder="Search sessions, actions..."
-        class="input"
-      />
-      <div class="results">
-        {#each actions as action, i}
-          <button
-            class="result"
-            class:active={i === selectedIndex}
-            on:click={() => execute(action)}
-          >
-            <span class="action-icon">{action.icon}</span>
-            <span>{action.label}</span>
+      <!-- Search mode -->
+      <div class="search-row">
+        <span class="search-icon">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="6" cy="6" r="4.5" stroke="#484f58" stroke-width="1.25"/>
+            <path d="M9.5 9.5L12.5 12.5" stroke="#484f58" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <input
+          bind:this={inputEl}
+          bind:value={query}
+          on:keydown={handleKey}
+          placeholder="Search sessions, actions..."
+          class="search-input"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        {#if query}
+          <button class="clear-btn" aria-label="Clear search" on:click={() => { query = ''; inputEl?.focus(); }}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M2 2L10 10M10 2L2 10" stroke="#484f58" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
           </button>
-        {/each}
+        {/if}
+      </div>
+
+      {#if actions.length > 0}
+        <div class="divider"></div>
+        <div class="results">
+          {#each actions as action, i}
+            <button
+              class="result"
+              class:active={i === selectedIndex}
+              on:click={() => execute(action)}
+              on:mouseenter={() => selectedIndex = i}
+            >
+              <span class="result-glyph" style="color: {categoryTextColor(action.category)};">{action.glyph}</span>
+              <span class="result-label">{action.label}</span>
+              <span class="result-badge" style="background: {categoryColor(action.category)}; color: {categoryTextColor(action.category)};">
+                {action.category}
+              </span>
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <div class="empty-state">
+          <span>No results for "{query}"</span>
+        </div>
+      {/if}
+
+      <div class="palette-footer">
+        <span class="hint"><kbd>↑↓</kbd> navigate</span>
+        <span class="hint"><kbd>Enter</kbd> select</span>
+        <span class="hint"><kbd>Esc</kbd> close</span>
       </div>
     {/if}
+
   </div>
 </div>
 
 <style>
   .overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-    display: flex; justify-content: center; padding-top: 20vh; z-index: 100;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 18vh;
+    z-index: 100;
   }
+
   .palette {
-    width: 480px; max-height: 400px; background: #161b22;
-    border: 1px solid #30363d; border-radius: 12px; overflow: hidden;
-    box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+    width: 520px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.04) inset,
+      0 24px 80px rgba(0, 0, 0, 0.6),
+      0 4px 16px rgba(0, 0, 0, 0.4);
   }
-  .input {
-    width: 100%; padding: 12px 16px; border: none; border-bottom: 1px solid #21262d;
-    background: transparent; color: #e6edf3; font-size: 15px; outline: none;
-    box-sizing: border-box;
+
+  /* ── Search row ── */
+  .search-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0 14px;
+    height: 52px;
+    background: #161b22;
   }
-  .input::placeholder { color: #484f58; }
-  .inject-header {
-    padding: 10px 16px 0;
-    color: #8b949e;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+
+  .search-icon {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-right: 10px;
   }
-  .inject-input {
-    border-bottom: none;
-    font-size: 15px;
-    padding-top: 8px;
+
+  .search-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: #e6edf3;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 14px;
+    font-weight: 400;
+    outline: none;
+    letter-spacing: 0.01em;
+    min-width: 0;
   }
-  .results { overflow-y: auto; max-height: 320px; }
+
+  .search-input::placeholder {
+    color: #484f58;
+    font-weight: 400;
+  }
+
+  .clear-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    opacity: 0.6;
+    transition: opacity 120ms ease;
+  }
+
+  .clear-btn:hover { opacity: 1; }
+
+  /* ── Divider ── */
+  .divider {
+    height: 1px;
+    background: #21262d;
+    margin: 0;
+  }
+
+  /* ── Results list ── */
+  .results {
+    overflow-y: auto;
+    max-height: 292px;
+    padding: 4px 0;
+  }
+
+  .results::-webkit-scrollbar { width: 4px; }
+  .results::-webkit-scrollbar-track { background: transparent; }
+  .results::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+
   .result {
-    display: flex; align-items: center; gap: 10px; width: 100%;
-    padding: 10px 16px; border: none; background: none;
-    color: #e6edf3; font-size: 14px; cursor: pointer; text-align: left;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 14px;
+    border: none;
+    background: none;
+    color: #c9d1d9;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+    transition: background 80ms ease, color 80ms ease;
   }
-  .result:hover, .result.active { background: #1f6feb33; }
-  .action-icon { width: 20px; text-align: center; flex-shrink: 0; }
+
+  .result:hover,
+  .result.active {
+    background: rgba(88, 166, 255, 0.08);
+    color: #e6edf3;
+  }
+
+  .result.active {
+    background: rgba(88, 166, 255, 0.1);
+    border-left: 2px solid #58a6ff;
+    padding-left: 12px;
+  }
+
+  .result-glyph {
+    width: 16px;
+    text-align: center;
+    flex-shrink: 0;
+    font-size: 12px;
+    line-height: 1;
+  }
+
+  .result-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+
+  .result-badge {
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 7px;
+    border-radius: 20px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+
+  /* ── Empty state ── */
+  .empty-state {
+    padding: 28px 16px;
+    text-align: center;
+    color: #484f58;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 13px;
+  }
+
+  /* ── Footer hints ── */
+  .palette-footer {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 14px;
+    border-top: 1px solid #21262d;
+    background: #0d1117;
+  }
+
+  .hint {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: #484f58;
+    font-size: 11px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-bottom-color: #484f58;
+    color: #6e7681;
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    line-height: 1.6;
+  }
+
+  /* ── Inject panel ── */
+  .inject-panel {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .inject-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px 8px;
+    border-bottom: 1px solid #21262d;
+  }
+
+  .inject-glyph {
+    font-size: 13px;
+    color: #3fb950;
+    flex-shrink: 0;
+  }
+
+  .inject-label {
+    flex: 1;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .inject-cancel-btn {
+    background: none;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    color: #484f58;
+    font-size: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 2px 7px;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: color 100ms ease, border-color 100ms ease;
+  }
+
+  .inject-cancel-btn:hover {
+    color: #8b949e;
+    border-color: #484f58;
+  }
+
+  .inject-input {
+    border: none;
+    background: transparent;
+    color: #e6edf3;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 14px;
+    font-weight: 400;
+    outline: none;
+    padding: 14px 14px;
+    width: 100%;
+    box-sizing: border-box;
+    letter-spacing: 0.01em;
+  }
+
+  .inject-input::placeholder {
+    color: #484f58;
+  }
+
+  .inject-footer {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 14px;
+    border-top: 1px solid #21262d;
+    background: #0d1117;
+  }
 </style>

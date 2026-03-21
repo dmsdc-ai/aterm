@@ -1,55 +1,55 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { TeleptClient } from './lib/telepty-client.js';
-  import { client, sessions, connected, addBusEvent, selectedSessionId } from './lib/stores.js';
+  import { AtermClient } from './lib/aterm-client.js';
+  import {
+    atermClient, atermConnected, workspaces, activeWorkspaceId,
+    refreshWorkspaces, addBusEvent,
+  } from './lib/stores.js';
   import SessionTree from './components/SessionTree.svelte';
   import Timeline from './components/Timeline.svelte';
   import Terminal from './components/Terminal.svelte';
   import CommandPalette from './components/CommandPalette.svelte';
 
-  let tc = null;
-  let pollTimer = null;
+  let ac = null;
   let showPalette = false;
+  let refreshTimer = null;
 
-  onMount(async () => {
-    const isDev = import.meta.env.DEV;
-    tc = new TeleptClient({ token: '', useProxy: isDev });
-    try {
-      const metaUrl = isDev ? '/api/meta' : `http://localhost:${3848}/api/meta`;
-      const res = await fetch(metaUrl);
-      if (res.ok) {
-        const meta = await res.json();
-        tc.token = meta.auth_token || meta.token || '';
-      }
-    } catch (e) { console.warn('[aterm] meta fetch failed:', e); }
+  onMount(() => {
+    ac = new AtermClient();
+    atermClient.set(ac);
 
-    client.set(tc);
+    ac.on('connected', async () => {
+      atermConnected.set(true);
+      await refreshWorkspaces(ac);
+      // Auto-select first workspace if none selected
+      activeWorkspaceId.update(cur => {
+        if (cur) return cur;
+        let list;
+        const unsub = workspaces.subscribe(v => { list = v; });
+        unsub();
+        return list?.[0]?.id ?? null;
+      });
+    });
 
-    try {
-      const list = await tc.getSessions();
-      sessions.set(list);
-      connected.set(true);
-    } catch (e) {
-      console.warn('[aterm] initial session fetch failed:', e);
-      connected.set(false);
-    }
+    ac.on('disconnected', () => {
+      atermConnected.set(false);
+    });
 
-    pollTimer = setInterval(async () => {
-      try {
-        const list = await tc.getSessions();
-        sessions.set(list);
-        connected.set(true);
-      } catch {
-        connected.set(false);
-      }
-    }, 3000);
+    // Workspace lifecycle events from server
+    ac.on('created', async () => {
+      await refreshWorkspaces(ac);
+    });
+    ac.on('closed', async () => {
+      await refreshWorkspaces(ac);
+    });
 
-    tc.connectBus((event) => addBusEvent(event));
+    // Poll workspace list every 5s to catch external changes
+    refreshTimer = setInterval(() => refreshWorkspaces(ac), 5000);
   });
 
   onDestroy(() => {
-    if (pollTimer) clearInterval(pollTimer);
-    if (tc) tc.destroy();
+    if (refreshTimer) clearInterval(refreshTimer);
+    if (ac) ac.destroy();
   });
 
   function handleKeydown(e) {
@@ -65,11 +65,23 @@
 
 <div class="app">
   <header class="header">
-    <span class="logo">⚡ aterm</span>
-    <span class="status" class:online={$connected} class:offline={!$connected}>
-      {$connected ? 'Connected' : 'Disconnected'}
-    </span>
-    <button class="palette-btn" on:click={() => showPalette = true}>⌘K</button>
+    <div class="header-left">
+      <span class="logo">
+        <span class="logo-bolt">⚡</span>aterm
+      </span>
+    </div>
+
+    <div class="header-center"></div>
+
+    <div class="header-right">
+      <span class="status" class:online={$atermConnected} class:offline={!$atermConnected}>
+        <span class="status-dot-indicator"></span>
+        {$atermConnected ? 'Connected' : 'Disconnected'}
+      </span>
+      <button class="palette-btn" on:click={() => showPalette = true}>
+        <span class="palette-key">⌘K</span>
+      </button>
+    </div>
   </header>
 
   <div class="panels">
@@ -78,11 +90,15 @@
     </aside>
 
     <main class="center">
-      {#if $selectedSessionId}
-        <Terminal sessionId={$selectedSessionId} />
+      {#if $activeWorkspaceId}
+        <Terminal workspaceId={$activeWorkspaceId} />
       {:else}
         <div class="empty">
-          <p>Select a session or press <kbd>⌘K</kbd></p>
+          {#if $atermConnected}
+            <p>Select a workspace or press <kbd>+</kbd> to create one</p>
+          {:else}
+            <p>Connecting to aterm server...</p>
+          {/if}
         </div>
       {/if}
     </main>
@@ -106,23 +122,136 @@
   }
   .app { display: flex; flex-direction: column; height: 100vh; }
   .header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 8px 16px; background: #161b22;
-    border-bottom: 1px solid #30363d; font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 40px;
+    padding: 0 16px;
+    background: linear-gradient(180deg, #1c2128 0%, #161b22 100%);
+    border-bottom: 1px solid #30363d;
+    flex-shrink: 0;
+    user-select: none;
   }
-  .logo { font-weight: 700; font-size: 15px; }
-  .status { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
-  .online { background: #1a4d2e; color: #3fb950; }
-  .offline { background: #4d1a1a; color: #f85149; }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+  }
+
+  .header-center {
+    flex: 1;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: #e6edf3;
+    letter-spacing: -0.01em;
+  }
+
+  .logo-bolt {
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 9px 3px 7px;
+    border-radius: 20px;
+    letter-spacing: 0.01em;
+    transition: background 200ms ease, color 200ms ease;
+  }
+
+  .status-dot-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: background 200ms ease, box-shadow 200ms ease;
+  }
+
+  .online {
+    background: rgba(63, 185, 80, 0.1);
+    color: #3fb950;
+    border: 1px solid rgba(63, 185, 80, 0.2);
+  }
+
+  .online .status-dot-indicator {
+    background: #3fb950;
+    box-shadow: 0 0 5px rgba(63, 185, 80, 0.6);
+  }
+
+  .offline {
+    background: rgba(248, 81, 73, 0.1);
+    color: #f85149;
+    border: 1px solid rgba(248, 81, 73, 0.2);
+  }
+
+  .offline .status-dot-indicator {
+    background: #f85149;
+    box-shadow: 0 0 5px rgba(248, 81, 73, 0.5);
+  }
+
   .palette-btn {
-    margin-left: auto; background: #21262d; border: 1px solid #30363d;
-    color: #8b949e; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
+    display: flex;
+    align-items: center;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-bottom-color: #484f58;
+    color: #8b949e;
+    padding: 3px 9px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
   }
-  .palette-btn:hover { background: #30363d; }
+
+  .palette-btn:hover {
+    background: #30363d;
+    color: #c9d1d9;
+    border-color: #484f58;
+  }
+
+  .palette-key {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
   .panels { display: flex; flex: 1; overflow: hidden; }
   .sidebar { width: 240px; border-right: 1px solid #30363d; overflow-y: auto; }
   .center { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
   .inspector { width: 280px; border-left: 1px solid #30363d; overflow-y: auto; }
-  .empty { display: flex; align-items: center; justify-content: center; height: 100%; color: #484f58; }
-  kbd { background: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px; font-size: 12px; }
+  .empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #484f58;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+  }
+  kbd {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 12px;
+    color: #8b949e;
+  }
 </style>
