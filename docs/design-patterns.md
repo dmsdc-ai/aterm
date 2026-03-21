@@ -107,11 +107,21 @@ aigentry 에코시스템 공식 디자인 시스템. 모든 UI 컴포넌트는 �
 
 ## Brand
 
-### aigentry Mascot
-- ASCII art 네트워크/노드 그래프
-- 색상: 오렌지/앰버 (#fbbf24, #f59e0b, #d97706)
-- 사용 위치: 빈 화면 중앙, 로딩, 앱 아이콘
-- SVG 파일: `~/projects/aigentry-design/mascot.svg`
+### aigentry Mascot: `·⣿·`
+- 텍스트 기반 마스코트 (CSS only, SVG 불필요)
+- 구성: 청록 눈(`·`, #06b6d4) + 금색 브라유 코어(`⣿`, #d4a574)
+- 폰트: monospace, letter-spacing: -0.05em
+- animate=true: 코어 pulse (opacity 1↔0.6, 2s), 클릭 시 윙크, 눈 마우스 트래킹
+- 원본: `~/projects/aigentry-registry/frontend/src/components/mascot/AigentryMascot.tsx`
+
+**배치 위치:**
+| 위치 | 크기 | animate |
+|------|------|---------|
+| 헤더 로고 옆 | 12px (sm) | false |
+| 빈 화면 중앙 | 32px (lg) | true (pulse) |
+| 사이드바 하단 | 12px (sm) | true (pulse) |
+
+**Favicon:** 🔶 (`getMascotEmoji()` → `'🔶'`)
 
 ### Ecosystem Tone
 - 따뜻한 다크 브라운 (차가운 네이비/차콜 아님)

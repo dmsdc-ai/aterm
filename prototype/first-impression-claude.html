@@ -111,6 +111,40 @@
     50% { transform: scale(1.05); }
   }
 
+  @keyframes mascot-core-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  /* ── MASCOT ── */
+  .mascot {
+    display: inline-block;
+    font-family: var(--font-mono);
+    line-height: 1;
+    user-select: none;
+    letter-spacing: -0.05em;
+    vertical-align: middle;
+  }
+
+  .mascot-eye {
+    color: #06b6d4;
+    position: relative;
+    top: -1px;
+  }
+
+  .mascot-core {
+    color: #d4a574;
+  }
+
+  .mascot-core.pulse {
+    display: inline-block;
+    animation: mascot-core-pulse 2s ease-in-out infinite;
+  }
+
+  /* Sizes */
+  .mascot-sm { font-size: 12px; }
+  .mascot-lg { font-size: 32px; }
+
 
   /* ── APP SHELL ── */
   .app {
@@ -138,14 +172,6 @@
     display: flex;
     align-items: center;
     gap: 10px;
-  }
-
-  .header-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--accent);
-    flex-shrink: 0;
   }
 
   .header-title {
@@ -565,7 +591,7 @@
   <!-- HEADER — 48px -->
   <header class="header">
     <div class="header-left">
-      <span class="header-dot"></span>
+      <span class="mascot mascot-sm"><span class="mascot-eye">·</span><span class="mascot-core">⣿</span><span class="mascot-eye">·</span></span>
       <span class="header-title">aterm</span>
     </div>
 
@@ -753,12 +779,17 @@
         </div>
       </div>
 
+      <div style="flex:1"></div>
+      <div style="padding: 16px; text-align: center;">
+        <span class="mascot mascot-sm"><span class="mascot-eye">·</span><span class="mascot-core pulse">⣿</span><span class="mascot-eye">·</span></span>
+      </div>
     </aside>
 
     <!-- CENTER -->
     <main class="center">
       <div class="center-empty">
 
+        <span class="mascot mascot-lg"><span class="mascot-eye">·</span><span class="mascot-core pulse">⣿</span><span class="mascot-eye">·</span></span>
         <span class="center-empty-title">No workspace selected</span>
         <span class="center-empty-hint">Select a workspace or press <kbd>+</kbd> to create one</span>
       </div>
