@@ -7,16 +7,24 @@
     <title>aterm</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <!-- Loading spinner — visible until Svelte mounts and removes it -->
+      <div id="loader" style="display:flex;align-items:center;justify-content:center;height:100vh;background:#faf6f0;flex-direction:column;gap:16px;font-family:-apple-system,system-ui,sans-serif;">
+        <div style="font-family:monospace;font-size:32px;letter-spacing:-0.05em;color:#d4a574;">
+          <span style="color:#06b6d4;">·</span><span style="color:#d4a574;">⣿</span><span style="color:#06b6d4;">·</span>
+        </div>
+        <div style="font-size:14px;color:#8a7e74;">Loading aterm...</div>
+        <div id="loader-error" style="display:none;color:#d96c6c;font-size:11px;max-width:400px;text-align:center;padding:8px;"></div>
+      </div>
+    </div>
     <script>
       window.addEventListener('error', function(e) {
-        document.getElementById('app').innerHTML = '<pre style="color:red;padding:20px;font-size:12px;">LOAD ERROR: ' + e.message + '\n' + (e.filename || '') + ':' + (e.lineno || '') + '</pre>';
+        var el = document.getElementById('loader-error');
+        if (el) { el.style.display='block'; el.textContent = 'Error: ' + e.message; }
       });
       window.addEventListener('unhandledrejection', function(e) {
-        var app = document.getElementById('app');
-        if (app && !app.children.length) {
-          app.innerHTML = '<pre style="color:orange;padding:20px;font-size:12px;">PROMISE ERROR: ' + (e.reason?.message || e.reason) + '</pre>';
-        }
+        var el = document.getElementById('loader-error');
+        if (el) { el.style.display='block'; el.textContent = 'Error: ' + (e.reason?.message || e.reason); }
       });
     </script>
     <script type="module" src="./src/main.js"></script>

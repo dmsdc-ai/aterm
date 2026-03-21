@@ -4,6 +4,25 @@ use tauri::Manager;
 
 struct ServerProcess(Mutex<Option<std::process::Child>>);
 
+/// Wait for the Node.js server to become ready (HTTP 200 on /api/status)
+fn wait_for_server(port: u16, max_attempts: u32) -> bool {
+    for i in 0..max_attempts {
+        if let Ok(output) = Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", &format!("http://localhost:{}/", port)])
+            .output()
+        {
+            let code = String::from_utf8_lossy(&output.stdout);
+            if code.trim() == "200" {
+                println!("[aterm] Server ready after {} attempts", i + 1);
+                return true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    println!("[aterm] Server not ready after {} attempts, proceeding anyway", max_attempts);
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -36,6 +55,10 @@ pub fn run() {
                 .expect("Failed to start aterm Node.js server");
 
             app.manage(ServerProcess(Mutex::new(Some(server))));
+
+            // Wait for server to be ready before WebView loads content
+            wait_for_server(3849, 20); // max 6 seconds (20 * 300ms)
+
             Ok(())
         })
         .build(tauri::generate_context!())
