@@ -95,7 +95,13 @@
 <div class="timeline">
   <!-- Header -->
   <div class="panel-header">
-    <span class="header-label">Timeline</span>
+    <div class="header-left">
+      <svg class="header-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1"/>
+        <path d="M6 3.5V6L7.5 7.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+      </svg>
+      <span class="header-label">Timeline</span>
+    </div>
     {#if filteredEvents.length > 0}
       <span class="header-count">{filteredEvents.length}</span>
     {/if}
@@ -138,9 +144,32 @@
   <div class="events" bind:this={eventsEl}>
     {#if filteredEvents.length === 0}
       <div class="empty-state">
-        <div class="empty-icon">◌</div>
-        <div class="empty-text">Waiting for events</div>
-        <div class="empty-sub">session_health and noise are filtered</div>
+        <div class="empty-visual">
+          <svg class="empty-illustration" width="40" height="40" viewBox="0 0 40 40" fill="none">
+            <path d="M20 4V36" stroke="currentColor" stroke-width="1" stroke-dasharray="2 3"/>
+            <circle cx="20" cy="10" r="4" stroke="currentColor" stroke-width="1"/>
+            <circle cx="20" cy="22" r="4" stroke="currentColor" stroke-width="1" opacity="0.5"/>
+            <circle cx="20" cy="34" r="4" stroke="currentColor" stroke-width="1" opacity="0.25"/>
+          </svg>
+        </div>
+        <div class="empty-content">
+          <div class="empty-text">Waiting for events</div>
+          <div class="empty-sub">Events from inject, synthesis, and routing will appear here</div>
+        </div>
+        <div class="empty-legend">
+          <span class="legend-item">
+            <span class="legend-dot" style="background: var(--color-accent-blue)"></span>
+            inject
+          </span>
+          <span class="legend-item">
+            <span class="legend-dot" style="background: var(--color-event-routed)"></span>
+            routed
+          </span>
+          <span class="legend-item">
+            <span class="legend-dot" style="background: var(--color-event-synthesis)"></span>
+            synthesis
+          </span>
+        </div>
       </div>
     {:else}
       <div class="event-list">
@@ -281,10 +310,21 @@
   .panel-header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
     padding: 10px 16px 8px;
     border-bottom: 1px solid var(--color-border-subtle);
     flex-shrink: 0;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .header-icon {
+    color: var(--color-text-disabled);
   }
 
   .header-label {
@@ -625,25 +665,64 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 40px 24px;
-    gap: 8px;
+    padding: 48px 24px;
+    gap: 16px;
+    animation: fadeIn var(--duration-smooth) var(--ease-out);
   }
 
-  .empty-icon {
-    font-size: 24px;
-    color: var(--color-border-subtle);
-    line-height: 1;
+  .empty-visual {
+    color: var(--color-border-default);
     animation: breathe 3s ease-in-out infinite;
+  }
+
+  .empty-illustration {
+    opacity: 0.5;
+  }
+
+  .empty-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
   }
 
   .empty-text {
     font-size: 12px;
-    color: var(--color-text-disabled);
+    font-weight: 500;
+    color: var(--color-text-muted);
   }
 
   .empty-sub {
     font-size: 10px;
-    color: var(--color-border-default);
+    color: var(--color-text-disabled);
     text-align: center;
+    max-width: 200px;
+    line-height: 1.4;
+  }
+
+  .empty-legend {
+    display: flex;
+    gap: 12px;
+    padding: 6px 12px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-pill);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 9px;
+    color: var(--color-text-disabled);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .legend-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    flex-shrink: 0;
   }
 </style>

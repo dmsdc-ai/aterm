@@ -55,7 +55,15 @@
 
 <div class="tree">
   <div class="tree-header">
-    <span class="tree-header-label">Workspaces</span>
+    <div class="tree-header-left">
+      <svg class="tree-header-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <rect x="1" y="1" width="4" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+        <rect x="7" y="1" width="4" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+        <rect x="1" y="7" width="4" height="4" rx="1" fill="currentColor" opacity="0.4"/>
+        <rect x="7" y="7" width="4" height="4" rx="1" fill="currentColor" opacity="0.2"/>
+      </svg>
+      <span class="tree-header-label">Workspaces</span>
+    </div>
     <div class="tree-header-right">
       <span class="tree-header-count">{$workspaces.length}</span>
       <button
@@ -80,11 +88,17 @@
         <span class="selection-bar"></span>
       {/if}
 
-      <span
-        class="status-dot"
-        style="background: {statusColor(ws)}; box-shadow: 0 0 4px {statusColor(ws)}88;"
-        title={ws.status}
-      ></span>
+      <div class="ws-icon" class:active={ws.status !== 'dead'} class:dead={ws.status === 'dead'}>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <rect x="1" y="2" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1"/>
+          <path d="M3 6L5 8L3 10" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+          <line x1="6.5" y1="10" x2="10.5" y2="10" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+        <span
+          class="ws-status-dot"
+          style="background: {statusColor(ws)}; box-shadow: 0 0 3px {statusColor(ws)}88;"
+        ></span>
+      </div>
 
       <div class="ws-info">
         <span class="ws-name">{shortId(ws.id)}</span>
@@ -101,12 +115,26 @@
 
   {#if $workspaces.length === 0}
     <div class="empty-state">
-      <span class="empty-icon">⚡</span>
+      <div class="empty-illustration">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <rect x="4" y="6" width="24" height="20" rx="3" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M4 12H28" stroke="currentColor" stroke-width="1.2"/>
+          <circle cx="8" cy="9" r="1" fill="currentColor"/>
+          <circle cx="11" cy="9" r="1" fill="currentColor"/>
+          <circle cx="14" cy="9" r="1" fill="currentColor"/>
+          <path d="M10 18L14 22L10 26" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+        </svg>
+      </div>
       <span class="empty-text">
-        {$atermConnected ? 'No workspaces' : 'Connecting...'}
+        {$atermConnected ? 'No workspaces yet' : 'Connecting...'}
       </span>
       {#if $atermConnected}
-        <button class="empty-new-btn" on:click={createWorkspace}>New workspace</button>
+        <button class="empty-new-btn" on:click={createWorkspace}>
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <path d="M5 1V9M1 5H9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          Create workspace
+        </button>
       {/if}
     </div>
   {/if}
@@ -126,6 +154,16 @@
     padding: var(--space-4) 10px var(--space-4) 14px;
     border-bottom: 1px solid var(--color-border-subtle);
     margin-bottom: var(--space-2);
+  }
+
+  .tree-header-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tree-header-icon {
+    color: var(--color-text-disabled);
   }
 
   .tree-header-label {
@@ -205,6 +243,7 @@
   .workspace-row:hover {
     background: var(--color-bg-elevated);
     color: var(--color-text-secondary);
+    padding-left: 16px;
   }
 
   .workspace-row:hover .close-btn {
@@ -231,12 +270,52 @@
     transition: all var(--duration-normal) var(--ease-out);
   }
 
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
+  .ws-icon {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-lg);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
+    color: var(--color-text-disabled);
     flex-shrink: 0;
-    transition: background var(--duration-slow) ease, box-shadow var(--duration-slow) ease;
+    transition: background var(--duration-normal) var(--ease-default),
+                color var(--duration-normal) var(--ease-default),
+                border-color var(--duration-normal) var(--ease-default);
+  }
+
+  .ws-icon.active {
+    color: var(--color-text-tertiary);
+    border-color: var(--color-border-default);
+  }
+
+  .ws-icon.dead {
+    color: var(--color-text-disabled);
+    opacity: 0.6;
+  }
+
+  .workspace-row.selected .ws-icon {
+    background: var(--color-accent-blue-subtle);
+    color: var(--color-accent-blue);
+    border-color: var(--color-accent-blue-muted);
+  }
+
+  .workspace-row:hover .ws-icon {
+    border-color: var(--color-border-strong);
+    color: var(--color-text-tertiary);
+  }
+
+  .ws-status-dot {
+    position: absolute;
+    bottom: -1px;
+    right: -1px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    border: 1.5px solid var(--color-bg-base);
   }
 
   .ws-info {
@@ -294,15 +373,21 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--space-3);
-    padding: 32px 16px;
+    gap: 10px;
+    padding: 40px 16px;
     color: var(--color-text-disabled);
     animation: fadeIn var(--duration-smooth) var(--ease-out);
   }
 
-  .empty-icon {
-    font-size: 20px;
+  .empty-illustration {
+    color: var(--color-border-default);
     opacity: 0.4;
+    animation: breathe 3s ease-in-out infinite;
+  }
+
+  @keyframes breathe {
+    0%, 100% { opacity: 0.3; transform: scale(1); }
+    50%      { opacity: 0.5; transform: scale(1.04); }
   }
 
   .empty-text {
@@ -311,6 +396,9 @@
   }
 
   .empty-new-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
     margin-top: var(--space-2);
     background: var(--color-bg-raised);
     border: 1px solid var(--color-border-default);
@@ -318,9 +406,9 @@
     color: var(--color-text-tertiary);
     font-family: inherit;
     font-size: 11px;
-    padding: var(--space-2) 12px;
+    padding: 5px 12px;
     cursor: pointer;
-    transition: background var(--duration-instant) ease, color var(--duration-instant) ease;
+    transition: background var(--duration-instant) ease, color var(--duration-instant) ease, border-color var(--duration-instant) ease;
   }
 
   .empty-new-btn:hover {

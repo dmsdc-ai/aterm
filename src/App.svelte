@@ -67,11 +67,29 @@
   <header class="header">
     <div class="header-left">
       <span class="logo">
-        <span class="logo-bolt">⚡</span>aterm
+        <svg class="logo-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <rect x="1" y="2" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M4 7L6.5 9.5L4 12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+          <line x1="8" y1="12" x2="12" y2="12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        <span class="logo-text">aterm</span>
+        <span class="logo-version">v1</span>
       </span>
     </div>
 
-    <div class="header-center"></div>
+    <div class="header-center">
+      {#if $activeWorkspaceId}
+        <div class="breadcrumb">
+          <span class="breadcrumb-icon">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <rect x="1" y="1.5" width="10" height="9" rx="1.5" stroke="currentColor" stroke-width="1"/>
+              <path d="M1 4.5H11" stroke="currentColor" stroke-width="1"/>
+            </svg>
+          </span>
+          <span class="breadcrumb-text">{$activeWorkspaceId === 'default' ? 'default' : $activeWorkspaceId.replace(/^ws-/, '').replace(/-[^-]+$/, '')}</span>
+        </div>
+      {/if}
+    </div>
 
     <div class="header-right">
       <span class="status" class:online={$atermConnected} class:offline={!$atermConnected}>
@@ -95,9 +113,26 @@
       {:else}
         <div class="empty">
           {#if $atermConnected}
-            <p>Select a workspace or press <kbd>+</kbd> to create one</p>
+            <div class="empty-visual">
+              <svg class="empty-terminal-icon" width="48" height="48" viewBox="0 0 48 48" fill="none">
+                <rect x="4" y="8" width="40" height="32" rx="4" stroke="currentColor" stroke-width="1.5"/>
+                <path d="M4 16H44" stroke="currentColor" stroke-width="1.5"/>
+                <circle cx="10" cy="12" r="1.5" fill="currentColor"/>
+                <circle cx="15" cy="12" r="1.5" fill="currentColor"/>
+                <circle cx="20" cy="12" r="1.5" fill="currentColor"/>
+                <path d="M12 24L18 30L12 36" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <line x1="22" y1="36" x2="34" y2="36" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <p class="empty-title">No workspace selected</p>
+              <p class="empty-hint">Select a workspace or press <kbd>+</kbd> to create one</p>
+            </div>
           {:else}
-            <p>Connecting to aterm server...</p>
+            <div class="empty-visual">
+              <div class="connecting-dots">
+                <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              </div>
+              <p class="empty-title">Connecting to aterm...</p>
+            </div>
           {/if}
         </div>
       {/if}
@@ -125,7 +160,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: var(--header-height);
+    height: 44px;
     padding: 0 16px;
     background: linear-gradient(180deg, var(--color-header-gradient-start) 0%, var(--color-header-gradient-end) 100%);
     border-bottom: 1px solid var(--color-border-default);
@@ -137,10 +172,6 @@
   .header-left {
     display: flex;
     align-items: center;
-  }
-
-  .header-center {
-    flex: 1;
   }
 
   .header-right {
@@ -160,9 +191,30 @@
     letter-spacing: -0.01em;
   }
 
-  .logo-bolt {
-    font-size: 14px;
-    line-height: 1;
+  .logo-icon {
+    color: var(--color-accent-blue);
+    flex-shrink: 0;
+  }
+
+  .logo-text {
+    background: linear-gradient(135deg, var(--color-text-primary) 0%, var(--color-accent-blue) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .logo-version {
+    font-size: 9px;
+    font-weight: 500;
+    color: var(--color-text-disabled);
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-sm);
+    padding: 0 4px;
+    line-height: 14px;
+    letter-spacing: 0.02em;
   }
 
   .status {
@@ -195,6 +247,12 @@
   .online .status-dot-indicator {
     background: var(--color-success);
     box-shadow: var(--shadow-glow-green);
+    animation: statusPulse 2s ease-in-out infinite;
+  }
+
+  @keyframes statusPulse {
+    0%, 100% { box-shadow: 0 0 4px rgba(63, 185, 80, 0.4); }
+    50%      { box-shadow: 0 0 8px rgba(63, 185, 80, 0.7); }
   }
 
   .offline {
@@ -254,5 +312,87 @@
     padding: 2px 6px;
     font-size: 12px;
     color: var(--color-text-tertiary);
+  }
+
+  .header-center {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    background: var(--color-bg-raised);
+    border: 1px solid var(--color-border-default);
+    border-radius: var(--radius-lg);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-tertiary);
+    max-width: 300px;
+  }
+
+  .breadcrumb-icon {
+    display: flex;
+    align-items: center;
+    color: var(--color-text-disabled);
+    flex-shrink: 0;
+  }
+
+  .breadcrumb-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .empty-visual {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .empty-terminal-icon {
+    color: var(--color-border-default);
+    opacity: 0.5;
+  }
+
+  .empty-title {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }
+
+  .empty-hint {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--color-text-disabled);
+  }
+
+  .connecting-dots {
+    display: flex;
+    gap: 6px;
+  }
+
+  .connecting-dots .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-text-disabled);
+    animation: dotBounce 1.4s ease-in-out infinite;
+  }
+
+  .connecting-dots .dot:nth-child(2) { animation-delay: 0.16s; }
+  .connecting-dots .dot:nth-child(3) { animation-delay: 0.32s; }
+
+  @keyframes dotBounce {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1.2); }
   }
 </style>
