@@ -131,38 +131,46 @@
   }
 
   onMount(() => {
-    initTheme();
+    try { initTheme(); } catch (e) { console.warn('[App] initTheme failed:', e); }
 
     // Load persisted widths
-    const savedSidebar = localStorage.getItem('aterm-sidebar-width');
-    const savedTimeline = localStorage.getItem('aterm-timeline-width');
-    if (savedSidebar) sidebarWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Number(savedSidebar)));
-    if (savedTimeline) timelineWidth = Math.min(TIMELINE_MAX, Math.max(TIMELINE_MIN, Number(savedTimeline)));
+    try {
+      const savedSidebar = localStorage.getItem('aterm-sidebar-width');
+      const savedTimeline = localStorage.getItem('aterm-timeline-width');
+      if (savedSidebar) sidebarWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Number(savedSidebar)));
+      if (savedTimeline) timelineWidth = Math.min(TIMELINE_MAX, Math.max(TIMELINE_MIN, Number(savedTimeline)));
+    } catch (e) { console.warn('[App] localStorage read failed:', e); }
 
+    // Connect to aterm server (non-blocking — UI renders regardless)
+    try {
+      ac = new AtermClient();
+      atermClient.set(ac);
 
-    ac = new AtermClient();
-    atermClient.set(ac);
-
-    ac.on('connected', async () => {
-      atermConnected.set(true);
-      await refreshWorkspaces(ac);
-      activeWorkspaceId.update(cur => {
-        if (cur) return cur;
-        let list;
-        const unsub = workspaces.subscribe(v => { list = v; });
-        unsub();
-        return list?.[0]?.id ?? null;
+      ac.on('connected', async () => {
+        atermConnected.set(true);
+        try {
+          await refreshWorkspaces(ac);
+          activeWorkspaceId.update(cur => {
+            if (cur) return cur;
+            let list;
+            const unsub = workspaces.subscribe(v => { list = v; });
+            unsub();
+            return list?.[0]?.id ?? null;
+          });
+        } catch (e) { console.warn('[App] workspace refresh failed:', e); }
       });
-    });
 
-    ac.on('disconnected', () => {
-      atermConnected.set(false);
-    });
+      ac.on('disconnected', () => {
+        atermConnected.set(false);
+      });
 
-    ac.on('created', async () => { await refreshWorkspaces(ac); });
-    ac.on('closed',  async () => { await refreshWorkspaces(ac); });
+      ac.on('created', async () => { try { await refreshWorkspaces(ac); } catch {} });
+      ac.on('closed',  async () => { try { await refreshWorkspaces(ac); } catch {} });
 
-    refreshTimer = setInterval(() => refreshWorkspaces(ac), 5000);
+      refreshTimer = setInterval(() => { try { refreshWorkspaces(ac); } catch {} }, 5000);
+    } catch (e) {
+      console.warn('[App] AtermClient init failed:', e);
+    }
   });
 
   onDestroy(() => {

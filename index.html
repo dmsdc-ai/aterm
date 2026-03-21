@@ -8,6 +8,17 @@
   </head>
   <body>
     <div id="app"></div>
+    <script>
+      window.addEventListener('error', function(e) {
+        document.getElementById('app').innerHTML = '<pre style="color:red;padding:20px;font-size:12px;">LOAD ERROR: ' + e.message + '\n' + (e.filename || '') + ':' + (e.lineno || '') + '</pre>';
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var app = document.getElementById('app');
+        if (app && !app.children.length) {
+          app.innerHTML = '<pre style="color:orange;padding:20px;font-size:12px;">PROMISE ERROR: ' + (e.reason?.message || e.reason) + '</pre>';
+        }
+      });
+    </script>
     <script type="module" src="./src/main.js"></script>
   </body>
 </html>
