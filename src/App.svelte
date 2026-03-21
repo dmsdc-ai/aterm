@@ -18,6 +18,63 @@
   let refreshTimer = null;
   let theme = 'light';
 
+  // Resize state
+  const SIDEBAR_DEFAULT = 250;
+  const SIDEBAR_MIN = 150;
+  const SIDEBAR_MAX = 400;
+  const TIMELINE_DEFAULT = 280;
+  const TIMELINE_MIN = 200;
+  const TIMELINE_MAX = 500;
+
+  let sidebarWidth = SIDEBAR_DEFAULT;
+  let timelineWidth = TIMELINE_DEFAULT;
+  let draggingSidebar = false;
+  let draggingTimeline = false;
+
+  function startSidebarResize(e) {
+    e.preventDefault();
+    draggingSidebar = true;
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+
+    function onMouseMove(e) {
+      const delta = e.clientX - startX;
+      sidebarWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + delta));
+    }
+
+    function onMouseUp() {
+      draggingSidebar = false;
+      localStorage.setItem('aterm-sidebar-width', String(sidebarWidth));
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }
+
+  function startTimelineResize(e) {
+    e.preventDefault();
+    draggingTimeline = true;
+    const startX = e.clientX;
+    const startWidth = timelineWidth;
+
+    function onMouseMove(e) {
+      const delta = startX - e.clientX;
+      timelineWidth = Math.min(TIMELINE_MAX, Math.max(TIMELINE_MIN, startWidth + delta));
+    }
+
+    function onMouseUp() {
+      draggingTimeline = false;
+      localStorage.setItem('aterm-timeline-width', String(timelineWidth));
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }
+
   function initTheme() {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     theme = prefersDark ? 'dark' : 'light';
@@ -63,6 +120,13 @@
 
   onMount(() => {
     initTheme();
+
+    // Load persisted widths
+    const savedSidebar = localStorage.getItem('aterm-sidebar-width');
+    const savedTimeline = localStorage.getItem('aterm-timeline-width');
+    if (savedSidebar) sidebarWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Number(savedSidebar)));
+    if (savedTimeline) timelineWidth = Math.min(TIMELINE_MAX, Math.max(TIMELINE_MIN, Number(savedTimeline)));
+
 
     ac = new AtermClient();
     atermClient.set(ac);
@@ -150,9 +214,18 @@
 
   <!-- MAIN 3-PANEL -->
   <div class="panels">
-    <aside class="sidebar">
+    <aside class="sidebar" style="width: {sidebarWidth}px">
       <SessionTree />
     </aside>
+
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="resize-handle"
+      class:dragging={draggingSidebar}
+      role="separator"
+      aria-label="Resize sidebar"
+      on:mousedown={startSidebarResize}
+    ></div>
 
     <main class="center">
       {#if $selectedSessionId}
@@ -181,7 +254,16 @@
       {/if}
     </main>
 
-    <aside class="inspector">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="resize-handle"
+      class:dragging={draggingTimeline}
+      role="separator"
+      aria-label="Resize timeline"
+      on:mousedown={startTimelineResize}
+    ></div>
+
+    <aside class="inspector" style="width: {timelineWidth}px">
       <Timeline />
     </aside>
   </div>
@@ -313,12 +395,10 @@
   }
 
   .sidebar {
-    width: 250px;
-    min-width: 250px;
     background: var(--bg-sidebar);
-    border-right: 1px solid var(--border-subtle);
     overflow-y: auto;
     overflow-x: hidden;
+    flex-shrink: 0;
   }
 
   .center {
@@ -330,11 +410,23 @@
   }
 
   .inspector {
-    width: 280px;
-    min-width: 280px;
     background: var(--bg-timeline);
-    border-left: 1px solid var(--border-subtle);
     overflow-y: auto;
+    flex-shrink: 0;
+  }
+
+  .resize-handle {
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background 150ms ease;
+    flex-shrink: 0;
+    z-index: 10;
+  }
+
+  .resize-handle:hover,
+  .resize-handle.dragging {
+    background: var(--accent, #d97706);
   }
 
   /* ── Empty / connecting state ── */
