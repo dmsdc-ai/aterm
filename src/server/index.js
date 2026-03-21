@@ -447,6 +447,14 @@ async function stopServer() {
   console.log('[aterm] server stopped');
 }
 
+// Prevent crashes from killing the server
+process.on('uncaughtException', (err) => {
+  console.error('[aterm] uncaughtException (not crashing):', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[aterm] unhandledRejection (not crashing):', reason?.message || reason);
+});
+
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\n[aterm] received SIGINT, shutting down...');

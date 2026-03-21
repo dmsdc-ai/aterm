@@ -96,9 +96,9 @@
       return;
     }
     if (!ac.connected) {
-      console.warn('[Terminal] waiting for WS connection before attaching...');
-      // Retry when connected
-      const unsub = ac.on('connected', () => { unsub(); connect(); });
+      // Wait for WS with timeout — retry after 3s if no connection
+      const unsub = ac.on('connected', () => { clearTimeout(timer); unsub(); connect(); });
+      const timer = setTimeout(() => { unsub(); connect(); }, 3000);
       return;
     }
 
@@ -122,16 +122,21 @@
     term.loadAddon(fitAddon);
     term.open(termEl);
 
-    // Bug fix 2: delay fit/focus/resize until DOM is ready
-    requestAnimationFrame(() => {
+    // Delayed fit with retry (prevents 0x0 sizing)
+    let fitAttempts = 0;
+    function tryFit() {
       if (currentWorkspaceId !== myWsId || !fitAddon || !term) return;
       fitAddon.fit();
-      term.focus();
-      if (ac) {
-        const { cols, rows } = term;
-        ac.resize(workspaceId, cols, rows).catch(() => {});
+      const { cols, rows } = term;
+      if ((cols <= 1 || rows <= 1) && fitAttempts < 3) {
+        fitAttempts++;
+        setTimeout(tryFit, 50);
+        return;
       }
-    });
+      term.focus();
+      if (ac) ac.resize(workspaceId, cols, rows).catch(() => {});
+    }
+    requestAnimationFrame(tryFit);
 
     const myTerm = term;
 
@@ -158,6 +163,13 @@
       if (isComposing) return false;
       return true;
     });
+
+    // Restore current screen content on session switch
+    ac.readScreen(workspaceId, 100).then(lines => {
+      if (currentWorkspaceId === myWsId && term === myTerm && lines.length > 0) {
+        term.write(lines.join('\r\n'));
+      }
+    }).catch(() => {});
 
     // Subscribe to real-time PTY output
     unsubOutput = ac.onOutput(workspaceId, (data) => {

@@ -26,7 +26,7 @@ class AtermWSClient {
     // Global event listeners: eventName -> Set<callback>
     this._listeners = new Map();
 
-    this._reconnectDelay = 1000;
+    this._reconnectDelay = 500;
     this._reconnectTimer = null;
     this._destroyed = false;
 
@@ -48,7 +48,7 @@ class AtermWSClient {
 
     this.ws.onopen = () => {
       this.connected = true;
-      this._reconnectDelay = 1000;
+      this._reconnectDelay = 500;
       this._resubscribeAll();
       this._emit('connected');
     };
@@ -73,7 +73,7 @@ class AtermWSClient {
     if (this._destroyed) return;
     clearTimeout(this._reconnectTimer);
     this._reconnectTimer = setTimeout(() => {
-      this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 10000);
+      this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 3000);
       this.connect();
     }, this._reconnectDelay);
   }
