@@ -98,6 +98,8 @@
       return;
     }
 
+    console.log('[Terminal] connecting to workspace:', workspaceId, 'ac.connected:', ac.connected);
+
     cleanup();
     currentWorkspaceId = workspaceId;
     const myWsId = workspaceId;
@@ -129,6 +131,7 @@
     }
 
     // Subscribe to real-time PTY output
+    console.log('[Terminal] subscribing to PTY output for:', workspaceId);
     unsubOutput = ac.onOutput(workspaceId, (data) => {
       if (currentWorkspaceId === myWsId && term === myTerm) {
         term.write(data);
