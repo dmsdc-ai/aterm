@@ -1,7 +1,10 @@
 <script>
   import { workspaces, activeWorkspaceId, atermConnected, atermClient, refreshWorkspaces,
            sessions, selectedSessionId, sessionTree, client, connected } from '../lib/stores.js';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+
+  const dispatch = createEventDispatcher();
+  function onSettingsClick() { dispatch('settings'); }
 
   let refreshInterval;
 
@@ -251,12 +254,20 @@
     </div>
   {/if}
 
-  <!-- Sidebar bottom mascot -->
+  <!-- Sidebar bottom -->
   <div style="flex: 1;"></div>
-  <div class="sidebar-mascot">
-    <span class="mascot mascot-sm pulse">
-      <span class="mascot-eye">·</span><span class="mascot-core">⣿</span><span class="mascot-eye">·</span>
-    </span>
+  <div class="sidebar-bottom">
+    <div class="sidebar-mascot">
+      <span class="mascot mascot-sm pulse">
+        <span class="mascot-eye">·</span><span class="mascot-core">⣿</span><span class="mascot-eye">·</span>
+      </span>
+    </div>
+    <button class="sidebar-settings-btn" on:click={onSettingsClick} type="button" title="Settings">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+    </button>
   </div>
 
 </div>
@@ -543,10 +554,40 @@
     font-style: italic;
   }
 
-  /* ── Bottom mascot ── */
-  .sidebar-mascot {
-    padding: 16px;
-    text-align: center;
+  /* ── Bottom ── */
+  .sidebar-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
     flex-shrink: 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .sidebar-mascot {
+    text-align: center;
+  }
+
+  .sidebar-settings-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-md, 8px);
+    cursor: pointer;
+    color: var(--text-disabled);
+    transition: background 150ms ease, color 150ms ease;
+  }
+
+  .sidebar-settings-btn:hover {
+    background: var(--bg-sidebar-hover);
+    color: var(--text-secondary);
+  }
+
+  .sidebar-settings-btn:active {
+    transform: scale(0.92);
   }
 </style>
