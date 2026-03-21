@@ -110,6 +110,8 @@
       scrollback: 5000,
       lineHeight: 1.4,
       letterSpacing: 0,
+      allowProposedApi: true,
+      windowsMode: false,
     });
 
     fitAddon = new FitAddon();
