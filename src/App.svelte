@@ -416,17 +416,25 @@
   }
 
   .resize-handle {
-    width: 4px;
+    width: 1px;
+    padding: 0 2px;
+    margin: 0 -2px;
     cursor: col-resize;
     background: transparent;
+    background-clip: content-box;
     transition: background 150ms ease;
     flex-shrink: 0;
     z-index: 10;
   }
 
-  .resize-handle:hover,
+  .resize-handle:hover {
+    background: var(--text-disabled, #504840);
+    background-clip: content-box;
+  }
+
   .resize-handle.dragging {
     background: var(--accent, #d97706);
+    background-clip: content-box;
   }
 
   /* ── Empty / connecting state ── */
