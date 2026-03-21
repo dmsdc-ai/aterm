@@ -8,7 +8,7 @@ import { start, stop, SOCKET_PATH } from './socket-server.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '../../dist');
-const DEFAULT_WORKSPACE_ID = 'default';
+// No default workspace — user creates sessions via + button
 const PORT = 3849;
 
 let wss = null;
@@ -385,15 +385,7 @@ async function startServer() {
   await start();
   await startWsServer();
 
-  // Create a default workspace on startup
-  try {
-    ptyManager.createWorkspace(DEFAULT_WORKSPACE_ID);
-    console.log(`[aterm] default workspace created (id: ${DEFAULT_WORKSPACE_ID})`);
-  } catch (err) {
-    console.error('[aterm] failed to create default workspace:', err.message);
-  }
-
-  console.log(`[aterm] server ready`);
+  console.log(`[aterm] server ready (no default workspace — use + to create sessions)`);
   console.log(`  Unix socket: ${SOCKET_PATH}`);
   console.log(`  HTTP + WS:   http://localhost:${PORT}`);
 }

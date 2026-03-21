@@ -87,7 +87,16 @@
   }
 
   function connect() {
-    if (!ac || !workspaceId || !termEl) return;
+    if (!ac || !workspaceId || !termEl) {
+      console.warn('[Terminal] connect skipped:', { ac: !!ac, workspaceId, termEl: !!termEl });
+      return;
+    }
+    if (!ac.connected) {
+      console.warn('[Terminal] waiting for WS connection before attaching...');
+      // Retry when connected
+      const unsub = ac.on('connected', () => { unsub(); connect(); });
+      return;
+    }
 
     cleanup();
     currentWorkspaceId = workspaceId;
