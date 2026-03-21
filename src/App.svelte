@@ -32,11 +32,15 @@
   async function initTelepty() {
     try {
       tc = new TeleptClient();
-      await tc.loadToken();
-      const list = await tc.getSessions();
-      sessions.set(list);
+      client.set(tc); // Set client immediately so Terminal can attach
+      await tc.loadToken().catch(() => {}); // Token is optional
+      try {
+        const list = await tc.getSessions();
+        sessions.set(Array.isArray(list) ? list : (list.sessions || []));
+      } catch (e) {
+        console.warn('[App] getSessions failed (CORS?), sessions will load from sidebar polling:', e.message);
+      }
       teleptConnected.set(true);
-      client.set(tc);
 
       tc.connectBus(async (msg) => {
         addBusEvent(msg);

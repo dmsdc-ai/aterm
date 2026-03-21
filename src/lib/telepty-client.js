@@ -10,13 +10,17 @@ export class TeleptClient {
     this.host = options.host || 'localhost';
     this.port = options.port || DEFAULT_PORT;
     this.token = options.token || '';
-    // In dev mode (Vite proxy), use relative URLs; in production, use full URLs
-    if (options.useProxy) {
-      this.baseUrl = '';
-      this.wsUrl = `ws://${location.host}`;
+    // Always use proxy through aterm server (/telepty/* → telepty daemon /api/*)
+    // This avoids CORS issues in browser
+    if (typeof location !== 'undefined') {
+      // Browser: use same-origin proxy
+      this.baseUrl = '/telepty';
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      this.wsUrl = `${proto}://${location.host}/telepty`;
     } else {
-      this.baseUrl = `http://${this.host}:${this.port}`;
-      this.wsUrl = `ws://${this.host}:${this.port}`;
+      // Node.js (CLI): connect directly
+      this.baseUrl = `http://${this.host}:${this.port}/api`;
+      this.wsUrl = `ws://${this.host}:${this.port}/api`;
     }
     this.busWs = null;
     this.sessionWsMap = new Map(); // sessionId → WebSocket
@@ -28,7 +32,7 @@ export class TeleptClient {
   async loadToken() {
     // In browser context, fetch token from daemon meta endpoint
     try {
-      const res = await fetch(`${this.baseUrl}/api/meta`);
+      const res = await fetch(`${this.baseUrl}/meta`);
       if (res.ok) {
         const meta = await res.json();
         this.token = meta.auth_token || meta.token || this.token;
@@ -47,12 +51,12 @@ export class TeleptClient {
   // ── Session Discovery ─────────────────────────────────────
 
   async getSessions() {
-    const res = await fetch(`${this.baseUrl}/api/sessions`, { headers: this.headers() });
+    const res = await fetch(`${this.baseUrl}/sessions`, { headers: this.headers() });
     return res.json();
   }
 
   async getSession(id) {
-    const res = await fetch(`${this.baseUrl}/api/sessions/${encodeURIComponent(id)}`, { headers: this.headers() });
+    const res = await fetch(`${this.baseUrl}/sessions/${encodeURIComponent(id)}`, { headers: this.headers() });
     return res.json();
   }
 
@@ -60,7 +64,7 @@ export class TeleptClient {
 
   async inject(sessionId, prompt, options = {}) {
     const body = { prompt, ...options };
-    const res = await fetch(`${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/inject`, {
+    const res = await fetch(`${this.baseUrl}/sessions/${encodeURIComponent(sessionId)}/inject`, {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify(body)
@@ -69,7 +73,7 @@ export class TeleptClient {
   }
 
   async broadcast(prompt) {
-    const res = await fetch(`${this.baseUrl}/api/sessions/broadcast/inject`, {
+    const res = await fetch(`${this.baseUrl}/sessions/broadcast/inject`, {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify({ prompt })
@@ -78,7 +82,7 @@ export class TeleptClient {
   }
 
   async multicast(sessionIds, prompt) {
-    const res = await fetch(`${this.baseUrl}/api/sessions/multicast/inject`, {
+    const res = await fetch(`${this.baseUrl}/sessions/multicast/inject`, {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify({ session_ids: sessionIds, prompt })
@@ -89,7 +93,7 @@ export class TeleptClient {
   // ── Session Lifecycle ─────────────────────────────────────
 
   async deleteSession(id) {
-    const res = await fetch(`${this.baseUrl}/api/sessions/${encodeURIComponent(id)}`, {
+    const res = await fetch(`${this.baseUrl}/sessions/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: this.headers()
     });
@@ -99,7 +103,7 @@ export class TeleptClient {
   // ── Event Bus (WS) ───────────────────────────────────────
 
   connectBus(onEvent) {
-    const url = `${this.wsUrl}/api/bus?token=${encodeURIComponent(this.token)}`;
+    const url = `${this.wsUrl}/bus?token=${encodeURIComponent(this.token)}`;
     this.busWs = new WebSocket(url);
 
     this.busWs.onmessage = (e) => {
@@ -125,7 +129,7 @@ export class TeleptClient {
   // ── Session WS (attach) ──────────────────────────────────
 
   attachSession(sessionId, { onOutput, onClose } = {}) {
-    const url = `${this.wsUrl}/api/sessions/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(this.token)}`;
+    const url = `${this.wsUrl}/sessions/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(this.token)}`;
     const ws = new WebSocket(url);
 
     ws.onmessage = (e) => {

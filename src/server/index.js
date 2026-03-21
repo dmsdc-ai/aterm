@@ -28,6 +28,40 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2',
 };
 
+const TELEPTY_HOST = 'localhost';
+const TELEPTY_PORT = 3848;
+
+// Proxy /telepty/* → localhost:3848/api/*
+function proxyTelepty(req, res) {
+  const targetPath = req.url.replace(/^\/telepty/, '/api');
+  const options = {
+    hostname: TELEPTY_HOST,
+    port: TELEPTY_PORT,
+    path: targetPath,
+    method: req.method,
+    headers: { ...req.headers, host: `${TELEPTY_HOST}:${TELEPTY_PORT}` },
+  };
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', () => {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: 'telepty daemon unreachable' }));
+  });
+
+  req.pipe(proxyReq);
+}
+
+function handleRequest(req, res) {
+  if (req.url.startsWith('/telepty/')) {
+    return proxyTelepty(req, res);
+  }
+  return serveStatic(req, res);
+}
+
 function serveStatic(req, res) {
   let urlPath = req.url.split('?')[0];
   if (urlPath === '/') urlPath = '/index.html';
@@ -207,8 +241,41 @@ function unsubscribeAll(ws) {
 
 function startWsServer() {
   return new Promise((resolve) => {
-    httpServer = http.createServer(serveStatic);
-    wss = new WebSocketServer({ server: httpServer });
+    httpServer = http.createServer(handleRequest);
+    wss = new WebSocketServer({ noServer: true });
+
+    // Handle WS upgrade: /telepty/ → proxy to telepty daemon, others → aterm WS
+    httpServer.on('upgrade', (req, socket, head) => {
+      if (req.url.startsWith('/telepty/')) {
+        // Proxy WS to telepty daemon
+        const targetPath = req.url.replace(/^\/telepty/, '/api');
+        const proxyReq = http.request({
+          hostname: TELEPTY_HOST,
+          port: TELEPTY_PORT,
+          path: targetPath,
+          method: 'GET',
+          headers: { ...req.headers, host: `${TELEPTY_HOST}:${TELEPTY_PORT}` },
+        });
+
+        proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+          socket.write(
+            `HTTP/1.1 101 Switching Protocols\r\n` +
+            Object.entries(proxyRes.headers).map(([k, v]) => `${k}: ${v}`).join('\r\n') +
+            '\r\n\r\n'
+          );
+          proxySocket.pipe(socket);
+          socket.pipe(proxySocket);
+        });
+
+        proxyReq.on('error', () => socket.destroy());
+        proxyReq.end();
+      } else {
+        // aterm WS
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          wss.emit('connection', ws, req);
+        });
+      }
+    });
 
     wss.on('connection', (ws) => {
       ws.on('message', async (raw) => {
