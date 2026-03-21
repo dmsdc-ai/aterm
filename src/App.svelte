@@ -76,14 +76,15 @@
   }
 
   function initTheme() {
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    theme = prefersDark ? 'dark' : 'light';
+    const saved = localStorage.getItem('aterm-theme');
+    theme = saved || 'light';
     document.documentElement.setAttribute('data-theme', theme);
   }
 
   function toggleTheme() {
     theme = theme === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('aterm-theme', theme);
   }
 
   async function initTelepty() {
