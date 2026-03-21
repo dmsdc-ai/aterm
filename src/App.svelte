@@ -16,7 +16,7 @@
   let tc = null;
   let showPalette = false;
   let refreshTimer = null;
-  let theme = 'dark';
+  let theme = 'light';
 
   function initTheme() {
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;

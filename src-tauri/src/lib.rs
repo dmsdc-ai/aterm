@@ -9,8 +9,22 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let resource_dir = app.path().resource_dir().unwrap_or_default();
-            let project_root = resource_dir.parent().unwrap_or(std::path::Path::new("."));
+            // In dev: CARGO_MANIFEST_DIR = src-tauri/, parent = project root
+            // In prod: use executable dir
+            let project_root = if cfg!(debug_assertions) {
+                let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+                    .unwrap_or_else(|_| ".".to_string());
+                std::path::PathBuf::from(manifest_dir)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf()
+            } else {
+                std::env::current_exe()
+                    .unwrap_or_default()
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf()
+            };
             let server_script = project_root.join("src").join("server").join("index.js");
 
             println!("[aterm] Starting Node.js server: {:?}", server_script);
