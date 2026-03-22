@@ -2,10 +2,11 @@
   import { onMount, onDestroy } from 'svelte';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
-  import { atermClient, activeWorkspace } from '../lib/stores.js';
+  import { atermClient, workspaces, pendingInjects } from '../lib/stores.js';
   import '@xterm/xterm/css/xterm.css';
 
   export let workspaceId;
+  export let embedded = false;
 
   let termEl;
   let term = null;
@@ -16,7 +17,12 @@
   let currentWorkspaceId = null;
   let ac = null;
   let mounted = false;
-  let isComposing = false;
+  let unsubInjectQueued = null;
+  let unsubInjectDelivered = null;
+  const TERM_FONT_SIZE = 13;
+  const TERM_FONT_FAMILY = "'JetBrains Mono', 'Fira Code', monospace";
+
+  $: workspace = $workspaces.find((item) => item.id === workspaceId) || null;
 
   const unsubClient = atermClient.subscribe(v => {
     ac = v;
@@ -34,20 +40,24 @@
     return ws.status === 'dead' ? 'dead' : 'active';
   }
 
-  function shortId(id) {
-    if (!id) return '';
-    if (id === 'default') return 'default';
-    return id.replace(/^ws-/, '').replace(/-[^-]+$/, '');
+  function sessionName(ws) {
+    if (ws?.cwd) {
+      const parts = ws.cwd.replace(/\/+$/, '').split('/');
+      return parts[parts.length - 1] || ws?.id || '';
+    }
+    if (!ws?.id) return '';
+    return ws.id.replace(/^ws-/, '').replace(/-[^-]+$/, '') || ws.id;
   }
 
   function cleanup() {
-    if (resizeCleanup) { resizeCleanup(); resizeCleanup = null; }
+    if (unsubInjectQueued) { unsubInjectQueued(); unsubInjectQueued = null; }
+    if (unsubInjectDelivered) { unsubInjectDelivered(); unsubInjectDelivered = null; }
     if (compositionCleanup) { compositionCleanup(); compositionCleanup = null; }
+    if (resizeCleanup) { resizeCleanup(); resizeCleanup = null; }
     if (unsubOutput) { unsubOutput(); unsubOutput = null; }
     if (term) { term.dispose(); term = null; }
     fitAddon = null;
     currentWorkspaceId = null;
-    isComposing = false;
   }
 
   function getTermTheme() {
@@ -90,26 +100,50 @@
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }
 
+  async function waitForTerminalFonts() {
+    if (!document.fonts) return;
+    const loads = [
+      document.fonts.load(`${TERM_FONT_SIZE}px "JetBrains Mono"`),
+      document.fonts.load(`${TERM_FONT_SIZE}px "Fira Code"`),
+      document.fonts.ready,
+    ];
+    await Promise.allSettled(loads);
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function nextAnimationFrame() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  async function waitForNonZeroTerminalSize(el, workspaceKey) {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (!mounted || currentWorkspaceId !== workspaceKey || termEl !== el) return false;
+      const { width, height } = el.getBoundingClientRect();
+      if (width > 0 && height > 0) return true;
+      await sleep(50);
+    }
+    return false;
+  }
+
   function connect() {
     if (!ac || !workspaceId || !termEl) {
       console.warn('[Terminal] connect skipped:', { ac: !!ac, workspaceId, termEl: !!termEl });
       return;
     }
-    if (!ac.connected) {
-      // Wait for WS with timeout — retry after 3s if no connection
-      const unsub = ac.on('connected', () => { clearTimeout(timer); unsub(); connect(); });
-      const timer = setTimeout(() => { unsub(); connect(); }, 3000);
-      return;
-    }
+    // IPC is always available — no connection wait needed
 
     cleanup();
     currentWorkspaceId = workspaceId;
     const myWsId = workspaceId;
+    const myTermEl = termEl;
 
     term = new Terminal({
       theme: getTermTheme(),
-      fontSize: 13,
-      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      fontSize: TERM_FONT_SIZE,
+      fontFamily: TERM_FONT_FAMILY,
       cursorBlink: true,
       scrollback: 5000,
       lineHeight: 1.4,
@@ -122,81 +156,170 @@
     term.loadAddon(fitAddon);
     term.open(termEl);
 
-    // Delayed fit with retry (prevents 0x0 sizing)
-    let fitAttempts = 0;
-    function tryFit() {
-      if (currentWorkspaceId !== myWsId || !fitAddon || !term) return;
+    const myTerm = term;
+    const sendText = (text) => {
+      if (text && currentWorkspaceId === myWsId && ac) {
+        ac.send(workspaceId, text).catch(() => {});
+      }
+    };
+    compositionCleanup = null;
+    let initialLayoutReady = false;
+    let outputSubscribed = false;
+    let lastCols = 0;
+    let lastRows = 0;
+    let initialFitQueued = false;
+    let layoutSyncRunning = false;
+    let pendingLayoutSync = null;
+
+    const performLayoutSync = async ({ refresh = false, focus = false } = {}) => {
+      if (currentWorkspaceId !== myWsId || !fitAddon || !term || !termEl) return false;
+
+      const { width, height } = termEl.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return false;
+
       fitAddon.fit();
       const { cols, rows } = term;
-      if ((cols <= 1 || rows <= 1) && fitAttempts < 3) {
-        fitAttempts++;
-        setTimeout(tryFit, 50);
+      if (cols <= 0 || rows <= 0) return false;
+
+      if (refresh) term.refresh(0, rows - 1);
+      if (focus) term.focus();
+
+      const sizeChanged = cols !== lastCols || rows !== lastRows;
+      lastCols = cols;
+      lastRows = rows;
+
+      if (ac && currentWorkspaceId === myWsId && sizeChanged) {
+        try {
+          await ac.resize(myWsId, cols, rows);
+        } catch {}
+      }
+
+      return true;
+    };
+
+    const syncTerminalLayout = async ({ refresh = false, focus = false } = {}) => {
+      pendingLayoutSync = pendingLayoutSync
+        ? {
+            refresh: pendingLayoutSync.refresh || refresh,
+            focus: pendingLayoutSync.focus || focus,
+          }
+        : { refresh, focus };
+
+      if (layoutSyncRunning) return false;
+      layoutSyncRunning = true;
+
+      let applied = false;
+      try {
+        while (pendingLayoutSync) {
+          const nextSync = pendingLayoutSync;
+          pendingLayoutSync = null;
+          applied = (await performLayoutSync(nextSync)) || applied;
+        }
+      } finally {
+        layoutSyncRunning = false;
+      }
+
+      return applied;
+    };
+
+    const subscribeOutput = () => {
+      if (outputSubscribed || !ac) return;
+      outputSubscribed = true;
+
+      unsubOutput = ac.onOutput(workspaceId, (data) => {
+        if (currentWorkspaceId === myWsId && term === myTerm) {
+          term.write(data);
+        }
+      });
+    };
+
+    const writeSnapshot = (snapshot) => new Promise((resolve) => {
+      if (!snapshot) {
+        resolve();
         return;
       }
-      term.focus();
-      if (ac) ac.resize(workspaceId, cols, rows).catch(() => {});
-    }
-    requestAnimationFrame(tryFit);
 
-    const myTerm = term;
-
-    // Bug fix 1: IME composition handling for Korean
-    const textarea = termEl.querySelector('.xterm-helper-textarea');
-    if (textarea) {
-      const onCompositionStart = () => { isComposing = true; };
-      const onCompositionEnd = (e) => {
-        isComposing = false;
-        if (e.data && currentWorkspaceId === myWsId && ac) {
-          ac.send(workspaceId, e.data).catch(() => {});
+      myTerm.write(snapshot, () => {
+        if (currentWorkspaceId === myWsId && term === myTerm) {
+          myTerm.refresh(0, myTerm.rows - 1);
         }
-      };
-      textarea.addEventListener('compositionstart', onCompositionStart);
-      textarea.addEventListener('compositionend', onCompositionEnd);
-      compositionCleanup = () => {
-        textarea.removeEventListener('compositionstart', onCompositionStart);
-        textarea.removeEventListener('compositionend', onCompositionEnd);
-      };
-    }
-
-    // Suppress key events during IME composition
-    term.attachCustomKeyEventHandler((e) => {
-      if (isComposing) return false;
-      return true;
+        resolve();
+      });
     });
 
-    // Restore current screen content on session switch
-    ac.readScreen(workspaceId, 100).then(lines => {
-      if (currentWorkspaceId === myWsId && term === myTerm && lines.length > 0) {
-        term.write(lines.join('\r\n'));
-      }
-    }).catch(() => {});
+    const restoreScreen = async () => {
+      if (!ac || currentWorkspaceId !== myWsId || term !== myTerm) return;
 
-    // Subscribe to real-time PTY output
-    unsubOutput = ac.onOutput(workspaceId, (data) => {
-      if (currentWorkspaceId === myWsId && term === myTerm) {
-        term.write(data);
-      }
-    });
+      try {
+        const snapshot = await ac.readScreen(workspaceId);
+        if (currentWorkspaceId !== myWsId || term !== myTerm || !snapshot) return;
 
-    // Send terminal input to workspace (skip during IME composition)
+        await writeSnapshot(snapshot);
+      } catch {
+        // Ignore snapshot restore failures — live PTY output remains authoritative.
+      }
+    };
+
+    const queueInitialFit = () => {
+      if (initialFitQueued || initialLayoutReady) return;
+      initialFitQueued = true;
+
+      (async () => {
+        const hasSize = await waitForNonZeroTerminalSize(myTermEl, myWsId);
+        if (!hasSize) return;
+        await waitForTerminalFonts();
+        await nextAnimationFrame();
+        await nextAnimationFrame();
+        if (currentWorkspaceId !== myWsId) return;
+        if (await syncTerminalLayout({ refresh: true, focus: true })) {
+          initialLayoutReady = true;
+          await nextAnimationFrame();
+          await syncTerminalLayout({ refresh: true });
+          restoreScreen().finally(() => {
+            subscribeOutput();
+          });
+        }
+      })().finally(() => {
+        initialFitQueued = false;
+      });
+    };
+
+    // Send terminal input to workspace
     term.onData((data) => {
-      if (isComposing) return;
-      if (currentWorkspaceId === myWsId && ac) {
-        ac.send(workspaceId, data).catch(() => {});
-      }
+      sendText(data);
     });
 
     // Resize: fit terminal → send cols/rows to server
-    const resizeObserver = new ResizeObserver(() => {
-      if (!fitAddon || !term) return;
-      fitAddon.fit();
-      const { cols, rows } = term;
-      if (ac && currentWorkspaceId === myWsId) {
-        ac.resize(workspaceId, cols, rows).catch(() => {});
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      if (!entry || currentWorkspaceId !== myWsId) return;
+      const { width, height } = entry.contentRect;
+      if (width <= 0 || height <= 0) return;
+
+      if (!initialLayoutReady) {
+        queueInitialFit();
+        return;
       }
+
+      void syncTerminalLayout();
     });
     resizeObserver.observe(termEl);
     resizeCleanup = () => resizeObserver.disconnect();
+
+    // Subscribe to inject events for this workspace
+    if (ac) {
+      unsubInjectQueued = ac.on('inject-queued', (payload) => {
+        if (payload.workspace === myWsId) {
+          pendingInjects.update(p => ({ ...p, [payload.workspace]: payload.pending }));
+        }
+      });
+      unsubInjectDelivered = ac.on('inject-delivered', (payload) => {
+        if (payload.workspace === myWsId) {
+          pendingInjects.update(p => ({ ...p, [payload.workspace]: payload.pending }));
+        }
+      });
+    }
+
+    queueInitialFit();
   }
 
   onMount(() => {
@@ -219,23 +342,30 @@
 </script>
 
 <div class="terminal-panel">
-  <div class="session-header">
-    <div class="session-identity">
-      <span
-        class="status-dot"
-        style="background: {statusColor($activeWorkspace)}; box-shadow: 0 0 5px {statusColor($activeWorkspace)}88;"
-      ></span>
-      <span class="session-name">{shortId(workspaceId)}</span>
+  {#if !embedded}
+    <div class="session-header">
+      <div class="session-identity">
+        <span
+          class="status-dot"
+          style="background: {statusColor(workspace)}; box-shadow: 0 0 5px {statusColor(workspace)}88;"
+        ></span>
+        <span class="session-name">{sessionName(workspace)}</span>
+        {#if $pendingInjects[workspaceId] > 0}
+          <span class="inject-badge" title="{$pendingInjects[workspaceId]} pending inject(s)">
+            {$pendingInjects[workspaceId]}
+          </span>
+        {/if}
+      </div>
+      <div class="session-meta">
+        {#if workspace?.cwd}
+          <span class="session-cwd">{workspace.cwd}</span>
+        {/if}
+        <span class="session-status-label" style="color: {statusColor(workspace)};">
+          {statusLabel(workspace)}
+        </span>
+      </div>
     </div>
-    <div class="session-meta">
-      {#if $activeWorkspace?.cwd}
-        <span class="session-cwd">{$activeWorkspace.cwd}</span>
-      {/if}
-      <span class="session-status-label" style="color: {statusColor($activeWorkspace)};">
-        {statusLabel($activeWorkspace)}
-      </span>
-    </div>
-  </div>
+  {/if}
   <div class="terminal-wrap" bind:this={termEl} on:click={() => term && term.focus()}></div>
 </div>
 
@@ -244,6 +374,8 @@
     display: flex;
     flex-direction: column;
     flex: 1;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
     background: var(--bg-inset);
   }
@@ -300,6 +432,23 @@
     letter-spacing: 0.01em;
   }
 
+  .inject-badge {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 600;
+    min-width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent, #d97706);
+    color: #fff;
+    border-radius: 8px;
+    padding: 0 4px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
   .session-meta {
     display: flex;
     align-items: center;
@@ -326,12 +475,28 @@
 
   .terminal-wrap {
     flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
     padding: 6px 4px 4px;
     background: var(--bg-inset, #131010);
     overflow: hidden;
   }
 
-  .terminal-wrap :global(.xterm) { height: 100%; }
-  .terminal-wrap :global(.xterm-viewport) { background: var(--bg-inset, #131010) !important; }
-  .terminal-wrap :global(.xterm-screen) { background: var(--bg-inset, #131010); }
+  .terminal-wrap :global(.xterm) {
+    width: 100%;
+    height: 100%;
+  }
+
+  .terminal-wrap :global(.xterm-viewport) {
+    width: 100% !important;
+    height: 100% !important;
+    background: var(--bg-inset, #131010) !important;
+  }
+
+  .terminal-wrap :global(.xterm-screen) {
+    width: 100%;
+    height: 100%;
+    background: var(--bg-inset, #131010);
+  }
 </style>

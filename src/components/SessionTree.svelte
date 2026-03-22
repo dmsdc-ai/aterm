@@ -1,49 +1,30 @@
 <script>
-  import { workspaces, activeWorkspaceId, atermConnected, atermClient, refreshWorkspaces } from '../lib/stores.js';
-  import { onDestroy, createEventDispatcher } from 'svelte';
+  import { workspaces, visibleTeleptySessions, activeWorkspaceId, atermConnected, atermClient, refreshWorkspaces, groups, activeGroupId } from '../lib/stores.js';
+  import { createEventDispatcher } from 'svelte';
+  import { isTeleptyAttachWorkspace, workspaceDisplayName } from '../lib/workspace-labels.js';
 
   const dispatch = createEventDispatcher();
   function onSettingsClick() { dispatch('settings'); }
 
-  async function openFolderDialog() {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const folders = await open({ directory: true, multiple: true, title: 'Select project folders' });
-      if (!folders || folders.length === 0) return;
-
-      const folderList = Array.isArray(folders) ? folders : [folders];
-      let firstNewId = null;
-
-      for (const folderPath of folderList) {
-        const id = await createWorkspaceFromPath(folderPath);
-        if (!firstNewId) firstNewId = id;
-      }
-
-      if (firstNewId) {
-        activeWorkspaceId.set(firstNewId);
-      }
-    } catch (e) {
-      console.warn('[SessionTree] folder dialog failed:', e.message);
-      // Fallback: simple prompt for non-Tauri environments
-      const path = window.prompt('Enter project path:');
-      if (path) {
-        const id = await createWorkspaceFromPath(path);
-        if (id) activeWorkspaceId.set(id);
-      }
-    }
-  }
-
-  async function createWorkspaceFromPath(folderPath) {
-    dispatch('create-workspace', { cwd: folderPath });
-    // Return a predictable id based on path so we can auto-select
-    // The actual id is assigned server-side; we'll just let App.svelte
-    // refresh the list and pick the newest workspace.
-    return null;
+  function openFolderDialog() {
+    dispatch('create-workspace');
   }
 
   function selectWorkspace(id) {
     activeWorkspaceId.set(id);
+    activeGroupId.set(null);
   }
+
+  function selectGroup(id) {
+    activeGroupId.set(id);
+    activeWorkspaceId.set(null);
+  }
+
+  $: orderedWorkspaces = $workspaces.filter((workspace) => !isTeleptyAttachWorkspace(workspace)).sort((a, b) => {
+    if (a.status !== b.status) return a.status === 'dead' ? 1 : -1;
+    return Number(b.created_at || 0) - Number(a.created_at || 0);
+  });
+  $: orderedTeleptySessions = [...$visibleTeleptySessions].sort((a, b) => a.remoteId.localeCompare(b.remoteId));
 
   async function closeWorkspace(id, e) {
     e.stopPropagation();
@@ -65,15 +46,22 @@
 
   function statusColor(ws) {
     if (ws.status === 'dead') return 'var(--status-danger)';
+    if (ws.status === 'restarting') return 'var(--accent)';
     return 'var(--status-active)';
   }
 
+  function closeTitle(ws) {
+    return ws.status === 'dead' ? 'Remove dead session' : 'Close session';
+  }
+
+  function statusLabel(ws) {
+    if (ws.status === 'dead') return 'dead';
+    if (ws.status === 'restarting') return 'restarting';
+    return 'active';
+  }
+
   function sessionName(ws) {
-    if (ws.cwd) {
-      const parts = ws.cwd.replace(/\/+$/, '').split('/');
-      return parts[parts.length - 1] || ws.id;
-    }
-    return ws.id.replace(/^ws-/, '').replace(/-[^-]+$/, '') || ws.id;
+    return workspaceDisplayName(ws);
   }
 
   function shortCwd(cwd) {
@@ -97,7 +85,34 @@
     >+</button>
   </div>
 
-  {#each $workspaces as ws}
+  {#if orderedTeleptySessions.length > 0}
+    <div class="section-header-row telepty-section">
+      <span class="section-label">Telepty</span>
+    </div>
+    {#each orderedTeleptySessions as ws}
+      <div
+        class="session-row"
+        class:selected={$activeWorkspaceId === ws.id}
+        class:state-running={true}
+        on:click={() => selectWorkspace(ws.id)}
+        on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && selectWorkspace(ws.id)}
+        role="button"
+        tabindex="0"
+      >
+        <span class="session-icon">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/>
+          </svg>
+        </span>
+        <div class="session-info">
+          <span class="session-name">{sessionName(ws)}</span>
+          <span class="session-meta" style={`color: ${statusColor(ws)};`}>{statusLabel(ws)}</span>
+        </div>
+      </div>
+    {/each}
+  {/if}
+
+  {#each orderedWorkspaces as ws}
     <div
       class="session-row"
       class:selected={$activeWorkspaceId === ws.id}
@@ -109,24 +124,24 @@
       tabindex="0"
     >
       <span class="session-icon">
-        <!-- terminal icon -->
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>
         </svg>
       </span>
       <div class="session-info">
         <span class="session-name">{sessionName(ws)}</span>
-        <span class="session-meta">{ws.status === 'dead' ? 'dead' : 'active'}</span>
+        <span class="session-meta" style={`color: ${statusColor(ws)};`}>{statusLabel(ws)}</span>
       </div>
       <button
         class="close-btn"
         on:click={(e) => closeWorkspace(ws.id, e)}
-        title="Close session"
+        title={closeTitle(ws)}
+        aria-label={closeTitle(ws)}
       >×</button>
     </div>
   {/each}
 
-  {#if $workspaces.length === 0 && $atermConnected}
+  {#if orderedWorkspaces.length === 0 && orderedTeleptySessions.length === 0 && $atermConnected}
     <div class="empty-state">
       <span class="empty-text">No sessions yet</span>
       <button class="empty-new-btn" on:click={openFolderDialog}>
@@ -136,6 +151,27 @@
         New session
       </button>
     </div>
+  {/if}
+
+  {#if $groups.length > 0}
+    <div class="section-header-row" style="margin-top: 16px;">
+      <span class="section-label">Groups</span>
+    </div>
+    {#each $groups as grp}
+      <div
+        class="session-row"
+        class:selected={$activeGroupId === grp.id}
+        on:click={() => selectGroup(grp.id)}
+        role="button"
+        tabindex="0"
+      >
+        <span class="session-icon group-icon">{grp.sessionIds.length}</span>
+        <div class="session-info">
+          <span class="session-name">{grp.name}</span>
+          <span class="session-meta">{grp.sessionIds.length} sessions</span>
+        </div>
+      </div>
+    {/each}
   {/if}
 
   <!-- Sidebar bottom -->
@@ -213,8 +249,8 @@
   .session-row.selected:hover { background: var(--bg-sidebar-selected); }
 
   .session-row:hover .close-btn { opacity: 1; }
+  .state-idle .close-btn { opacity: 1; }
 
-  /* Icon states */
   .session-icon {
     flex-shrink: 0;
     width: 16px;
@@ -230,6 +266,15 @@
   .state-idle .session-icon  { color: var(--text-disabled); opacity: 0.5; }
   .state-running .session-icon { color: var(--text-secondary); }
   .session-row.selected.state-running .session-icon { color: var(--text-primary); }
+  .state-idle .session-name { color: var(--text-disabled); }
+  .state-idle .session-meta { color: var(--status-danger); }
+
+  .group-icon {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+  }
 
   .session-info {
     display: flex;

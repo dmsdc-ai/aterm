@@ -1,7 +1,8 @@
 <script>
   import { onMount } from 'svelte';
   import { createEventDispatcher } from 'svelte';
-  import { workspaces, activeWorkspaceId, atermClient } from '../lib/stores.js';
+  import { sessions, groups, activeWorkspaceId, activeGroupId } from '../lib/stores.js';
+  import { workspaceDisplayName } from '../lib/workspace-labels.js';
 
   const dispatch = createEventDispatcher();
   let query = '';
@@ -11,14 +12,18 @@
     inputEl?.focus();
   });
 
-  $: actions = buildActions(query, $workspaces);
+  $: actions = buildActions(query, $sessions, $groups, $activeGroupId);
 
-  function buildActions(q, wsList) {
+  function buildActions(q, sessionList, groupList, currentGroupId) {
     const items = [];
     const lower = q.toLowerCase();
+    const deliberatePrefix = 'deliberate ';
+    const groupPrefix = 'group ';
+    const broadcastPrefix = 'broadcast ';
+    const activeGroup = groupList.find((group) => group.id === currentGroupId) || groupList[groupList.length - 1] || null;
 
-    for (const ws of wsList) {
-      const name = ws.cwd ? ws.cwd.split('/').pop() : ws.id;
+    for (const ws of sessionList) {
+      const name = workspaceDisplayName(ws);
       if (!q || name.toLowerCase().includes(lower) || ws.id.toLowerCase().includes(lower)) {
         items.push({ type: 'select', label: `Open ${name}`, id: ws.id, category: 'session', glyph: '▸' });
       }
@@ -26,6 +31,51 @@
 
     if (!q || 'new'.includes(lower) || 'create'.includes(lower)) {
       items.push({ type: 'new', label: 'New session...', category: 'action', glyph: '+' });
+    }
+
+    if (!q || 'deliberate'.includes(lower) || lower.includes('deliberate')) {
+      const topic = lower.startsWith(deliberatePrefix) ? q.slice(deliberatePrefix.length).trim() : '';
+      items.push({
+        type: 'deliberate',
+        label: topic ? `Deliberate: ${topic}` : 'Deliberate...',
+        category: 'action',
+        glyph: '◫',
+        topic,
+      });
+    }
+
+    if (!q || 'group'.includes(lower) || lower.includes('group')) {
+      const topic = lower.startsWith(groupPrefix) ? q.slice(groupPrefix.length).trim() : '';
+      items.push({
+        type: 'group',
+        label: activeGroup
+          ? `Open group: ${activeGroup.name}`
+          : topic
+            ? `Create group: ${topic}`
+            : 'Group...',
+        category: 'action',
+        glyph: '▦',
+        groupId: activeGroup?.id || '',
+        topic,
+      });
+    }
+
+    if (!q || 'broadcast'.includes(lower) || lower.includes('broadcast')) {
+      const text = lower.startsWith(broadcastPrefix) ? q.slice(broadcastPrefix.length).trim() : '';
+      items.push({
+        type: 'broadcast',
+        label: activeGroup
+          ? text
+            ? `Broadcast to ${activeGroup.name}: ${text}`
+            : `Broadcast to ${activeGroup.name}...`
+          : text
+            ? `Broadcast: ${text}`
+            : 'Broadcast...',
+        category: 'action',
+        glyph: '≫',
+        groupId: activeGroup?.id || '',
+        text,
+      });
     }
 
     return items.slice(0, 15);
@@ -37,10 +87,20 @@
   function execute(action) {
     if (action.type === 'select') {
       activeWorkspaceId.set(action.id);
+      activeGroupId.set(null);
       dispatch('close');
     } else if (action.type === 'new') {
+      dispatch('new');
       dispatch('close');
-      // Trigger new session dialog — handled by parent
+    } else if (action.type === 'deliberate') {
+      dispatch('deliberate', { topic: action.topic || '' });
+      dispatch('close');
+    } else if (action.type === 'group') {
+      dispatch('group', { groupId: action.groupId || '', topic: action.topic || '' });
+      dispatch('close');
+    } else if (action.type === 'broadcast') {
+      dispatch('broadcast', { groupId: action.groupId || '', text: action.text || '' });
+      dispatch('close');
     }
   }
 
@@ -88,7 +148,7 @@
           bind:this={inputEl}
           bind:value={query}
           on:keydown={handleKey}
-          placeholder="Search sessions, actions..."
+          placeholder="Search sessions or type deliberate / group / broadcast..."
           class="search-input"
           autocomplete="off"
           spellcheck="false"
@@ -129,6 +189,7 @@
       <div class="palette-footer">
         <span class="hint"><kbd>↑↓</kbd> navigate</span>
         <span class="hint"><kbd>Enter</kbd> select</span>
+        <span class="hint"><kbd>deliberate</kbd> <kbd>group</kbd> <kbd>broadcast</kbd></span>
         <span class="hint"><kbd>Esc</kbd> close</span>
       </div>
 

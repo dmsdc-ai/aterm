@@ -1,89 +1,93 @@
-# aterm — AI Agent Orchestration Messenger
+# aterm — AI Agent Orchestration Terminal
 
-aigentry 에코시스템의 **전용 터미널/메신저**. Electron 데스크탑 앱 + CLI.
+aigentry 에코시스템의 **전용 터미널/메신저**. Tauri v2 데스크탑 앱.
 
 ## 아키텍처
 
 ```
-Electron Main Process (node-pty + Unix Socket)
-  ├── IPC ──→ Svelte Renderer (xterm.js)
-  └── Unix Socket ──→ CLI (bin/aterm.js)
-
-Renderer ──→ telepty daemon (localhost:3848) [optional]
+Tauri Rust Backend (portable-pty)
+  └── Tauri IPC (commands + events) ──→ Svelte Renderer (xterm.js)
 ```
 
 ### 디렉토리 구조
 
 ```
 src/
-  main/          — Electron main process (Node.js)
-    index.js     — BrowserWindow + IPC + PTY + socket server
-  preload/       — preload scripts
-    index.js     — contextBridge (atermAPI)
-  renderer/      — Svelte frontend
-    index.html
-    src/
-      App.svelte, main.js, app.css
-      lib/       — aterm-client.js, stores.js, telepty-client.js
-      components/ — SessionTree, Terminal, Timeline, CommandPalette
-      design/    — 디자인 토큰 (colors, spacing, typography, animations)
-  server/        — 공유 서버 코드 (main process + standalone 모드 공용)
-    index.js     — standalone HTTP + WS 서버
-    pty-manager.js — PTY 프로세스 관리
-    socket-server.js — Unix domain socket 서버
-bin/
-  aterm.js       — CLI tool (Unix socket 직접 사용)
+  App.svelte        — 메인 앱 (3-패널 레이아웃)
+  main.js           — Svelte 마운트
+  app.css            — 전역 스타일
+  lib/
+    aterm-client.js  — Tauri IPC 클라이언트 (invoke/listen)
+    stores.js        — Svelte 반응형 스토어
+    telepty-client.js — telepty daemon 클라이언트
+  components/
+    SessionTree.svelte    — 좌측 세션 트리
+    Terminal.svelte       — 중앙 xterm.js PTY 터미널
+    Timeline.svelte       — 우측 이벤트 타임라인
+    CommandPalette.svelte — Cmd+K 커맨드 팔레트
+src-tauri/
+  src/lib.rs         — Rust 백엔드 (portable-pty, Tauri commands)
+  Cargo.toml
+  tauri.conf.json
 ```
 
-### 핵심 모듈
+### Rust 백엔드 (src-tauri/src/lib.rs)
 
-| 파일 | 역할 |
-|------|------|
-| `src/main/index.js` | Electron main: BrowserWindow, IPC, PTY, socket |
-| `src/preload/index.js` | contextBridge: atermAPI 노출 |
-| `src/renderer/src/lib/aterm-client.js` | IPC/WS 듀얼 클라이언트 (자동 감지) |
-| `src/renderer/src/lib/telepty-client.js` | telepty daemon WS/HTTP 클라이언트 |
-| `src/renderer/src/lib/stores.js` | Svelte 반응형 스토어 |
-| `src/renderer/src/components/Terminal.svelte` | 중앙 xterm.js PTY 터미널 |
-| `src/renderer/src/components/SessionTree.svelte` | 좌측 세션 트리 |
-| `src/renderer/src/components/Timeline.svelte` | 우측 이벤트 타임라인 |
-| `src/renderer/src/components/CommandPalette.svelte` | Cmd+K 커맨드 팔레트 |
-| `src/server/pty-manager.js` | PTY 프로세스 관리 (공유) |
-| `src/server/socket-server.js` | Unix domain socket 서버 (공유) |
+| Command | 역할 |
+|---------|------|
+| `list_workspaces` | 워크스페이스 목록 |
+| `create_workspace` | PTY 생성 (portable-pty) |
+| `close_workspace` | PTY 종료 |
+| `send_to_workspace` | PTY에 텍스트 전송 |
+| `send_key` | 키 매핑 후 PTY 전송 |
+| `read_screen` | 버퍼 라인 반환 |
+| `resize_workspace` | PTY 리사이즈 |
+| `suggest_paths` | 경로 자동완성 |
+| Event: `pty-output` | PTY 출력 이벤트 스트림 |
 
 ## 명령어
 
 ```bash
-# Electron 데스크탑 앱
-npm run dev      # electron-vite dev (핫 리로드)
-npm run build    # electron-vite build (프로덕션)
-npm run preview  # electron-vite preview
-
-# Standalone 웹 모드 (Electron 없이)
-npm run server   # node src/server/index.js (HTTP + WS 서버)
-npm run web:dev  # vite dev (브라우저 프론트엔드)
-npm run web:build # vite build (dist/)
-
-# CLI
-aterm status     # 서버 상태 확인
-aterm ls         # 워크스페이스 목록
+npm run dev      # tauri dev (핫 리로드)
+npm run build    # tauri build (프로덕션)
 ```
-
-## 통신 모드
-
-| 모드 | 경로 | 용도 |
-|------|------|------|
-| Electron IPC | main ↔ renderer (contextBridge) | 데스크탑 앱 |
-| WebSocket | ws://localhost:3849 | 브라우저 standalone |
-| Unix Socket | ~/.aterm/aterm.sock | CLI 도구 |
-
-aterm-client.js는 `window.atermAPI` 존재 여부로 IPC/WS 모드를 자동 감지.
 
 ## 의존성
 
-- node-pty: 네이티브 모듈 (빌드 시 external)
-- telepty daemon (localhost:3848): 선택적 — 세션 관리용
+- portable-pty 0.9: Rust PTY 관리
+- @xterm/xterm 6.0: 터미널 렌더링 (WKWebView Korean IME 패치 적용)
+- @tauri-apps/api: IPC 통신
+- TailwindCSS: 스타일링
 
 ## Tech Stack
 
-Electron + electron-vite + Svelte 5 + xterm.js + TailwindCSS
+Tauri v2 + Rust + Svelte 5 + xterm.js + TailwindCSS
+
+## 알려진 패치
+
+- **xterm.js WKWebView Korean IME**: PR #5704 backport 적용.
+  WKWebView는 composition 이벤트 대신 `insertReplacementText` inputType 사용.
+  `node_modules/@xterm/xterm/lib/xterm.{js,mjs}` 직접 패치.
+  `npm install` 시 패치 재적용 필요 (patch-package 도입 예정).
+
+## AI 작업 원칙
+
+### Multi-LLM 위임 원칙 (3회 실패 시 위임)
+
+동일 문제에 **3회 이상 시도해도 해결 안 되면**, 다른 LLM에 위임한다.
+
+| 단계 | 행동 |
+|------|------|
+| 1~2회 시도 | 직접 해결 시도 |
+| 3회 실패 | 접근 방식 재검토, upstream 이슈 검색 |
+| 4회+ 실패 | **즉시 다른 LLM(Codex 등)에 위임** |
+
+**위임 방법:**
+```bash
+# telepty로 다른 LLM 세션 생성 후 위임
+telepty allow --id {project}-codex codex resume
+telepty inject --from {my-session} {project}-codex "문제 설명 + 컨텍스트"
+```
+
+**왜?** 같은 LLM이 같은 가설에 갇히면 해결 불가. 다른 LLM은 다른 관점(upstream 검색, 다른 분석)으로 접근하여 빠르게 해결할 수 있음.
+실제 사례: Korean IME 버그 — Claude 10회+ 실패 → Codex가 upstream PR #5704 즉시 발견.

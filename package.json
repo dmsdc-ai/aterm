@@ -3,15 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "bin": {
-    "aterm": "./bin/aterm.js"
-  },
   "scripts": {
     "vite:dev": "vite",
     "vite:build": "vite build",
+    "postinstall": "node scripts/patch-xterm-wk-ime.mjs",
     "dev": "tauri dev",
-    "build": "tauri build",
-    "server": "node src/server/index.js"
+    "build": "tauri build"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.4",
@@ -23,11 +20,9 @@
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/addon-webgl": "^0.19.0",
-    "@xterm/xterm": "^6.0.0",
-    "node-pty": "^1.1.0",
-    "tailwindcss": "^4.2.2",
-    "ws": "^8.19.0"
+    "@xterm/addon-fit": "0.12.0-beta.195",
+    "@xterm/addon-webgl": "0.20.0-beta.194",
+    "@xterm/xterm": "6.1.0-beta.195",
+    "tailwindcss": "^4.2.2"
   }
 }
