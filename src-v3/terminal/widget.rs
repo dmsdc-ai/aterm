@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use iced::advanced::widget::{tree, Tree, Widget};
 use iced::advanced::{
@@ -179,7 +178,7 @@ where
                             }
                         }
                         state.ime_composing = false;
-                        state.last_commit_at = Some(Instant::now());
+                        state.last_commit_text = Some(text.to_string());
                     }
                     input_method::Event::Preedit(text, _cursor) => {
                         eprintln!("[IME] preedit: {:?}", text);
@@ -277,16 +276,26 @@ where
                         }
                     }
                 } else {
-                    let recent_commit = state.last_commit_at
-                        .map(|t| t.elapsed() < COMMIT_DEDUP_WINDOW)
+                    // Content-based dedup: if KeyPressed text matches last Commit text, it's a duplicate.
+                    let is_duplicate = text.as_deref()
+                        .filter(|t| !t.is_empty())
+                        .and_then(|t| state.last_commit_text.as_deref().map(|ct| ct == t))
                         .unwrap_or(false);
-                    if recent_commit {
-                        eprintln!("[IME] dedup: suppressing KeyPressed text within 50ms of Commit: key={:?} text={:?}", key, text);
-                    }
-                    if let Some(bytes) = map_key_to_bytes(key, text.as_deref(), *modifiers, recent_commit) {
-                        if let Some(on_event) = self.on_event.as_ref() {
-                            shell.publish(on_event(TerminalEvent::Input(bytes)));
-                            shell.capture_event();
+
+                    if is_duplicate {
+                        eprintln!("[IME] dedup: KeyPressed text {:?} matches last Commit — skipping", text);
+                        state.last_commit_text = None;
+                        shell.capture_event();
+                    } else {
+                        // Clear last_commit_text since this KeyPressed is different
+                        if text.as_deref().filter(|t| !t.is_empty()).is_some() {
+                            state.last_commit_text = None;
+                        }
+                        if let Some(bytes) = map_key_to_bytes(key, text.as_deref(), *modifiers) {
+                            if let Some(on_event) = self.on_event.as_ref() {
+                                shell.publish(on_event(TerminalEvent::Input(bytes)));
+                                shell.capture_event();
+                            }
                         }
                     }
                 }
@@ -508,8 +517,8 @@ struct State {
     columns: u16,
     rows: u16,
     ime_composing: bool,
-    /// Timestamp of last IME Commit — used to suppress duplicate KeyPressed within 50ms.
-    last_commit_at: Option<Instant>,
+    /// Text from the last IME Commit — used to suppress duplicate KeyPressed with identical text.
+    last_commit_text: Option<String>,
     /// Whether the user is currently dragging to select text.
     selecting: bool,
     /// Selection anchor (row, col) in cell coordinates.
@@ -524,25 +533,17 @@ fn is_paste_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> boo
         && matches!(key.as_ref(), keyboard::Key::Character("v"))
 }
 
-/// Suppression window: if a KeyPressed arrives within this duration after an
-/// IME Commit, its `text` is treated as a duplicate and ignored.
-const COMMIT_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
-
 /// Map keyboard events to PTY byte sequences.
 ///
 /// macOS IME behaviour:
 /// - Korean mode: text arrives via Preedit → Commit. KeyPressed may echo the
-///   same text as a duplicate — suppress via `recent_commit`.
+///   same text — deduplicated by content comparison in the caller.
 /// - English mode: text arrives via KeyPressed only. No Commit event fires.
-/// - Ctrl+<letter>: bypasses IME entirely, arrives via KeyPressed.
-///
-/// Strategy: process KeyPressed text normally UNLESS a Commit happened within
-/// the last 50ms (dedup window).
+/// - Ctrl+<letter>: bypasses IME, arrives via KeyPressed.
 fn map_key_to_bytes(
     key: &keyboard::Key,
     text: Option<&str>,
     modifiers: keyboard::Modifiers,
-    recent_commit: bool,
 ) -> Option<Vec<u8>> {
     // Ctrl+<letter> → control codes (e.g., Ctrl+C → \x03)
     if modifiers.control() {
@@ -554,8 +555,8 @@ fn map_key_to_bytes(
         }
     }
 
-    // Normal text — only when no recent IME Commit (prevents duplicates)
-    if !recent_commit && !modifiers.command() && !modifiers.alt() {
+    // Normal text input
+    if !modifiers.command() && !modifiers.alt() {
         if let Some(text) = text {
             if !text.is_empty() {
                 return Some(text.as_bytes().to_vec());
