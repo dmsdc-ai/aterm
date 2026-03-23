@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+#[cfg(target_os = "macos")]
+pub use macos::NativeImeHandler;
+
 /// A portable text range used by the IME bridge.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TextRange {

@@ -10,6 +10,7 @@ use iced::{
 };
 
 use super::renderer::{RenderedTerminal, TerminalRenderer};
+
 use super::SharedTerminal;
 
 #[derive(Debug, Clone)]
@@ -128,6 +129,20 @@ where
 
         self.publish_resize(state, layout.bounds(), shell);
 
+        // Poll native IME for committed text (macOS only)
+        #[cfg(target_os = "macos")]
+        {
+            let committed = crate::ime::NativeImeHandler::initialize().drain_committed();
+            for text in committed {
+                if !text.is_empty() {
+                    if let Some(on_event) = self.on_event.as_ref() {
+                        eprintln!("[NATIVE-IME] delivering committed text: {:?}", text);
+                        shell.publish(on_event(TerminalEvent::Input(text.into_bytes())));
+                    }
+                }
+            }
+        }
+
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let focused = cursor.is_over(layout.bounds());
@@ -136,6 +151,8 @@ where
                     if let Some(on_event) = self.on_event.as_ref() {
                         shell.publish(on_event(TerminalEvent::FocusChanged(focused)));
                     }
+                    #[cfg(target_os = "macos")]
+                    crate::ime::NativeImeHandler::initialize().set_active(focused);
                 }
                 if focused {
                     if let Some(pos) = cursor.position_in(layout.bounds()) {
@@ -168,36 +185,48 @@ where
                 }
             }
             Event::InputMethod(ime_event) => {
-                match ime_event {
-                    input_method::Event::Commit(text) => {
-                        eprintln!("[EVENT] InputMethod::Commit({:?}) composing={} last_commit={:?}",
-                            text, state.ime_composing, state.last_commit_text);
-                        if state.focused && !text.is_empty() {
-                            if let Some(on_event) = self.on_event.as_ref() {
-                                shell.publish(on_event(TerminalEvent::Input(text.as_bytes().to_vec())));
-                                shell.capture_event();
+                // On macOS, native handler processes IME. These events may still arrive
+                // from winit but are redundant. Log and skip.
+                #[cfg(target_os = "macos")]
+                {
+                    eprintln!("[EVENT] InputMethod (winit, ignored on macOS): {:?}", ime_event);
+                    // Don't process — native handler handles it
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    match ime_event {
+                        input_method::Event::Commit(text) => {
+                            eprintln!("[EVENT] InputMethod::Commit({:?}) composing={} last_commit={:?}",
+                                text, state.ime_composing, state.last_commit_text);
+                            if state.focused && !text.is_empty() {
+                                if let Some(on_event) = self.on_event.as_ref() {
+                                    shell.publish(on_event(TerminalEvent::Input(text.as_bytes().to_vec())));
+                                    shell.capture_event();
+                                }
                             }
+                            state.ime_composing = false;
+                            state.last_commit_text = Some(text.to_string());
                         }
-                        state.ime_composing = false;
-                        state.last_commit_text = Some(text.to_string());
-                    }
-                    input_method::Event::Preedit(text, _cursor) => {
-                        eprintln!("[EVENT] InputMethod::Preedit({:?}) composing={}",
-                            text, state.ime_composing);
-                        state.ime_composing = !text.is_empty();
-                        shell.capture_event();
-                    }
-                    input_method::Event::Opened => {
-                        eprintln!("[EVENT] InputMethod::Opened");
-                        state.ime_composing = true;
-                    }
-                    input_method::Event::Closed => {
-                        eprintln!("[EVENT] InputMethod::Closed");
-                        state.ime_composing = false;
+                        input_method::Event::Preedit(text, _cursor) => {
+                            eprintln!("[EVENT] InputMethod::Preedit({:?}) composing={}",
+                                text, state.ime_composing);
+                            state.ime_composing = !text.is_empty();
+                            shell.capture_event();
+                        }
+                        input_method::Event::Opened => {
+                            eprintln!("[EVENT] InputMethod::Opened → CJK active");
+                            state.ime_composing = true;
+                        }
+                        input_method::Event::Closed => {
+                            eprintln!("[EVENT] InputMethod::Closed → CJK inactive");
+                            state.ime_composing = false;
+                        }
                     }
                 }
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
+                // Native IME handler replaces iced's InputMethod on macOS
+                #[cfg(not(target_os = "macos"))]
                 if state.focused {
                     let cursor_rect = Rectangle::new(
                         Point::new(0.0, 0.0),
@@ -232,18 +261,8 @@ where
                 modifiers,
                 ..
             }) if state.focused && !state.ime_composing => {
-                eprintln!("[EVENT] KeyPressed key={:?} text={:?} mods={:?} composing={} last_commit={:?}",
-                    key, text, modifiers, state.ime_composing, state.last_commit_text);
-
-                // Contract enforcement: Hangul in KeyPressed is always a winit/macOS
-                // race condition artifact. Hangul must arrive through IME Commit only.
-                if let Some(t) = text.as_deref() {
-                    if contains_hangul(t) {
-                        eprintln!("[IME] hangul in KeyPressed blocked: {:?} (must come via Commit)", t);
-                        shell.capture_event();
-                        return;
-                    }
-                }
+                eprintln!("[EVENT] KeyPressed key={:?} text={:?} mods={:?} composing={}",
+                    key, text, modifiers, state.ime_composing);
 
                 if modifiers.shift()
                     && matches!(
@@ -291,26 +310,34 @@ where
                         }
                     }
                 } else {
-                    // Content-based dedup: if KeyPressed text matches last Commit text, it's a duplicate.
-                    let is_duplicate = text.as_deref()
-                        .filter(|t| !t.is_empty())
-                        .and_then(|t| state.last_commit_text.as_deref().map(|ct| ct == t))
-                        .unwrap_or(false);
+                    // On macOS, native IME handler consumes IME key events (returns null
+                    // from the NSEvent monitor), so KeyPressed only fires for non-IME keys.
+                    // No dedup logic needed.
+                    //
+                    // On non-macOS, dedup against last_commit_text to handle winit race.
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let is_duplicate = text.as_deref()
+                            .filter(|t| !t.is_empty())
+                            .and_then(|t| state.last_commit_text.as_deref().map(|ct| ct == t))
+                            .unwrap_or(false);
 
-                    if is_duplicate {
-                        eprintln!("[IME] dedup: KeyPressed text {:?} matches last Commit — skipping", text);
-                        state.last_commit_text = None;
-                        shell.capture_event();
-                    } else {
+                        if is_duplicate {
+                            eprintln!("[IME] dedup: KeyPressed text {:?} matches last Commit — skipping", text);
+                            state.last_commit_text = None;
+                            shell.capture_event();
+                            return;
+                        }
                         // Clear last_commit_text since this KeyPressed is different
                         if text.as_deref().filter(|t| !t.is_empty()).is_some() {
                             state.last_commit_text = None;
                         }
-                        if let Some(bytes) = map_key_to_bytes(key, text.as_deref(), *modifiers) {
-                            if let Some(on_event) = self.on_event.as_ref() {
-                                shell.publish(on_event(TerminalEvent::Input(bytes)));
-                                shell.capture_event();
-                            }
+                    }
+
+                    if let Some(bytes) = map_key_to_bytes(key, text.as_deref(), *modifiers) {
+                        if let Some(on_event) = self.on_event.as_ref() {
+                            shell.publish(on_event(TerminalEvent::Input(bytes)));
+                            shell.capture_event();
                         }
                     }
                 }
@@ -545,16 +572,6 @@ struct State {
     selection_start: Option<(usize, usize)>,
     /// Selection moving end (row, col) in cell coordinates.
     selection_end: Option<(usize, usize)>,
-}
-
-/// Hangul characters in KeyPressed text are always race condition artifacts.
-/// Contract: Hangul must arrive through InputMethod::Commit only.
-fn contains_hangul(text: &str) -> bool {
-    text.chars().any(|c| matches!(c,
-        '\u{1100}'..='\u{11FF}'   // Hangul Jamo
-        | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
-        | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
-    ))
 }
 
 /// Check if this is a Cmd+V paste action.

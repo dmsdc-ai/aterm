@@ -169,6 +169,12 @@ impl Aterm {
             status_text: "Ready".to_string(),
         };
 
+        #[cfg(target_os = "macos")]
+        {
+            crate::ime::NativeImeHandler::initialize();
+            eprintln!("[NATIVE-IME] handler initialized");
+        }
+
         app.ensure_default_workspace();
         app.refresh_sessions();
         app.refresh_active_terminal();
