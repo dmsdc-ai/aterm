@@ -178,7 +178,6 @@ where
                             }
                         }
                         state.ime_composing = false;
-                        state.ime_just_committed = true;
                     }
                     input_method::Event::Preedit(text, _cursor) => {
                         eprintln!("[IME] preedit: {:?}", text);
@@ -230,12 +229,7 @@ where
                 modifiers,
                 ..
             }) if state.focused && !state.ime_composing => {
-                // Skip if IME just committed — prevents duplicate input
-                if state.ime_just_committed {
-                    eprintln!("[IME] skip KeyPressed after Commit: key={:?} text={:?}", key, text);
-                    state.ime_just_committed = false;
-                    shell.capture_event();
-                } else if modifiers.shift()
+                if modifiers.shift()
                     && matches!(
                         key.as_ref(),
                         keyboard::Key::Named(keyboard::key::Named::PageUp)
@@ -504,8 +498,6 @@ struct State {
     columns: u16,
     rows: u16,
     ime_composing: bool,
-    /// Set after IME Commit to prevent the next KeyPressed from duplicating input.
-    ime_just_committed: bool,
     /// Whether the user is currently dragging to select text.
     selecting: bool,
     /// Selection anchor (row, col) in cell coordinates.
@@ -514,30 +506,30 @@ struct State {
     selection_end: Option<(usize, usize)>,
 }
 
-/// Returns true if the string contains Hangul jamo or syllable characters
-/// that should only come through IME Commit, never through KeyPressed.
-fn contains_hangul(s: &str) -> bool {
-    s.chars().any(|c| matches!(c,
-        '\u{1100}'..='\u{11FF}'   // Hangul Jamo
-        | '\u{3131}'..='\u{318E}' // Hangul Compatibility Jamo
-        | '\u{AC00}'..='\u{D7A3}' // Hangul Syllables
-        | '\u{A960}'..='\u{A97C}' // Hangul Jamo Extended-A
-        | '\u{D7B0}'..='\u{D7FB}' // Hangul Jamo Extended-B
-    ))
-}
-
 /// Check if this is a Cmd+V paste action.
 fn is_paste_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     modifiers.command()
         && matches!(key.as_ref(), keyboard::Key::Character("v"))
 }
 
+/// Map keyboard events to PTY byte sequences.
+///
+/// IMPORTANT: When IME is enabled (always, for this terminal widget), ALL text
+/// input arrives through `InputMethod::Commit`. The `text` field in `KeyPressed`
+/// is a duplicate and MUST be ignored for normal text. We only use `text` for
+/// Ctrl+<letter> control codes, where IME is bypassed by the modifier key.
+///
+/// This is the root fix for:
+/// - Korean jamo decomposition (ㅇㅡㄹ instead of 을)
+/// - First character lost after 한영전환
+/// - Punctuation lost after Korean input
 fn map_key_to_bytes(
     key: &keyboard::Key,
     text: Option<&str>,
     modifiers: keyboard::Modifiers,
 ) -> Option<Vec<u8>> {
     // Ctrl+<letter> → control codes (e.g., Ctrl+C → \x03)
+    // Ctrl bypasses IME, so using `text` here is correct.
     if modifiers.control() {
         if let Some(ch) = text.and_then(|value| value.chars().next()) {
             let lower = ch.to_ascii_lowercase();
@@ -547,17 +539,11 @@ fn map_key_to_bytes(
         }
     }
 
-    // Normal text input (no Cmd, no Alt)
-    if !modifiers.command() && !modifiers.alt() {
-        if let Some(text) = text {
-            // Skip Hangul characters in KeyPressed — they must come through IME Commit only.
-            // Without this, Korean jamo appear decomposed (ㅇㅡㄹ instead of 을).
-            if !text.is_empty() && !contains_hangul(text) {
-                return Some(text.as_bytes().to_vec());
-            }
-        }
-    }
+    // DO NOT process `text` from KeyPressed for normal input.
+    // All text (English, Korean, punctuation) comes through InputMethod::Commit.
+    // Processing `text` here would cause duplicates or swallowed characters.
 
+    // Named keys only — these don't go through IME.
     match key.as_ref() {
         keyboard::Key::Named(keyboard::key::Named::Enter) => Some(b"\r".to_vec()),
         keyboard::Key::Named(keyboard::key::Named::Tab) => Some(b"\t".to_vec()),
