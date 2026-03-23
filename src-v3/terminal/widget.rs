@@ -170,7 +170,8 @@ where
             Event::InputMethod(ime_event) => {
                 match ime_event {
                     input_method::Event::Commit(text) => {
-                        eprintln!("[IME] commit: {:?}", text);
+                        eprintln!("[EVENT] InputMethod::Commit({:?}) composing={} pending={} last_commit={:?}",
+                            text, state.ime_composing, state.ime_opened_pending, state.last_commit_text);
                         if state.focused && !text.is_empty() {
                             if let Some(on_event) = self.on_event.as_ref() {
                                 shell.publish(on_event(TerminalEvent::Input(text.as_bytes().to_vec())));
@@ -178,20 +179,27 @@ where
                             }
                         }
                         state.ime_composing = false;
+                        state.ime_opened_pending = false;
                         state.last_commit_text = Some(text.to_string());
                     }
                     input_method::Event::Preedit(text, _cursor) => {
-                        eprintln!("[IME] preedit: {:?}", text);
+                        eprintln!("[EVENT] InputMethod::Preedit({:?}) composing={} pending={}",
+                            text, state.ime_composing, state.ime_opened_pending);
                         state.ime_composing = !text.is_empty();
+                        if !text.is_empty() {
+                            state.ime_opened_pending = false; // IME is actually active now
+                        }
                         shell.capture_event();
                     }
                     input_method::Event::Opened => {
-                        eprintln!("[IME] opened");
+                        eprintln!("[EVENT] InputMethod::Opened composing={}", state.ime_composing);
                         state.ime_composing = true;
+                        state.ime_opened_pending = true;
                     }
                     input_method::Event::Closed => {
-                        eprintln!("[IME] closed");
+                        eprintln!("[EVENT] InputMethod::Closed composing={}", state.ime_composing);
                         state.ime_composing = false;
+                        state.ime_opened_pending = false;
                     }
                 }
             }
@@ -230,6 +238,21 @@ where
                 modifiers,
                 ..
             }) if state.focused && !state.ime_composing => {
+                eprintln!("[EVENT] KeyPressed key={:?} text={:?} mods={:?} composing={} pending={} last_commit={:?}",
+                    key, text, modifiers, state.ime_composing, state.ime_opened_pending, state.last_commit_text);
+
+                // Guard: IME just opened but hasn't sent Preedit yet — this keystroke
+                // belongs to the IME, not to us. Suppress text to prevent jamo leak.
+                if state.ime_opened_pending {
+                    if let Some(t) = text.as_deref() {
+                        if !t.is_empty() {
+                            eprintln!("[IME] opened_pending: suppressing first KeyPressed text {:?} (IME race)", t);
+                            shell.capture_event();
+                            return;
+                        }
+                    }
+                }
+
                 if modifiers.shift()
                     && matches!(
                         key.as_ref(),
@@ -299,6 +322,11 @@ where
                         }
                     }
                 }
+            }
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key, text, ..
+            }) if state.focused && state.ime_composing => {
+                eprintln!("[EVENT] KeyPressed BLOCKED by ime_composing key={:?} text={:?}", key, text);
             }
             _ => {}
         }
@@ -517,6 +545,10 @@ struct State {
     columns: u16,
     rows: u16,
     ime_composing: bool,
+    /// Set after IME Opened, cleared when first Preedit/Commit/Closed arrives.
+    /// While true, KeyPressed text is suppressed — the IME should handle it but
+    /// winit may deliver the first keystroke as KeyPressed before IME activates.
+    ime_opened_pending: bool,
     /// Text from the last IME Commit — used to suppress duplicate KeyPressed with identical text.
     last_commit_text: Option<String>,
     /// Whether the user is currently dragging to select text.
