@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 
 use iced::widget::{button, column, container, row, stack, text, text_input, Space};
-use iced::{Alignment, Element, Fill, Length, Padding};
+use iced::{Alignment, Color, Element, Fill, Length, Padding};
 
 use crate::ui::theme::{Palette, ThemeMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteCommand {
+    NewSession,
     Deliberate,
     Group,
     Broadcast,
@@ -66,7 +67,7 @@ impl CommandPalette {
             .style(self.palette.text_input_style());
 
         let results = if filtered.is_empty() {
-            column![empty_state(self.palette)].spacing(8)
+            column![empty_state(self.palette)].spacing(4)
         } else {
             column(
                 filtered
@@ -74,24 +75,29 @@ impl CommandPalette {
                     .enumerate()
                     .map(|(index, entry)| command_row(*entry, index == selected_index, self.palette)),
             )
-            .spacing(8)
+            .spacing(4)
         };
 
         let panel = container(
             column![
                 row![
-                    text("Command Palette").size(20),
+                    text("Command Palette").size(16),
                     Space::new().width(Fill),
-                    button(text("Esc")).style(self.palette.button_style()).on_press(CommandPaletteAction::Close),
+                    button(text("Esc").size(11)).style(self.palette.ghost_button_style()).on_press(CommandPaletteAction::Close),
                 ]
                 .align_y(Alignment::Center),
-                text("deliberate, group, broadcast, theme").size(12),
+                text("deliberate, group, broadcast, theme").size(11).style({
+                    let p = self.palette;
+                    move |_| iced::widget::text::Style {
+                        color: Some(p.text_secondary),
+                    }
+                }),
                 input,
                 container(results).width(Fill),
             ]
-            .spacing(14),
+            .spacing(12),
         )
-        .padding(24)
+        .padding(20)
         .width(Length::Fixed(620.0))
         .style(self.palette.panel_style());
 
@@ -149,14 +155,14 @@ fn empty_state<'a>(palette: Palette) -> Element<'a, CommandPaletteAction> {
         ]
         .spacing(4),
     )
-    .padding(Padding::from([14, 16]))
+    .padding(Padding::from([12, 14]))
     .style(move |_| iced::widget::container::Style {
         text_color: Some(palette.text_muted),
         background: Some(iced::Background::Color(palette.surface_alt)),
         border: iced::Border {
-            radius: 16.0.into(),
-            width: 1.0,
-            color: palette.border,
+            radius: 8.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
         },
         shadow: iced::Shadow::default(),
         snap: true,
@@ -177,15 +183,15 @@ fn command_row<'a>(
     let shortcut_widget: Element<'a, CommandPaletteAction> = if shortcut.is_empty() {
         Space::new().into()
     } else {
-        container(text(shortcut).size(11))
-            .padding(Padding::from([4, 8]))
+        container(text(shortcut).size(10))
+            .padding(Padding::from([3, 8]))
             .style(move |_| iced::widget::container::Style {
-                text_color: Some(palette.text),
-                background: Some(iced::Background::Color(palette.accent_soft)),
+                text_color: Some(palette.text_secondary),
+                background: Some(iced::Background::Color(palette.surface_alt)),
                 border: iced::Border {
                     radius: 999.0.into(),
-                    width: 1.0,
-                    color: palette.border,
+                    width: 0.0,
+                    color: Color::TRANSPARENT,
                 },
                 shadow: iced::Shadow::default(),
                 snap: true,
@@ -211,14 +217,29 @@ fn command_row<'a>(
         .align_y(Alignment::Center)
     )
     .width(Fill)
-    .padding(Padding::from([14, 16]))
+    .padding(Padding::from([10, 14]))
     .style(move |_, status| {
-        let mut style = palette.button_style()(&iced::Theme::Dark, status);
-        if selected {
-            style.background = Some(iced::Background::Color(palette.accent_soft));
-            style.border.color = palette.accent;
+        let bg = if selected {
+            palette.accent_soft
+        } else {
+            match status {
+                iced::widget::button::Status::Hovered => palette.surface_alt,
+                iced::widget::button::Status::Pressed => palette.surface_elevated,
+                _ => Color::TRANSPARENT,
+            }
+        };
+        let border_color = if selected { palette.accent } else { Color::TRANSPARENT };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(bg)),
+            text_color: palette.text,
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: if selected { 1.0 } else { 0.0 },
+                color: border_color,
+            },
+            shadow: iced::Shadow::default(),
+            snap: true,
         }
-        style
     })
     .on_press(CommandPaletteAction::Execute(entry.command))
     .into()

@@ -5,7 +5,8 @@ mod ui;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use iced::widget::{column, container, row, stack, text, Space};
@@ -13,26 +14,31 @@ use iced::{
     event, keyboard, time, Alignment, Background, Border, Element, Fill, Result,
     Subscription, Task,
 };
-use tokio::sync::Notify;
-
-static PTY_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
 
 use crate::core::{
-    normalize_terminal_text, SessionStore, SharedPtyManager, TeleptyClient,
-    TeleptySessionInfo, WorkspaceInfo,
+    normalize_terminal_text, PtyOutputSignal, SessionStore, SharedPtyManager,
+    TeleptyClient, TeleptySessionInfo, WorkspaceInfo,
 };
 use crate::ime::{CandidateRect, ImeBridge, Rect, TextRange};
 use crate::terminal::{TerminalEvent, TerminalState, TerminalWidget};
 use crate::ui::{
-    CommandEntry, CommandPalette, CommandPaletteAction, CommandPaletteState, GroupEntry,
-    GroupGrid, GroupGridAction, GroupSummaryEntry, HybridPhase,
-    Palette, PaletteCommand, SessionEntry, SessionKind, SessionStatus, Sidebar,
-    SidebarAction, SidebarModel, ThemeMode,
+    CommandEntry, CommandPalette, CommandPaletteAction, CommandPaletteState,
+    CreateSessionAction, CreateSessionDialog, CreateSessionState, CLI_PRESETS,
+    DeliberateAction, DeliberateDialog, DeliberateDialogState,
+    GroupEntry, GroupGrid, GroupGridAction, GroupSummaryEntry, HybridPhase,
+    Palette, PaletteCommand, SessionEntry, SessionKind, SessionStatus,
+    SettingsAction, SettingsPanel, SettingsState,
+    Sidebar, SidebarAction, SidebarModel, ThemeMode,
 };
 
 const SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_COLUMNS: u16 = 120;
 const DEFAULT_ROWS: u16 = 36;
+const PTY_OUTPUT_DEBOUNCE: Duration = Duration::from_millis(16);
+
+static PTY_SIGNAL: OnceLock<PtyOutputSignal> = OnceLock::new();
+static PTY_DISPATCH_IN_FLIGHT: LazyLock<AtomicBool> =
+    LazyLock::new(|| AtomicBool::new(false));
 
 fn app_title() -> &'static str {
     let hash = env!("ATERM_GIT_HASH");
@@ -45,7 +51,7 @@ fn app_title() -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-static APP_TITLE: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(app_title);
+static APP_TITLE: LazyLock<&'static str> = LazyLock::new(app_title);
 
 fn main() -> Result {
     iced::application(Aterm::boot, update, view)
@@ -78,6 +84,9 @@ struct Aterm {
     local_sessions: Vec<SessionEntry<'static>>,
     telepty_sessions: Vec<SessionEntry<'static>>,
     groups: Vec<GroupEntry<'static>>,
+    create_session_state: CreateSessionState,
+    deliberate_state: DeliberateDialogState,
+    settings_state: SettingsState,
     status_text: String,
 }
 
@@ -92,6 +101,12 @@ enum Message {
     Terminal(TerminalEvent),
     GroupGrid(GroupGridAction),
     GroupTerminal(String, TerminalEvent),
+    CreateSession(CreateSessionAction),
+    FolderSelected(Option<std::path::PathBuf>),
+    Deliberate(DeliberateAction),
+    Settings(SettingsAction),
+    /// Internal routing: deliver text to a workspace without going through telepty.
+    RouteToWorkspace { workspace_id: String, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,11 +141,11 @@ impl Aterm {
 
         let _ = session_store.restore_into(&manager);
 
-        let _ = PTY_NOTIFY.set(
+        let _ = PTY_SIGNAL.set(
             manager
                 .lock()
-                .map(|m| m.notify_handle())
-                .unwrap_or_else(|_| Arc::new(Notify::new())),
+                .map(|m| m.output_signal())
+                .unwrap_or_else(|_| PtyOutputSignal::new()),
         );
 
         let mut app = Self {
@@ -139,7 +154,7 @@ impl Aterm {
             telepty,
             ime,
             terminal: TerminalState::new(DEFAULT_COLUMNS as usize, DEFAULT_ROWS as usize),
-            theme_mode: ThemeMode::Dark,
+            theme_mode: load_theme(),
             palette_state: CommandPaletteState::default(),
             commands: default_commands(),
             current_view: CurrentView::Session,
@@ -148,6 +163,9 @@ impl Aterm {
             local_sessions: Vec::new(),
             telepty_sessions: Vec::new(),
             groups: Vec::new(),
+            create_session_state: CreateSessionState::default(),
+            deliberate_state: DeliberateDialogState::default(),
+            settings_state: SettingsState::default(),
             status_text: "Ready".to_string(),
         };
 
@@ -225,20 +243,39 @@ impl Aterm {
         self.local_sessions = workspaces
             .iter()
             .map(|workspace| {
-                map_local_session(
+                let pending = self.manager.lock().ok()
+                    .and_then(|m| m.peek_queue(&workspace.id).ok())
+                    .map(|q| q.len())
+                    .unwrap_or(0);
+                map_local_session_with_injects(
                     workspace,
                     matches!(self.current_view, CurrentView::Session)
                         && workspace.id == self.active_workspace,
+                    pending,
                 )
             })
             .collect();
+
+        // Sort: active (non-dead) first, then by created_at descending
+        self.local_sessions.sort_by(|a, b| {
+            let a_dead = matches!(a.status, SessionStatus::Dead);
+            let b_dead = matches!(b.status, SessionStatus::Dead);
+            a_dead.cmp(&b_dead).then_with(|| b.id.cmp(&a.id))
+        });
 
         self.telepty_sessions = self
             .telepty
             .list_sessions()
             .unwrap_or_default()
             .iter()
-            .map(|session| map_telepty_session(session))
+            .map(|session| {
+                let attach_id = format!("attach:{}", session.id);
+                map_telepty_session(
+                    session,
+                    matches!(self.current_view, CurrentView::Session)
+                        && self.active_workspace == attach_id,
+                )
+            })
             .collect();
 
         let total_sessions = self.local_sessions.len() + self.telepty_sessions.len();
@@ -366,29 +403,69 @@ impl Aterm {
             "Convergence summary generated from current group session screens".to_string();
     }
 
+    fn next_workspace_id(&self) -> String {
+        let existing = self
+            .manager
+            .lock()
+            .map(|manager| {
+                manager
+                    .list_workspaces()
+                    .into_iter()
+                    .map(|workspace| workspace.id)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_else(|_| {
+                self.local_sessions
+                    .iter()
+                    .map(|entry| entry.id.to_string())
+                    .collect()
+            });
+
+        let mut index = 1usize;
+        loop {
+            let candidate = format!("session-{index}");
+            if !existing.contains(&candidate) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
     fn create_workspace(&mut self) {
-        let next_id = format!("session-{}", self.local_sessions.len() + 1);
+        let previous_workspace = self.active_workspace.clone();
+        let next_id = self.next_workspace_id();
+        let result = self
+            .manager
+            .lock()
+            .map_err(|error| error.to_string())
+            .and_then(|mut manager| {
+                manager.create(
+                    next_id.clone(),
+                    current_dir_string(),
+                    None,
+                    None,
+                    Some(DEFAULT_COLUMNS),
+                    Some(DEFAULT_ROWS),
+                    false,
+                )
+            });
 
-        if let Ok(mut manager) = self.manager.lock() {
-            let result = manager.create(
-                next_id.clone(),
-                current_dir_string(),
-                None,
-                None,
-                Some(DEFAULT_COLUMNS),
-                Some(DEFAULT_ROWS),
-                false,
-            );
+        match result {
+            Ok(_) => {
+                if previous_workspace.starts_with("attach:") && previous_workspace != next_id {
+                    if let Ok(mut manager) = self.manager.lock() {
+                        let _ = manager.close(&previous_workspace);
+                    }
+                }
 
-            match result {
-                Ok(_) => {
-                    self.active_workspace = next_id;
-                    self.status_text = "Created a new local session".to_string();
-                    let _ = self.session_store.save_shared(&self.manager);
-                }
-                Err(error) => {
-                    self.status_text = format!("Create session failed: {error}");
-                }
+                self.current_view = CurrentView::Session;
+                self.group_view = None;
+                self.active_workspace = next_id;
+                self.status_text = "Created a new local session".to_string();
+                let _ = self.session_store.save_shared(&self.manager);
+            }
+            Err(error) => {
+                self.status_text = format!("Create session failed: {error}");
             }
         }
 
@@ -396,20 +473,60 @@ impl Aterm {
         self.refresh_active_terminal();
     }
 
-    fn handle_sidebar(&mut self, action: SidebarAction) {
+    fn handle_sidebar(&mut self, action: SidebarAction) -> Task<Message> {
         match action {
             SidebarAction::SelectSession(id) => {
+                let previous_workspace = self.active_workspace.clone();
+
                 if self.local_sessions.iter().any(|entry| entry.id.as_ref() == id) {
                     self.current_view = CurrentView::Session;
                     self.group_view = None;
                     self.active_workspace = id;
                     self.status_text = "Selected local session".to_string();
-                    self.refresh_sessions();
-                    self.refresh_active_terminal();
+                } else if self.telepty_sessions.iter().any(|entry| entry.id.as_ref() == id) {
+                    let attach_id = format!("attach:{}", id);
+
+                    let exists = match self.manager.lock() {
+                        Ok(mgr) => mgr.list_workspaces().iter().any(|ws| ws.id == attach_id),
+                        Err(_) => false,
+                    };
+
+                    if !exists {
+                        if let Ok(mut manager) = self.manager.lock() {
+                            let args = vec!["attach".to_string(), id.clone()];
+                            let _ = manager.create(
+                                attach_id.clone(),
+                                std::env::current_dir().unwrap_or_default().to_string_lossy().to_string(),
+                                Some("telepty".to_string()),
+                                Some(args),
+                                None,
+                                None,
+                                true,
+                            );
+                        }
+                    }
+
+                    self.current_view = CurrentView::Session;
+                    self.group_view = None;
+                    self.active_workspace = attach_id;
+                    self.status_text = format!("Attached to telepty session {}", id);
+                } else if id.starts_with("attach:") {
+                    self.current_view = CurrentView::Session;
+                    self.group_view = None;
+                    self.active_workspace = id.clone();
+                    self.status_text = "Selected attached session".to_string();
                 } else {
-                    self.status_text =
-                        "Telepty session selected; attach flow is not wired yet".to_string();
+                    self.status_text = format!("Session not found: {}", id);
                 }
+
+                if previous_workspace.starts_with("attach:") && previous_workspace != self.active_workspace {
+                    if let Ok(mut manager) = self.manager.lock() {
+                        let _ = manager.close(&previous_workspace);
+                    }
+                }
+
+                self.refresh_sessions();
+                self.refresh_active_terminal();
             }
             SidebarAction::SelectGroup(id) => {
                 self.open_group_view(&id);
@@ -417,12 +534,35 @@ impl Aterm {
                 self.status_text = format!("Selected group: {id}");
             }
             SidebarAction::CreateSession => {
-                self.create_workspace();
+                return iced::Task::future(async {
+                    let folder = rfd::AsyncFileDialog::new()
+                        .set_title("Select project folder")
+                        .pick_folder()
+                        .await;
+                    Message::FolderSelected(folder.map(|f| f.path().to_path_buf()))
+                });
+            }
+            SidebarAction::DeleteSession(id) => {
+                if let Ok(mut manager) = self.manager.lock() {
+                    let _ = manager.close(&id);
+                }
+                if self.active_workspace == id {
+                    self.active_workspace = self.local_sessions.iter()
+                        .find(|s| s.id.as_ref() != id)
+                        .map(|s| s.id.to_string())
+                        .unwrap_or_default();
+                }
+                self.refresh_sessions();
+                self.refresh_active_terminal();
+                let _ = self.session_store.save_shared(&self.manager);
+                self.status_text = format!("Closed session: {id}");
             }
             SidebarAction::OpenSettings => {
-                self.status_text = "settings: panel scaffold pending".to_string();
+                self.settings_state.open = !self.settings_state.open;
             }
         }
+
+        Task::none()
     }
 
     fn handle_palette(&mut self, action: CommandPaletteAction) {
@@ -453,8 +593,12 @@ impl Aterm {
 
     fn execute_command(&mut self, command: PaletteCommand) {
         match command {
+            PaletteCommand::NewSession => {
+                self.create_workspace();
+            }
             PaletteCommand::Deliberate => {
-                self.status_text = "deliberate: orchestration hook pending".to_string();
+                self.deliberate_state.open = true;
+                self.deliberate_state.topic.clear();
             }
             PaletteCommand::Group => {
                 self.status_text = "group: UI scaffold ready, creation flow pending".to_string();
@@ -482,6 +626,7 @@ impl Aterm {
             }
             PaletteCommand::Theme(mode) => {
                 self.theme_mode = mode;
+                save_theme(mode);
                 self.status_text = match mode {
                     ThemeMode::Light => "Theme switched to light".to_string(),
                     ThemeMode::Dark => "Theme switched to dark".to_string(),
@@ -507,12 +652,17 @@ impl Aterm {
                 }
             }
             TerminalEvent::Resize { columns, rows } => {
+                eprintln!("[RESIZE] terminal {}x{} for workspace '{}'", columns, rows, self.active_workspace);
                 self.terminal.resize(columns as usize, rows as usize);
-                let _ = self
-                    .manager
-                    .lock()
-                    .ok()
-                    .and_then(|manager| manager.resize(&self.active_workspace, columns, rows).ok());
+                match self.manager.lock() {
+                    Ok(manager) => {
+                        match manager.resize(&self.active_workspace, columns, rows) {
+                            Ok(()) => eprintln!("[RESIZE] PTY resize OK: {}x{}", columns, rows),
+                            Err(e) => eprintln!("[RESIZE] PTY resize FAILED: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("[RESIZE] manager lock FAILED: {}", e),
+                }
 
                 self.ime.set_candidate_rect(CandidateRect {
                     rect: Rect::new(360.0, 88.0, 0.0, 24.0),
@@ -525,6 +675,9 @@ impl Aterm {
                 } else {
                     "Terminal unfocused".to_string()
                 };
+            }
+            TerminalEvent::Scroll(delta) => {
+                self.terminal.scroll(delta);
             }
         }
     }
@@ -568,6 +721,17 @@ impl Aterm {
                     format!("Unfocused group session {workspace_id}")
                 };
             }
+            TerminalEvent::Scroll(delta) => {
+                if let Some(group_view) = self.group_view.as_mut() {
+                    if let Some(member) = group_view
+                        .members
+                        .iter_mut()
+                        .find(|member| member.workspace_id == workspace_id)
+                    {
+                        member.terminal.scroll(delta);
+                    }
+                }
+            }
         }
     }
 
@@ -582,6 +746,17 @@ impl Aterm {
             }
             GroupGridAction::Converge => {
                 self.summarize_group();
+            }
+            GroupGridAction::Broadcast(topic) => {
+                if let Some(gv) = self.group_view.as_ref() {
+                    let ws_ids: Vec<String> = gv.members.iter().map(|m| m.workspace_id.clone()).collect();
+                    if let Ok(manager) = self.manager.lock() {
+                        for ws_id in &ws_ids {
+                            let _ = manager.queue_inject(ws_id, "broadcast", topic.clone());
+                        }
+                    }
+                    self.status_text = format!("Broadcast to {} sessions", ws_ids.len());
+                }
             }
         }
     }
@@ -598,6 +773,11 @@ impl Aterm {
                         self.palette_state.query.clear();
                         self.palette_state.selected = 0;
                     }
+                }
+                keyboard::Key::Named(keyboard::key::Named::Escape)
+                    if self.create_session_state.open =>
+                {
+                    self.create_session_state.open = false;
                 }
                 keyboard::Key::Named(keyboard::key::Named::Escape)
                     if self.palette_state.open =>
@@ -639,17 +819,28 @@ impl Aterm {
 }
 
 fn pty_output_stream() -> impl iced::futures::Stream<Item = Message> {
-    iced::stream::channel(32, |mut sender: iced::futures::channel::mpsc::Sender<Message>| async move {
+    iced::stream::channel(1, |mut sender: iced::futures::channel::mpsc::Sender<Message>| async move {
         use iced::futures::SinkExt;
-        let notify = PTY_NOTIFY
-            .get()
-            .cloned()
-            .unwrap_or_else(|| Arc::new(Notify::new()));
+        let Some(signal) = PTY_SIGNAL.get().cloned() else {
+            return;
+        };
         loop {
-            notify.notified().await;
-            // Coalesce rapid notifications — drain any pending, then throttle
-            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-            let _ = sender.try_send(Message::PtyDataReady);
+            signal.notified().await;
+            tokio::time::sleep(PTY_OUTPUT_DEBOUNCE).await;
+
+            if PTY_DISPATCH_IN_FLIGHT.load(Ordering::Acquire) {
+                continue;
+            }
+
+            if !signal.take_dirty() {
+                continue;
+            }
+
+            PTY_DISPATCH_IN_FLIGHT.store(true, Ordering::Release);
+
+            if sender.send(Message::PtyDataReady).await.is_err() {
+                break;
+            }
         }
     })
 }
@@ -665,10 +856,16 @@ fn subscription(_app: &Aterm) -> Subscription<Message> {
 fn update(app: &mut Aterm, message: Message) -> Task<Message> {
     match message {
         Message::PtyDataReady => {
-            eprintln!("[PTY] data ready");
             match app.current_view {
                 CurrentView::Session => app.refresh_active_terminal(),
                 CurrentView::Group(_) => app.sync_group_view(),
+            }
+
+            PTY_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
+            if let Some(signal) = PTY_SIGNAL.get() {
+                if signal.has_dirty() {
+                    signal.poke();
+                }
             }
         }
         Message::Tick(_now) => {
@@ -682,12 +879,144 @@ fn update(app: &mut Aterm, message: Message) -> Task<Message> {
                 app.status_text = format!("Failed to load CJK font: {label}");
             }
         }
-        Message::Sidebar(action) => app.handle_sidebar(action),
+        Message::Sidebar(action) => {
+            return app.handle_sidebar(action);
+        }
         Message::Palette(action) => app.handle_palette(action),
         Message::Terminal(event) => app.handle_terminal(event),
         Message::GroupGrid(action) => app.handle_group_grid(action),
         Message::GroupTerminal(workspace_id, event) => {
             app.handle_group_terminal(workspace_id, event)
+        }
+        Message::FolderSelected(Some(path)) => {
+            app.create_session_state.cwd = path.display().to_string();
+            app.create_session_state.open = true;
+            app.create_session_state.selected_preset = 0;
+        }
+        Message::FolderSelected(None) => {
+            // User cancelled folder selection
+        }
+        Message::CreateSession(action) => {
+            match action {
+                CreateSessionAction::Close => {
+                    app.create_session_state.open = false;
+                }
+                CreateSessionAction::SelectPreset(i) => {
+                    app.create_session_state.selected_preset = i;
+                }
+                CreateSessionAction::CustomCommandChanged(cmd) => {
+                    app.create_session_state.custom_command = cmd;
+                }
+                CreateSessionAction::CustomArgsChanged(args) => {
+                    app.create_session_state.custom_args = args;
+                }
+                CreateSessionAction::Create => {
+                    let state = &app.create_session_state;
+                    let preset = &CLI_PRESETS[state.selected_preset];
+                    let cwd = state.cwd.clone();
+                    let folder = cwd
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("workspace");
+
+                    // Generate unique session ID
+                    let base_id = format!("{}-{}", folder, preset.id);
+                    let existing: std::collections::HashSet<String> = app
+                        .local_sessions
+                        .iter()
+                        .map(|s| s.id.to_string())
+                        .collect();
+                    let id = if !existing.contains(&base_id) {
+                        base_id.clone()
+                    } else {
+                        let mut n = 2;
+                        loop {
+                            let candidate = format!("{}-{}", base_id, n);
+                            if !existing.contains(&candidate) {
+                                break candidate;
+                            }
+                            n += 1;
+                        }
+                    };
+
+                    let is_custom = preset.id == "custom";
+                    let (cmd, args) = if is_custom {
+                        let cmd = state.custom_command.trim().to_string();
+                        let args: Vec<String> = state.custom_args.split_whitespace().map(|s| s.to_string()).collect();
+                        (cmd, args)
+                    } else {
+                        (preset.command.to_string(), preset.args.iter().map(|s| s.to_string()).collect())
+                    };
+                    if let Ok(mut manager) = app.manager.lock() {
+                        let _ = manager.create(
+                            id.clone(),
+                            cwd,
+                            Some(cmd),
+                            Some(args),
+                            None,
+                            None,
+                            false,
+                        );
+                    }
+
+                    app.active_workspace = id;
+                    app.current_view = CurrentView::Session;
+                    app.create_session_state.open = false;
+                    app.refresh_sessions();
+                    app.refresh_active_terminal();
+                    let _ = app.session_store.save_shared(&app.manager);
+                }
+            }
+        }
+        Message::Deliberate(action) => {
+            match action {
+                DeliberateAction::Close => {
+                    app.deliberate_state.open = false;
+                }
+                DeliberateAction::TopicChanged(topic) => {
+                    app.deliberate_state.topic = topic;
+                }
+                DeliberateAction::Submit => {
+                    let topic = app.deliberate_state.topic.trim().to_string();
+                    app.deliberate_state.open = false;
+                    if !topic.is_empty() {
+                        app.status_text = format!("Deliberation started: {}", topic);
+                        // TODO: spawn Codex + Gemini ephemeral sessions and create group
+                    }
+                }
+            }
+        }
+        Message::Settings(action) => {
+            match action {
+                SettingsAction::Close => {
+                    app.settings_state.open = false;
+                }
+                SettingsAction::SetTheme(mode) => {
+                    app.theme_mode = mode;
+                    app.settings_state.open = false;
+                    save_theme(mode);
+                    app.status_text = format!("Theme: {:?}", mode);
+                }
+            }
+        }
+        Message::RouteToWorkspace { workspace_id, text } => {
+            eprintln!("[ROUTE] inject {} bytes to '{}'", text.len(), workspace_id);
+            match app.manager.lock() {
+                Ok(manager) => {
+                    match manager.queue_inject(&workspace_id, "aterm-internal", text) {
+                        Ok(pending) => {
+                            app.status_text = format!("Queued inject to {workspace_id} ({pending} pending)");
+                        }
+                        Err(e) => {
+                            app.status_text = format!("Route failed: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    app.status_text = format!("Manager lock failed: {e}");
+                }
+            }
         }
     }
 
@@ -745,7 +1074,7 @@ fn view(app: &Aterm) -> Element<'_, Message> {
         .align_y(Alignment::Center)
         .padding([0, 20]),
     )
-    .height(47)
+    .height(48)
     .width(Fill)
     .style(move |_| iced::widget::container::Style {
         text_color: Some(palette.text),
@@ -802,8 +1131,8 @@ fn view(app: &Aterm) -> Element<'_, Message> {
                         .width(7)
                         .height(7)
                         .style(palette.status_dot_style(session_status_color)),
-                    text(session_name).size(12).style(move |_| iced::widget::text::Style {
-                        color: Some(palette.text_muted),
+                    text(session_name).size(13).style(move |_| iced::widget::text::Style {
+                        color: Some(palette.text),
                     }),
                     Space::new().width(Fill),
                     text(session_status_label).size(11).style(move |_| iced::widget::text::Style {
@@ -814,29 +1143,40 @@ fn view(app: &Aterm) -> Element<'_, Message> {
                 .align_y(Alignment::Center)
                 .padding([0, 14]),
             )
-            .height(32)
+            .height(36)
             .width(Fill)
             .style(move |_| iced::widget::container::Style {
                 text_color: Some(palette.text),
-                background: Some(Background::Color(palette.surface)),
+                background: Some(Background::Color(palette.surface_alt)),
                 border: Border {
-                    width: 1.0,
+                    width: 0.0,
                     radius: 0.0.into(),
-                    color: palette.border,
+                    color: palette.border_subtle,
                 },
                 shadow: iced::Shadow::default(),
                 snap: true,
             });
 
+            let term_renderer = crate::terminal::TerminalRenderer::default()
+                .with_colors(palette.text, palette.background)
+                .with_light_mode(matches!(app.theme_mode, ThemeMode::Light));
             let terminal_container = container(
-                TerminalWidget::new(app.terminal.terminal()).on_event(Message::Terminal),
+                TerminalWidget::new(app.terminal.terminal())
+                    .with_terminal_renderer(term_renderer)
+                    .on_event(Message::Terminal),
             )
             .width(Fill)
             .height(Fill)
-            .style(palette.panel_style())
+            .style(move |_| iced::widget::container::Style {
+                text_color: Some(palette.text),
+                background: Some(Background::Color(palette.background)),
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            })
             .padding(4);
 
-            container(column![session_header, terminal_container].spacing(0).padding(16))
+            container(column![session_header, terminal_container].spacing(0).padding(0))
                 .width(Fill)
                 .height(Fill)
                 .into()
@@ -855,7 +1195,48 @@ fn view(app: &Aterm) -> Element<'_, Message> {
         .view(&app.palette_state, &app.commands)
         .map(Message::Palette);
 
-    stack([base.into(), overlay]).into()
+    let create_dialog = CreateSessionDialog::new(palette)
+        .view(&app.create_session_state)
+        .map(Message::CreateSession);
+
+    let deliberate_dialog = DeliberateDialog::new(palette)
+        .view(&app.deliberate_state)
+        .map(Message::Deliberate);
+
+    let settings_panel = SettingsPanel::new(palette)
+        .view(&app.settings_state, app.theme_mode)
+        .map(Message::Settings);
+
+    stack([base.into(), overlay, create_dialog, deliberate_dialog, settings_panel]).into()
+}
+
+fn settings_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".aterm")
+        .join("settings.json")
+}
+
+fn load_theme() -> ThemeMode {
+    let path = settings_path();
+    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+    if contents.contains("\"light\"") {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    }
+}
+
+fn save_theme(mode: ThemeMode) {
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let value = match mode {
+        ThemeMode::Dark => r#"{"theme":"dark"}"#,
+        ThemeMode::Light => r#"{"theme":"light"}"#,
+    };
+    let _ = std::fs::write(&path, value);
 }
 
 fn current_dir_string() -> String {
@@ -897,11 +1278,17 @@ fn view_group_content(app: &Aterm, palette: Palette) -> Element<'_, Message> {
                         }),
                     ]
                     .align_y(iced::Alignment::Center),
-                    container(
-                        TerminalWidget::new(member.terminal.terminal()).on_event({
-                            let workspace_id = workspace_id.clone();
-                            move |event| Message::GroupTerminal(workspace_id.clone(), event)
-                        })
+                    container({
+                        let grp_renderer = crate::terminal::TerminalRenderer::default()
+                            .with_colors(palette.text, palette.background)
+                .with_light_mode(matches!(app.theme_mode, ThemeMode::Light));
+                        TerminalWidget::new(member.terminal.terminal())
+                            .with_terminal_renderer(grp_renderer)
+                            .on_event({
+                                let workspace_id = workspace_id.clone();
+                                move |event| Message::GroupTerminal(workspace_id.clone(), event)
+                            })
+                    }
                     )
                     .width(Fill)
                     .height(Fill)
@@ -978,6 +1365,12 @@ fn compact_terminal_summary(snapshot: &str) -> String {
 
 fn default_commands() -> Vec<CommandEntry<'static>> {
     vec![
+        CommandEntry {
+            command: PaletteCommand::NewSession,
+            title: Cow::Borrowed("new"),
+            description: Cow::Borrowed("Create a new local session"),
+            shortcut: None,
+        },
         CommandEntry {
             command: PaletteCommand::Deliberate,
             title: Cow::Borrowed("deliberate"),
@@ -1144,48 +1537,35 @@ fn remote_session_meta(session: &TeleptySessionInfo) -> String {
 }
 
 fn system_cjk_font_tasks() -> Vec<Task<Message>> {
-    system_cjk_font_candidates()
-        .iter()
-        .filter_map(|(label, path)| {
-            std::fs::read(path).ok().map(|bytes| {
-                let label = (*label).to_string();
-                iced::font::load(bytes).map(move |result| {
-                    Message::FontLoaded(label.clone(), result)
-                })
-            })
-        })
-        .collect()
+    // Load only the FIRST available CJK font to save memory.
+    // Apple SD Gothic Neo alone is ~27MB; loading all 3 wastes ~74MB.
+    for (label, path) in system_cjk_font_candidates() {
+        if let Ok(bytes) = std::fs::read(path) {
+            let label = (*label).to_string();
+            eprintln!("[FONT] loading CJK font: {} ({} bytes)", label, bytes.len());
+            return vec![iced::font::load(bytes).map(move |result| {
+                Message::FontLoaded(label.clone(), result)
+            })];
+        }
+    }
+    Vec::new()
 }
 
 fn system_cjk_font_candidates() -> &'static [(&'static str, &'static str)] {
+    // Only the first available font is loaded (see system_cjk_font_tasks).
+    // Order matters: preferred font first, fallbacks after.
     #[cfg(target_os = "macos")]
     {
         &[
             ("Apple SD Gothic Neo", "/System/Library/Fonts/AppleSDGothicNeo.ttc"),
-            ("Hiragino Sans GB", "/System/Library/Fonts/Hiragino Sans GB.ttc"),
-            (
-                "Arial Unicode",
-                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-            ),
-            ("Arial Unicode", "/Library/Fonts/Arial Unicode.ttf"),
         ]
     }
 
     #[cfg(target_os = "linux")]
     {
         &[
-            (
-                "Noto Sans CJK KR",
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            ),
-            (
-                "Noto Sans CJK KR",
-                "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
-            ),
-            (
-                "Noto Sans CJK SC",
-                "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-            ),
+            ("Noto Sans CJK KR", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            ("Noto Sans CJK KR", "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf"),
         ]
     }
 
@@ -1193,8 +1573,6 @@ fn system_cjk_font_candidates() -> &'static [(&'static str, &'static str)] {
     {
         &[
             ("Malgun Gothic", "C:\\Windows\\Fonts\\malgun.ttf"),
-            ("Microsoft YaHei", "C:\\Windows\\Fonts\\msyh.ttc"),
-            ("MS Gothic", "C:\\Windows\\Fonts\\msgothic.ttc"),
         ]
     }
 
@@ -1223,11 +1601,18 @@ fn map_local_session(workspace: &WorkspaceInfo, active: bool) -> SessionEntry<'s
             _ => SessionStatus::Unknown,
         },
         kind: SessionKind::Local,
+        pending_injects: 0,
         active,
     }
 }
 
-fn map_telepty_session(session: &TeleptySessionInfo) -> SessionEntry<'static> {
+fn map_local_session_with_injects(workspace: &WorkspaceInfo, active: bool, pending: usize) -> SessionEntry<'static> {
+    let mut entry = map_local_session(workspace, active);
+    entry.pending_injects = pending;
+    entry
+}
+
+fn map_telepty_session(session: &TeleptySessionInfo, active: bool) -> SessionEntry<'static> {
     let (command, args) = split_command_line(&session.command);
     let title = if !session.cwd.is_empty() && !command.is_empty() {
         display_name(&session.cwd, &command, &args)
@@ -1249,6 +1634,7 @@ fn map_telepty_session(session: &TeleptySessionInfo) -> SessionEntry<'static> {
             _ => SessionStatus::Unknown,
         },
         kind: SessionKind::Telepty,
-        active: false,
+        pending_injects: 0,
+        active,
     }
 }

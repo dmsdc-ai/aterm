@@ -3,7 +3,7 @@ pub mod widget;
 
 use alacritty_terminal::{
     event::VoidListener,
-    grid::Dimensions,
+    grid::{Dimensions, Scroll},
     term::{Config, Term},
     vte::ansi,
 };
@@ -16,11 +16,14 @@ pub use widget::{TerminalEvent, TerminalWidget};
 
 pub type SharedTerminal = Arc<Mutex<Term<VoidListener>>>;
 
+const SCROLLBACK_LINES: usize = 10000;
+
 pub struct TerminalState {
     terminal: SharedTerminal,
     snapshot: String,
     columns: usize,
     rows: usize,
+    scroll_offset: usize,
 }
 
 impl TerminalState {
@@ -37,6 +40,7 @@ impl TerminalState {
             snapshot: String::new(),
             columns,
             rows,
+            scroll_offset: 0,
         }
     }
 
@@ -53,9 +57,34 @@ impl TerminalState {
             return;
         }
 
+        let was_at_bottom = self.scroll_offset == 0;
         self.snapshot.clear();
         self.snapshot.push_str(snapshot);
         self.rebuild_terminal();
+
+        // Auto-scroll to bottom when new output arrives (if user wasn't scrolled up)
+        if was_at_bottom {
+            self.scroll_offset = 0;
+            if let Ok(mut term) = self.terminal.lock() {
+                term.scroll_display(Scroll::Bottom);
+            }
+        }
+    }
+
+    /// Scroll the viewport by `delta` lines (positive = up into history).
+    pub fn scroll(&mut self, delta: i32) {
+        if let Ok(mut term) = self.terminal.lock() {
+            term.scroll_display(Scroll::Delta(delta));
+            self.scroll_offset = term.grid().display_offset();
+        }
+    }
+
+    /// Scroll to the bottom of the terminal output.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+        if let Ok(mut term) = self.terminal.lock() {
+            term.scroll_display(Scroll::Bottom);
+        }
     }
 
     pub fn resize(&mut self, columns: usize, rows: usize) {
@@ -83,6 +112,11 @@ impl TerminalState {
         let mut parser: ansi::Processor = ansi::Processor::new();
         parser.advance(&mut terminal, self.snapshot.as_bytes());
 
+        // Restore scroll position after rebuild
+        if self.scroll_offset > 0 {
+            terminal.scroll_display(Scroll::Delta(self.scroll_offset as i32));
+        }
+
         if let Ok(mut shared) = self.terminal.lock() {
             *shared = terminal;
         }
@@ -97,7 +131,7 @@ struct TerminalDimensions {
 
 impl Dimensions for TerminalDimensions {
     fn total_lines(&self) -> usize {
-        self.rows
+        self.rows + SCROLLBACK_LINES
     }
 
     fn screen_lines(&self) -> usize {

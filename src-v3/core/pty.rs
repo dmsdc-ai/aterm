@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -19,6 +20,42 @@ pub const DEFAULT_SNAPSHOT_BYTES: usize = 256 * 1024;
 const CODEX_RESUME_BUFFER_BYTES: usize = 8 * 1024;
 
 pub type SharedPtyManager = Arc<Mutex<PtyManager>>;
+
+#[derive(Clone, Default)]
+pub struct PtyOutputSignal {
+    notify: Arc<Notify>,
+    dirty: Arc<AtomicBool>,
+}
+
+impl PtyOutputSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    pub fn notified(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let notify = self.notify.clone();
+        async move {
+            notify.notified().await;
+        }
+    }
+
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn has_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    pub fn poke(&self) {
+        self.notify.notify_one();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceInfo {
@@ -51,14 +88,14 @@ struct Workspace {
 
 pub struct PtyManager {
     workspaces: HashMap<String, Workspace>,
-    pty_notify: Arc<Notify>,
+    pty_signal: PtyOutputSignal,
 }
 
 impl Default for PtyManager {
     fn default() -> Self {
         Self {
             workspaces: HashMap::new(),
-            pty_notify: Arc::new(Notify::new()),
+            pty_signal: PtyOutputSignal::new(),
         }
     }
 }
@@ -87,6 +124,11 @@ impl OutputBuffer {
             };
             self.bytes = self.bytes.saturating_sub(removed.len());
         }
+    }
+
+    fn clear(&mut self) {
+        self.chunks.clear();
+        self.bytes = 0;
     }
 
     fn snapshot(&self, max_bytes: usize) -> String {
@@ -151,8 +193,8 @@ impl PtyManager {
         Arc::new(Mutex::new(Self::new()))
     }
 
-    pub fn notify_handle(&self) -> Arc<Notify> {
-        self.pty_notify.clone()
+    pub fn output_signal(&self) -> PtyOutputSignal {
+        self.pty_signal.clone()
     }
 
     pub fn create(
@@ -198,7 +240,14 @@ impl PtyManager {
         let reader_writer = writer.clone();
         let codex_resume_monitor = is_codex_resume_session(&shell, &launch_args);
         let ws_id = id.clone();
-        let reader_notify = self.pty_notify.clone();
+        let reader_signal = self.pty_signal.clone();
+        let reader_cwd = cwd.clone();
+        let reader_command = shell.clone();
+        let reader_args = launch_args.clone();
+        let reader_size = size.clone();
+        let reader_master = master.clone();
+        let reader_child = child.clone();
+        let reader_inject_queue = inject_queue.clone();
 
         thread::spawn(move || {
             reader_loop(
@@ -209,7 +258,15 @@ impl PtyManager {
                 reader_idle,
                 reader_writer,
                 codex_resume_monitor,
-                reader_notify,
+                reader_signal,
+                auto_restart,
+                reader_cwd,
+                reader_command,
+                reader_args,
+                reader_size,
+                reader_master,
+                reader_child,
+                reader_inject_queue,
             );
         });
 
@@ -436,6 +493,112 @@ fn spawn_workspace_process(
     })
 }
 
+fn try_restart_workspace(
+    ws_id: &str,
+    cwd: &str,
+    command: &str,
+    args: &[String],
+    size: &Arc<Mutex<PtySize>>,
+    master: &Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    child: &Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
+    buffer: &Arc<Mutex<OutputBuffer>>,
+    status: &Arc<Mutex<String>>,
+    idle_state: &Arc<Mutex<IdleState>>,
+    inject_queue: &SharedInjectQueue,
+    signal: &PtyOutputSignal,
+) -> bool {
+    eprintln!("[PTY] auto-restart: attempting respawn for {}", ws_id);
+
+    let current_size = size.lock().ok().map(|s| clone_size(&*s)).unwrap_or(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+
+    let spawned = match spawn_workspace_process(cwd, command, args, current_size) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[PTY] auto-restart failed for {}: {}", ws_id, e);
+            return false;
+        }
+    };
+
+    // Swap arcs
+    if let Ok(mut m) = master.lock() {
+        *m = spawned.master;
+    }
+    if let Ok(mut w) = writer.lock() {
+        *w = spawned.writer;
+    }
+    if let Ok(mut c) = child.lock() {
+        *c = spawned.child;
+    }
+    if let Ok(mut s) = status.lock() {
+        *s = "running".to_string();
+    }
+    if let Ok(mut b) = buffer.lock() {
+        b.clear();
+    }
+    if let Ok(mut idle) = idle_state.lock() {
+        *idle = IdleState::new();
+    }
+    if let Ok(mut q) = inject_queue.lock() {
+        q.clear();
+    }
+
+    // Spawn new reader thread
+    let reader_buffer = buffer.clone();
+    let reader_status = status.clone();
+    let reader_idle = idle_state.clone();
+    let reader_writer = writer.clone();
+    let reader_signal = signal.clone();
+    let ws_id_clone = ws_id.to_string();
+    let codex_resume = super::session::codex_resume_index(command, args).is_some();
+    let restart_cwd = cwd.to_string();
+    let restart_command = command.to_string();
+    let restart_args = args.to_vec();
+    let restart_size = size.clone();
+    let restart_master = master.clone();
+    let restart_child = child.clone();
+    let restart_inject_queue = inject_queue.clone();
+
+    thread::spawn(move || {
+        reader_loop(
+            spawned.reader,
+            ws_id_clone,
+            reader_buffer,
+            reader_status,
+            reader_idle,
+            reader_writer,
+            codex_resume,
+            reader_signal,
+            true,
+            restart_cwd,
+            restart_command,
+            restart_args,
+            restart_size,
+            restart_master,
+            restart_child,
+            restart_inject_queue,
+        );
+    });
+
+    // Spawn new injector
+    let injector_queue = inject_queue.clone();
+    let injector_idle = idle_state.clone();
+    let injector_writer = writer.clone();
+    let injector_status = status.clone();
+    thread::spawn(move || {
+        run_injector_loop(injector_queue, injector_idle, injector_writer, injector_status);
+    });
+
+    signal.mark_dirty();
+    eprintln!("[PTY] auto-restart: respawned {}", ws_id);
+    true
+}
+
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     ws_id: String,
@@ -444,7 +607,15 @@ fn reader_loop(
     idle_state: Arc<Mutex<IdleState>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     codex_resume_monitor: bool,
-    notify: Arc<Notify>,
+    signal: PtyOutputSignal,
+    auto_restart: bool,
+    cwd: String,
+    command: String,
+    args: Vec<String>,
+    size: Arc<Mutex<PtySize>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
+    inject_queue: SharedInjectQueue,
 ) {
     let mut buf = [0u8; 4096];
     let mut leftover: Vec<u8> = Vec::new();
@@ -472,8 +643,7 @@ fn reader_loop(
                 if let Ok(mut b) = buffer.lock() {
                     b.push(data.clone());
                 }
-                eprintln!("[PTY] notify: {} bytes from {}", data.len(), ws_id);
-                notify.notify_one();
+                signal.mark_dirty();
 
                 if codex_resume_monitor {
                     let normalized = normalize_terminal_text(&data);
@@ -517,6 +687,17 @@ fn reader_loop(
     if let Ok(mut current) = status.lock() {
         if current.as_str() != "closing" {
             *current = "dead".to_string();
+        }
+    }
+
+    if auto_restart {
+        let restarted = try_restart_workspace(
+            &ws_id, &cwd, &command, &args,
+            &size, &master, &writer, &child,
+            &buffer, &status, &idle_state, &inject_queue, &signal,
+        );
+        if restarted {
+            return; // New reader thread is running
         }
     }
 
@@ -707,6 +888,39 @@ pub fn resolve_command_binary(command: &str) -> PathBuf {
     }
 
     resolve_with_login_shell(command).unwrap_or(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PtyOutputSignal;
+
+    #[test]
+    fn pty_output_signal_coalesces_until_taken() {
+        let signal = PtyOutputSignal::new();
+
+        assert!(!signal.has_dirty());
+        assert!(!signal.take_dirty());
+
+        signal.mark_dirty();
+        signal.mark_dirty();
+
+        assert!(signal.has_dirty());
+        assert!(signal.take_dirty());
+        assert!(!signal.has_dirty());
+        assert!(!signal.take_dirty());
+    }
+
+    #[test]
+    fn pty_output_signal_can_be_rearmed() {
+        let signal = PtyOutputSignal::new();
+
+        signal.mark_dirty();
+        assert!(signal.take_dirty());
+
+        signal.mark_dirty();
+        assert!(signal.has_dirty());
+        assert!(signal.take_dirty());
+    }
 }
 
 pub fn augmented_path_env() -> Option<std::ffi::OsString> {

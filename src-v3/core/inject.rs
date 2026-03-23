@@ -54,6 +54,10 @@ impl InjectQueue {
         self.messages.is_empty()
     }
 
+    pub fn clear(&mut self) {
+        self.messages.clear();
+    }
+
     pub fn snapshot(&self) -> Vec<InjectMessageInfo> {
         self.messages
             .iter()

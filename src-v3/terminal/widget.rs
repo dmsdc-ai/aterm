@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use iced::advanced::widget::{tree, Tree, Widget};
 use iced::advanced::{
-    layout, mouse, overlay, renderer, text, Clipboard, Shell,
+    clipboard, layout, mouse, overlay, renderer, text, Clipboard, Shell,
 };
 use iced::advanced::input_method;
 use iced::{
@@ -17,6 +17,8 @@ pub enum TerminalEvent {
     Input(Vec<u8>),
     Resize { columns: u16, rows: u16 },
     FocusChanged(bool),
+    /// Scroll the viewport (positive = up into history, negative = down).
+    Scroll(i32),
 }
 
 /// A minimal iced widget that renders terminal content with the GPU-backed renderer.
@@ -85,7 +87,7 @@ where
 
     fn draw(
         &self,
-        _tree: &Tree,
+        tree: &Tree,
         renderer: &mut Renderer,
         _theme: &Theme,
         _style: &renderer::Style,
@@ -101,6 +103,14 @@ where
 
         let frame = self.renderer.snapshot(terminal);
         self.draw_frame(renderer, bounds, viewport, &frame);
+
+        // Draw selection highlight overlay
+        let state = tree.state.downcast_ref::<State>();
+        if let (Some(start), Some(end)) = (state.selection_start, state.selection_end) {
+            if start != end {
+                self.draw_selection(renderer, bounds, start, end);
+            }
+        }
     }
 
     fn update(
@@ -127,6 +137,35 @@ where
                         shell.publish(on_event(TerminalEvent::FocusChanged(focused)));
                     }
                 }
+                if focused {
+                    if let Some(pos) = cursor.position_in(layout.bounds()) {
+                        let col = (pos.x / self.renderer.cell_width()) as usize;
+                        let row = (pos.y / self.renderer.cell_height()) as usize;
+                        state.selecting = true;
+                        state.selection_start = Some((row, col));
+                        state.selection_end = Some((row, col));
+                    }
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) if state.selecting => {
+                if let Some(pos) = cursor.position_in(layout.bounds()) {
+                    let col = (pos.x / self.renderer.cell_width()) as usize;
+                    let row = (pos.y / self.renderer.cell_height()) as usize;
+                    state.selection_end = Some((row, col));
+                    shell.request_redraw();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if state.selecting => {
+                state.selecting = false;
+                if let (Some(start), Some(end)) = (state.selection_start, state.selection_end) {
+                    if start != end {
+                        let selected_text = self.extract_selection(start, end);
+                        if !selected_text.is_empty() {
+                            _clipboard.write(clipboard::Kind::Standard, selected_text);
+                            eprintln!("[SELECT] copied to clipboard");
+                        }
+                    }
+                }
             }
             Event::InputMethod(ime_event) => {
                 match ime_event {
@@ -139,6 +178,7 @@ where
                             }
                         }
                         state.ime_composing = false;
+                        state.ime_just_committed = true;
                     }
                     input_method::Event::Preedit(text, _cursor) => {
                         eprintln!("[IME] preedit: {:?}", text);
@@ -168,13 +208,79 @@ where
                     });
                 }
             }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) if state.focused => {
+                if cursor.is_over(layout.bounds()) {
+                    let lines = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => *y,
+                        mouse::ScrollDelta::Pixels { y, .. } => y / self.renderer.cell_height(),
+                    };
+                    // Positive y = scroll up (into history), negative = scroll down
+                    let scroll_delta = lines.round() as i32;
+                    if scroll_delta != 0 {
+                        if let Some(on_event) = self.on_event.as_ref() {
+                            shell.publish(on_event(TerminalEvent::Scroll(scroll_delta)));
+                            shell.capture_event();
+                        }
+                    }
+                }
+            }
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
                 text,
                 modifiers,
                 ..
             }) if state.focused && !state.ime_composing => {
-                if let Some(bytes) = map_key_to_bytes(key, text.as_deref(), *modifiers) {
+                // Skip if IME just committed — prevents duplicate input
+                if state.ime_just_committed {
+                    eprintln!("[IME] skip KeyPressed after Commit: key={:?} text={:?}", key, text);
+                    state.ime_just_committed = false;
+                    shell.capture_event();
+                } else if modifiers.shift()
+                    && matches!(
+                        key.as_ref(),
+                        keyboard::Key::Named(keyboard::key::Named::PageUp)
+                            | keyboard::Key::Named(keyboard::key::Named::PageDown)
+                    )
+                {
+                    // Shift+PageUp/Down → viewport scroll (not PTY)
+                    let delta = if matches!(key.as_ref(), keyboard::Key::Named(keyboard::key::Named::PageUp)) {
+                        state.rows as i32
+                    } else {
+                        -(state.rows as i32)
+                    };
+                    if let Some(on_event) = self.on_event.as_ref() {
+                        shell.publish(on_event(TerminalEvent::Scroll(delta)));
+                        shell.capture_event();
+                    }
+                } else if modifiers.command()
+                    && matches!(key.as_ref(), keyboard::Key::Character("c"))
+                {
+                    // Cmd+C → copy selection to clipboard
+                    if let (Some(start), Some(end)) =
+                        (state.selection_start, state.selection_end)
+                    {
+                        if start != end {
+                            let text = self.extract_selection(start, end);
+                            if !text.is_empty() {
+                                _clipboard.write(clipboard::Kind::Standard, text);
+                                eprintln!("[SELECT] Cmd+C copied to clipboard");
+                            }
+                        }
+                    }
+                    // Clear selection after copy
+                    state.selection_start = None;
+                    state.selection_end = None;
+                    shell.capture_event();
+                } else if is_paste_shortcut(key, *modifiers) {
+                    // Cmd+V → paste from clipboard
+                    if let Some(content) = _clipboard.read(clipboard::Kind::Standard) {
+                        eprintln!("[CLIPBOARD] paste: {} bytes", content.len());
+                        if let Some(on_event) = self.on_event.as_ref() {
+                            shell.publish(on_event(TerminalEvent::Input(content.into_bytes())));
+                            shell.capture_event();
+                        }
+                    }
+                } else if let Some(bytes) = map_key_to_bytes(key, text.as_deref(), *modifiers) {
                     if let Some(on_event) = self.on_event.as_ref() {
                         shell.publish(on_event(TerminalEvent::Input(bytes)));
                         shell.capture_event();
@@ -286,6 +392,89 @@ impl<Message> TerminalWidget<Message> {
         }
     }
 
+    fn extract_selection(&self, start: (usize, usize), end: (usize, usize)) -> String {
+        let terminal = self.terminal.lock().ok();
+        let Some(terminal) = terminal.as_deref() else {
+            return String::new();
+        };
+
+        let frame = self.renderer.snapshot(terminal);
+
+        // Normalize so start <= end in reading order
+        let (start, end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        let mut result = String::new();
+        for line in &frame.lines {
+            if line.row < start.0 || line.row > end.0 {
+                continue;
+            }
+
+            let mut line_text = String::new();
+            for cell in &line.cells {
+                let include = if line.row == start.0 && line.row == end.0 {
+                    cell.column >= start.1 && cell.column <= end.1
+                } else if line.row == start.0 {
+                    cell.column >= start.1
+                } else if line.row == end.0 {
+                    cell.column <= end.1
+                } else {
+                    true
+                };
+
+                if include {
+                    line_text.push(cell.ch);
+                }
+            }
+
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line_text.trim_end());
+        }
+
+        result
+    }
+
+    fn draw_selection<R: renderer::Renderer>(
+        &self,
+        renderer: &mut R,
+        bounds: Rectangle,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) {
+        // Normalize so start <= end in reading order
+        let (start, end) = if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        let cell_w = self.renderer.cell_width();
+        let cell_h = self.renderer.cell_height();
+        let highlight_color = Color::from_rgba(0.85, 0.47, 0.02, 0.25); // amber selection
+
+        for row in start.0..=end.0 {
+            let col_start = if row == start.0 { start.1 } else { 0 };
+            let col_end = if row == end.0 { end.1 + 1 } else { 200 }; // wide enough
+
+            let x = bounds.x + col_start as f32 * cell_w;
+            let y = bounds.y + row as f32 * cell_h;
+            let w = (col_end - col_start) as f32 * cell_w;
+
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(Point::new(x, y), Size::new(w, cell_h)),
+                    ..renderer::Quad::default()
+                },
+                highlight_color,
+            );
+        }
+    }
+
     fn publish_resize(
         &self,
         state: &mut State,
@@ -299,6 +488,7 @@ impl<Message> TerminalWidget<Message> {
             return;
         }
 
+        eprintln!("[RESIZE] widget bounds changed: {}x{} -> {}x{} cols/rows", state.columns, state.rows, columns, rows);
         state.columns = columns;
         state.rows = rows;
 
@@ -314,6 +504,32 @@ struct State {
     columns: u16,
     rows: u16,
     ime_composing: bool,
+    /// Set after IME Commit to prevent the next KeyPressed from duplicating input.
+    ime_just_committed: bool,
+    /// Whether the user is currently dragging to select text.
+    selecting: bool,
+    /// Selection anchor (row, col) in cell coordinates.
+    selection_start: Option<(usize, usize)>,
+    /// Selection moving end (row, col) in cell coordinates.
+    selection_end: Option<(usize, usize)>,
+}
+
+/// Returns true if the string contains Hangul jamo or syllable characters
+/// that should only come through IME Commit, never through KeyPressed.
+fn contains_hangul(s: &str) -> bool {
+    s.chars().any(|c| matches!(c,
+        '\u{1100}'..='\u{11FF}'   // Hangul Jamo
+        | '\u{3131}'..='\u{318E}' // Hangul Compatibility Jamo
+        | '\u{AC00}'..='\u{D7A3}' // Hangul Syllables
+        | '\u{A960}'..='\u{A97C}' // Hangul Jamo Extended-A
+        | '\u{D7B0}'..='\u{D7FB}' // Hangul Jamo Extended-B
+    ))
+}
+
+/// Check if this is a Cmd+V paste action.
+fn is_paste_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    modifiers.command()
+        && matches!(key.as_ref(), keyboard::Key::Character("v"))
 }
 
 fn map_key_to_bytes(
@@ -321,6 +537,7 @@ fn map_key_to_bytes(
     text: Option<&str>,
     modifiers: keyboard::Modifiers,
 ) -> Option<Vec<u8>> {
+    // Ctrl+<letter> → control codes (e.g., Ctrl+C → \x03)
     if modifiers.control() {
         if let Some(ch) = text.and_then(|value| value.chars().next()) {
             let lower = ch.to_ascii_lowercase();
@@ -330,9 +547,12 @@ fn map_key_to_bytes(
         }
     }
 
+    // Normal text input (no Cmd, no Alt)
     if !modifiers.command() && !modifiers.alt() {
         if let Some(text) = text {
-            if !text.is_empty() {
+            // Skip Hangul characters in KeyPressed — they must come through IME Commit only.
+            // Without this, Korean jamo appear decomposed (ㅇㅡㄹ instead of 을).
+            if !text.is_empty() && !contains_hangul(text) {
                 return Some(text.as_bytes().to_vec());
             }
         }
@@ -341,22 +561,17 @@ fn map_key_to_bytes(
     match key.as_ref() {
         keyboard::Key::Named(keyboard::key::Named::Enter) => Some(b"\r".to_vec()),
         keyboard::Key::Named(keyboard::key::Named::Tab) => Some(b"\t".to_vec()),
-        keyboard::Key::Named(keyboard::key::Named::Backspace) => {
-            Some(vec![0x7f])
-        }
+        keyboard::Key::Named(keyboard::key::Named::Backspace) => Some(vec![0x7f]),
         keyboard::Key::Named(keyboard::key::Named::Escape) => Some(vec![0x1b]),
-        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
-            Some(b"\x1b[A".to_vec())
-        }
-        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
-            Some(b"\x1b[B".to_vec())
-        }
-        keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
-            Some(b"\x1b[C".to_vec())
-        }
-        keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
-            Some(b"\x1b[D".to_vec())
-        }
+        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(b"\x1b[A".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some(b"\x1b[B".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::ArrowRight) => Some(b"\x1b[C".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::Home) => Some(b"\x1b[H".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::End) => Some(b"\x1b[F".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::Delete) => Some(b"\x1b[3~".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::PageUp) => Some(b"\x1b[5~".to_vec()),
+        keyboard::Key::Named(keyboard::key::Named::PageDown) => Some(b"\x1b[6~".to_vec()),
         _ => None,
     }
 }

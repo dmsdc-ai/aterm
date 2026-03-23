@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{Alignment, Element, Fill, Length, Padding};
+use iced::{Alignment, Background, Border, Color, Element, Fill, Length, Padding, Shadow};
 
 use crate::ui::theme::Palette;
 
@@ -37,6 +37,7 @@ pub struct GroupSummaryEntry<'a> {
 #[derive(Debug, Clone)]
 pub enum GroupGridAction {
     TopicChanged(String),
+    Broadcast(String),
     Converge,
 }
 
@@ -64,20 +65,25 @@ impl GroupGrid {
     {
         let palette = self.palette;
         let grid_rows = build_grid_rows(cells);
+        let broadcast_topic = topic.to_string();
         let topic_input = text_input("Enter a discussion topic...", topic)
             .on_input({
                 let on_action = on_action.clone();
                 move |value| on_action(GroupGridAction::TopicChanged(value))
+            })
+            .on_submit({
+                let on_action = on_action.clone();
+                on_action(GroupGridAction::Broadcast(broadcast_topic.clone()))
             })
             .padding(Padding::from([10, 14]))
             .style(palette.text_input_style());
 
         let top_bar = row![
             column![
-                text(title).size(20),
-                text(phase.label()).size(12).style(move |_| {
+                text(title).size(16),
+                text(phase.label()).size(11).style(move |_| {
                     iced::widget::text::Style {
-                        color: Some(palette.text_muted),
+                        color: Some(palette.text_secondary),
                     }
                 }),
             ]
@@ -85,16 +91,26 @@ impl GroupGrid {
             .width(Length::Shrink),
             container(topic_input)
                 .width(Fill)
-                .padding([0, 12]),
-            button(text("Converge"))
-                .padding(Padding::from([10, 16]))
+                .padding([0, 16]),
+            button(text("Broadcast").size(13))
+                .padding(Padding::from([8, 16]))
+                .style(palette.primary_button_style())
+                .on_press(on_action(GroupGridAction::Broadcast(broadcast_topic))),
+            button(text("Converge").size(13))
+                .padding(Padding::from([8, 16]))
                 .style(palette.button_style())
                 .on_press(on_action(GroupGridAction::Converge)),
         ]
+        .spacing(8)
         .align_y(Alignment::Center);
 
         let summary_panel: Element<'a, Message> = if summary.is_empty() {
-            container(text("Summary panel will appear after convergence.").size(12))
+            container(
+                text("Summary panel will appear after convergence.").size(11)
+                    .style(move |_| iced::widget::text::Style {
+                        color: Some(palette.text_muted),
+                    })
+            )
                 .padding(Padding::from([12, 14]))
                 .style(palette.section_style())
                 .width(Fill)
@@ -104,7 +120,7 @@ impl GroupGrid {
                 summary.iter().map(|entry| {
                     container(
                         column![
-                            text(entry.title.as_ref()).size(14),
+                            text(entry.title.as_ref()).size(13),
                             text(entry.summary.as_ref()).size(12).style(move |_| {
                                 iced::widget::text::Style {
                                     color: Some(palette.text_muted),
@@ -113,17 +129,27 @@ impl GroupGrid {
                         ]
                         .spacing(4),
                     )
-                    .padding(Padding::from([12, 14]))
-                    .style(palette.panel_style())
+                    .padding(Padding::from([10, 14]))
+                    .style(move |_| iced::widget::container::Style {
+                        text_color: Some(palette.text),
+                        background: Some(Background::Color(palette.surface_alt)),
+                        border: Border {
+                            radius: 8.0.into(),
+                            width: 0.0,
+                            color: Color::TRANSPARENT,
+                        },
+                        shadow: Shadow::default(),
+                        snap: true,
+                    })
                     .width(Fill)
                     .into()
                 }),
             )
-            .spacing(10);
+            .spacing(8);
 
             container(
                 column![
-                    text("Convergence Summary").size(14),
+                    text("Convergence Summary").size(15),
                     scrollable(entries).height(Length::Fixed(190.0)),
                 ]
                 .spacing(10),
@@ -137,10 +163,10 @@ impl GroupGrid {
         container(
             column![
                 top_bar,
-                column(grid_rows).spacing(12).height(Fill),
+                column(grid_rows).spacing(8).height(Fill),
                 summary_panel,
             ]
-            .spacing(14),
+            .spacing(12),
         )
         .width(Fill)
         .height(Fill)

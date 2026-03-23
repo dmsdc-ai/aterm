@@ -9,8 +9,8 @@ pub use inject::{
     InjectQueue, SharedInjectQueue,
 };
 pub use pty::{
-    command_search_paths, resolve_command_binary, PtyManager, SharedPtyManager,
-    WorkspaceInfo,
+    command_search_paths, resolve_command_binary, PtyManager, PtyOutputSignal,
+    SharedPtyManager, WorkspaceInfo,
 };
 pub use session::{SessionData, SessionEntry, SessionStore};
 pub use telepty::{TeleptyClient, TeleptySessionInfo};

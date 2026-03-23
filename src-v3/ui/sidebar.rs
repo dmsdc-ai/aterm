@@ -45,6 +45,7 @@ pub struct SessionEntry<'a> {
     pub subtitle: Cow<'a, str>,
     pub status: SessionStatus,
     pub kind: SessionKind,
+    pub pending_injects: usize,
     pub active: bool,
 }
 
@@ -79,6 +80,7 @@ pub enum SidebarAction {
     SelectSession(String),
     SelectGroup(String),
     CreateSession,
+    DeleteSession(String),
     OpenSettings,
 }
 
@@ -104,7 +106,7 @@ impl Sidebar {
             }),
             group_section(model.groups, palette),
         ]
-        .spacing(8)
+        .spacing(16)
         .padding(Padding::default().top(16))
         .width(Fill);
 
@@ -134,29 +136,18 @@ impl Sidebar {
 
 fn settings_button<'a>(palette: Palette) -> Element<'a, SidebarAction> {
     container(
-        button(text("⚙").size(13))
-            .padding(Padding::from([6, 16]))
-            .style(move |_, status| {
-                let text_color = match status {
-                    button::Status::Hovered | button::Status::Pressed => palette.accent,
-                    button::Status::Disabled => palette.text_muted,
-                    button::Status::Active => palette.text_muted,
-                };
-
-                button::Style {
-                    background: Some(Background::Color(Color::TRANSPARENT)),
-                    text_color,
-                    border: Border {
-                        radius: 0.0.into(),
-                        width: 0.0,
-                        color: Color::TRANSPARENT,
-                    },
-                    shadow: Shadow::default(),
-                    snap: true,
-                }
-            })
+        button(
+            container(text("\u{2699}").size(13))
+                .width(28)
+                .height(28)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+            .padding(0)
+            .style(palette.ghost_button_style())
             .on_press(SidebarAction::OpenSettings),
     )
+    .padding(Padding::from([8, 16]))
     .width(Fill)
     .into()
 }
@@ -165,32 +156,19 @@ fn sessions_header<'a>(palette: Palette) -> Element<'a, SidebarAction> {
     row![
         section_label("Sessions", palette),
         Space::new().width(Fill),
-        button(text("+").size(14))
-            .padding(Padding::from([6, 16]))
-            .style(move |_, status| {
-                let text_color = match status {
-                    button::Status::Hovered | button::Status::Pressed => {
-                        palette.accent
-                    }
-                    button::Status::Disabled => palette.text_muted,
-                    button::Status::Active => palette.text_muted,
-                };
-
-                button::Style {
-                    background: Some(Background::Color(Color::TRANSPARENT)),
-                    text_color,
-                    border: Border {
-                        radius: 0.0.into(),
-                        width: 0.0,
-                        color: Color::TRANSPARENT,
-                    },
-                    shadow: Shadow::default(),
-                    snap: true,
-                }
-            })
+        button(
+            container(text("+").size(14))
+                .width(28)
+                .height(28)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+            .padding(0)
+            .style(palette.ghost_button_style())
             .on_press(SidebarAction::CreateSession),
     ]
     .align_y(Alignment::Center)
+    .padding(Padding::default().right(8))
     .width(Fill)
     .into()
 }
@@ -207,9 +185,9 @@ where
     let cards = items.iter().map(|item| session_card(item, palette, map));
     column![
         section_label(title, palette),
-        column(cards).spacing(2),
+        column(cards).spacing(4),
     ]
-    .spacing(10)
+    .spacing(8)
     .into()
 }
 
@@ -217,25 +195,17 @@ fn group_section<'a>(items: &'a [GroupEntry<'a>], palette: Palette) -> Element<'
     let cards = items.iter().map(|item| group_card(item, palette));
     column![
         section_label("Groups", palette),
-        column(cards).spacing(2),
+        column(cards).spacing(4),
     ]
-    .spacing(10)
+    .spacing(8)
     .into()
 }
 
 fn section_label<'a>(title: &'a str, palette: Palette) -> Element<'a, SidebarAction> {
-    container(text(title.to_uppercase()).size(11)).style(move |_| iced::widget::container::Style {
-        text_color: Some(palette.text_muted),
-        background: None,
-        border: Border {
-            radius: 3.0.into(),
-            width: 0.0,
-            color: palette.border,
-        },
-        shadow: Shadow::default(),
-        snap: true,
-    })
-    .padding([0, 16])
+    container(text(title.to_uppercase()).size(9).style(move |_| iced::widget::text::Style {
+        color: Some(palette.text_muted),
+    }))
+    .padding(Padding { top: 12.0, right: 16.0, bottom: 4.0, left: 16.0 })
     .into()
 }
 
@@ -248,15 +218,48 @@ where
     F: Fn(&SessionEntry<'a>) -> SidebarAction + Copy + 'a,
 {
     let dot_color = item.status.color(palette);
-    let accent = item.active.then_some(palette.accent);
+    let is_dead = matches!(item.status, SessionStatus::Dead);
+    let item_id = item.id.to_string();
+
+    let delete_btn = button(
+        container(text("\u{00d7}").size(14))
+            .width(22)
+            .height(22)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+    )
+        .padding(0)
+        .style(palette.danger_ghost_button_style())
+        .on_press(SidebarAction::DeleteSession(item_id));
+
+    let inject_badge: Element<'a, SidebarAction> = if item.pending_injects > 0 {
+        container(
+            text(format!("{}", item.pending_injects)).size(9)
+                .style(move |_| iced::widget::text::Style {
+                    color: Some(Color::WHITE),
+                })
+        )
+        .padding(Padding::from([1, 4]))
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(palette.accent)),
+            border: Border { radius: 8.0.into(), width: 0.0, color: palette.accent },
+            ..Default::default()
+        })
+        .into()
+    } else {
+        Space::new().width(0).height(0).into()
+    };
 
     button(
         row![
-            selection_strip(accent),
+            selection_strip(item.active.then_some(palette.accent)),
             row![
                 status_dot(dot_color, palette),
                 column![
-                    text(item.title.as_ref()).size(12),
+                    row![
+                        text(item.title.as_ref()).size(12),
+                        inject_badge,
+                    ].spacing(6).align_y(Alignment::Center),
                     text(item.subtitle.as_ref()).size(10).style(move |_| {
                         iced::widget::text::Style {
                             color: Some(palette.text_muted),
@@ -265,10 +268,11 @@ where
                 ]
                 .spacing(2)
                 .width(Fill),
+                delete_btn,
             ]
             .spacing(12)
             .align_y(Alignment::Center)
-            .padding(Padding::from([6, 16]))
+            .padding(Padding::from([10, 16]))
             .width(Fill),
         ]
         .spacing(0)
@@ -277,7 +281,7 @@ where
     )
     .width(Fill)
     .padding(0)
-    .style(move |_, status| card_style(palette, item.active, status))
+    .style(palette.card_button_style(item.active, is_dead))
     .on_press(map(item))
     .into()
 }
@@ -315,7 +319,7 @@ fn group_card<'a>(item: &'a GroupEntry<'a>, palette: Palette) -> Element<'a, Sid
             ]
             .spacing(12)
             .align_y(Alignment::Center)
-            .padding(Padding::from([6, 16]))
+            .padding(Padding::from([8, 16]))
             .width(Fill),
         ]
         .spacing(0)
@@ -324,15 +328,15 @@ fn group_card<'a>(item: &'a GroupEntry<'a>, palette: Palette) -> Element<'a, Sid
     )
     .width(Fill)
     .padding(0)
-    .style(move |_, status| card_style(palette, item.active, status))
+    .style(palette.card_button_style(item.active, false))
     .on_press(SidebarAction::SelectGroup(item.id.to_string()))
     .into()
 }
 
 fn selection_strip<'a>(accent: Option<Color>) -> Element<'a, SidebarAction> {
     let color = accent.unwrap_or(Color::TRANSPARENT);
-    container(Space::new().width(2).height(Fill))
-        .width(2)
+    container(Space::new().width(3).height(Fill))
+        .width(3)
         .height(Fill)
         .style(move |_| iced::widget::container::Style {
             text_color: None,
@@ -344,51 +348,10 @@ fn selection_strip<'a>(accent: Option<Color>) -> Element<'a, SidebarAction> {
         .into()
 }
 
-fn card_style(
-    palette: Palette,
-    active: bool,
-    status: button::Status,
-) -> button::Style {
-    let background = if active {
-        palette.surface_alt
-    } else {
-        match status {
-            button::Status::Hovered | button::Status::Pressed => palette.surface_alt,
-            button::Status::Disabled | button::Status::Active => palette.surface,
-        }
-    };
-
-    button::Style {
-        background: Some(Background::Color(background)),
-        text_color: palette.text,
-        border: Border {
-            radius: 0.0.into(),
-            width: 0.0,
-            color: Color::TRANSPARENT,
-        },
-        shadow: Shadow::default(),
-        snap: true,
-    }
-}
-
-fn status_dot<'a>(color: Color, _palette: Palette) -> Element<'a, SidebarAction> {
-    container(Space::new().width(7).height(7))
-        .width(7)
-        .height(7)
-        .style(move |_| iced::widget::container::Style {
-            text_color: None,
-            background: Some(Background::Color(color)),
-            border: Border {
-                radius: 3.5.into(),
-                width: 0.0,
-                color,
-            },
-            shadow: Shadow {
-                color: Color { a: 0.5, ..color },
-                offset: iced::Vector::new(0.0, 0.0),
-                blur_radius: 4.0,
-            },
-            snap: true,
-        })
+fn status_dot<'a>(color: Color, palette: Palette) -> Element<'a, SidebarAction> {
+    container(Space::new().width(8).height(8))
+        .width(8)
+        .height(8)
+        .style(palette.status_dot_style(color))
         .into()
 }
