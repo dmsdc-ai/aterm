@@ -185,48 +185,39 @@ where
                 }
             }
             Event::InputMethod(ime_event) => {
-                // On macOS, native handler processes IME. These events may still arrive
-                // from winit but are redundant. Log and skip.
-                #[cfg(target_os = "macos")]
-                {
-                    eprintln!("[EVENT] InputMethod (winit, ignored on macOS): {:?}", ime_event);
-                    // Don't process — native handler handles it
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    match ime_event {
-                        input_method::Event::Commit(text) => {
-                            eprintln!("[EVENT] InputMethod::Commit({:?}) composing={} last_commit={:?}",
-                                text, state.ime_composing, state.last_commit_text);
-                            if state.focused && !text.is_empty() {
-                                if let Some(on_event) = self.on_event.as_ref() {
-                                    shell.publish(on_event(TerminalEvent::Input(text.as_bytes().to_vec())));
-                                    shell.capture_event();
-                                }
+                // Process winit IME events on all platforms.
+                // On macOS, the native NSTextInputClient handler may also deliver text
+                // via drain_committed() — content-based dedup (last_commit_text) prevents doubles.
+                match ime_event {
+                    input_method::Event::Commit(text) => {
+                        eprintln!("[EVENT] InputMethod::Commit({:?}) composing={} last_commit={:?}",
+                            text, state.ime_composing, state.last_commit_text);
+                        if state.focused && !text.is_empty() {
+                            if let Some(on_event) = self.on_event.as_ref() {
+                                shell.publish(on_event(TerminalEvent::Input(text.as_bytes().to_vec())));
+                                shell.capture_event();
                             }
-                            state.ime_composing = false;
-                            state.last_commit_text = Some(text.to_string());
                         }
-                        input_method::Event::Preedit(text, _cursor) => {
-                            eprintln!("[EVENT] InputMethod::Preedit({:?}) composing={}",
-                                text, state.ime_composing);
-                            state.ime_composing = !text.is_empty();
-                            shell.capture_event();
-                        }
-                        input_method::Event::Opened => {
-                            eprintln!("[EVENT] InputMethod::Opened → CJK active");
-                            state.ime_composing = true;
-                        }
-                        input_method::Event::Closed => {
-                            eprintln!("[EVENT] InputMethod::Closed → CJK inactive");
-                            state.ime_composing = false;
-                        }
+                        state.ime_composing = false;
+                        state.last_commit_text = Some(text.to_string());
+                    }
+                    input_method::Event::Preedit(text, _cursor) => {
+                        eprintln!("[EVENT] InputMethod::Preedit({:?}) composing={}",
+                            text, state.ime_composing);
+                        state.ime_composing = !text.is_empty();
+                        shell.capture_event();
+                    }
+                    input_method::Event::Opened => {
+                        eprintln!("[EVENT] InputMethod::Opened");
+                        state.ime_composing = true;
+                    }
+                    input_method::Event::Closed => {
+                        eprintln!("[EVENT] InputMethod::Closed");
+                        state.ime_composing = false;
                     }
                 }
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
-                // Native IME handler replaces iced's InputMethod on macOS
-                #[cfg(not(target_os = "macos"))]
                 if state.focused {
                     let cursor_rect = Rectangle::new(
                         Point::new(0.0, 0.0),
