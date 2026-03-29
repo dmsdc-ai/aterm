@@ -1,1646 +1,988 @@
 mod core;
 mod ime;
+mod renderer;
 mod terminal;
-mod ui;
 
-use std::borrow::Cow;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use iced::widget::{column, container, row, stack, text, Space};
-use iced::{
-    event, keyboard, time, Alignment, Background, Border, Element, Fill, Result,
-    Subscription, Task,
-};
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, Ime, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::core::{
-    normalize_terminal_text, PtyOutputSignal, SessionStore, SharedPtyManager,
-    TeleptyClient, TeleptySessionInfo, WorkspaceInfo,
-};
-use crate::ime::{CandidateRect, ImeBridge, Rect, TextRange};
-use crate::terminal::{TerminalEvent, TerminalState, TerminalWidget};
-use crate::ui::{
-    CommandEntry, CommandPalette, CommandPaletteAction, CommandPaletteState,
-    CreateSessionAction, CreateSessionDialog, CreateSessionState, CLI_PRESETS,
-    DeliberateAction, DeliberateDialog, DeliberateDialogState,
-    GroupEntry, GroupGrid, GroupGridAction, GroupSummaryEntry, HybridPhase,
-    Palette, PaletteCommand, SessionEntry, SessionKind, SessionStatus,
-    SettingsAction, SettingsPanel, SettingsState,
-    Sidebar, SidebarAction, SidebarModel, ThemeMode,
-};
+use crate::core::pty::{PtyManager, PtyOutputSignal};
+#[cfg(target_os = "macos")]
+use crate::ime::NativeImeHandler;
+use crate::renderer::TerminalGridRenderer;
+use crate::terminal::TerminalState;
 
-const SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const DEFAULT_COLUMNS: u16 = 120;
-const DEFAULT_ROWS: u16 = 36;
-const PTY_OUTPUT_DEBOUNCE: Duration = Duration::from_millis(16);
+/// 60fps is sufficient for a terminal.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const IME_REARM_DELAY: Duration = Duration::from_millis(30);
+const IME_RECOVERY_WINDOW: Duration = Duration::from_millis(500);
 
-static PTY_SIGNAL: OnceLock<PtyOutputSignal> = OnceLock::new();
-static PTY_DISPATCH_IN_FLIGHT: LazyLock<AtomicBool> =
-    LazyLock::new(|| AtomicBool::new(false));
-
-fn app_title() -> &'static str {
-    let hash = env!("ATERM_GIT_HASH");
-    let date = env!("ATERM_BUILD_DATE");
-    let dirty = env!("ATERM_DIRTY") == "true";
-    let version = env!("CARGO_PKG_VERSION");
-    let build = env!("ATERM_BUILD_NUMBER");
-    let dirty_mark = if dirty { "*" } else { "" };
-    let s = format!("aterm v3 \u{2014} {}-{}{} build.{} ({})", version, hash, dirty_mark, build, date);
-    Box::leak(s.into_boxed_str())
+struct GpuState {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
 }
 
-static APP_TITLE: LazyLock<&'static str> = LazyLock::new(app_title);
+struct App {
+    window: Option<Arc<Window>>,
+    gpu: Option<GpuState>,
+    renderer: Option<TerminalGridRenderer>,
+    terminal: Option<TerminalState>,
+    pty_manager: PtyManager,
+    pty_signal: PtyOutputSignal,
+    workspace_id: Option<String>,
 
-fn main() -> Result {
-    iced::application(Aterm::boot, update, view)
-        .title(|_state: &_| (*APP_TITLE).to_string())
-        .default_font(iced::Font {
-            family: iced::font::Family::SansSerif,
-            ..iced::Font::DEFAULT
-        })
-        .theme(|app: &Aterm| Palette::iced_theme(app.theme_mode))
-        .style(|app: &Aterm, _theme: &iced::Theme| iced::theme::Style {
-            background_color: app.palette().background,
-            text_color: app.palette().text,
-        })
-        .subscription(subscription)
-        .run()
+    // Frame pacing (alacritty pattern).
+    dirty: bool,
+    has_frame: bool,
+    next_frame: Option<Instant>,
+    window_focused: bool,
+
+    #[cfg(target_os = "macos")]
+    native_ime: Option<&'static NativeImeHandler>,
+    #[cfg(target_os = "macos")]
+    native_ime_active: bool,
+    #[cfg(target_os = "macos")]
+    ime_marked: Option<String>,
+    ime_composing: bool,
+    ime_recently_disabled: bool,
+    ime_rearm_at: Option<Instant>,
+    ime_recovery_until: Option<Instant>,
+    ime_recovery_buffer: String,
 }
 
-struct Aterm {
-    manager: SharedPtyManager,
-    session_store: SessionStore,
-    telepty: TeleptyClient,
-    ime: ImeBridge,
-    terminal: TerminalState,
-    theme_mode: ThemeMode,
-    palette_state: CommandPaletteState,
-    commands: Vec<CommandEntry<'static>>,
-    current_view: CurrentView,
-    active_workspace: String,
-    group_view: Option<GroupViewState>,
-    local_sessions: Vec<SessionEntry<'static>>,
-    telepty_sessions: Vec<SessionEntry<'static>>,
-    groups: Vec<GroupEntry<'static>>,
-    create_session_state: CreateSessionState,
-    deliberate_state: DeliberateDialogState,
-    settings_state: SettingsState,
-    status_text: String,
-}
-
-#[derive(Debug, Clone)]
-enum Message {
-    Tick(Instant),
-    PtyDataReady,
-    Event(iced::Event),
-    FontLoaded(String, std::result::Result<(), iced::font::Error>),
-    Sidebar(SidebarAction),
-    Palette(CommandPaletteAction),
-    Terminal(TerminalEvent),
-    GroupGrid(GroupGridAction),
-    GroupTerminal(String, TerminalEvent),
-    CreateSession(CreateSessionAction),
-    FolderSelected(Option<std::path::PathBuf>),
-    Deliberate(DeliberateAction),
-    Settings(SettingsAction),
-    /// Internal routing: deliver text to a workspace without going through telepty.
-    RouteToWorkspace { workspace_id: String, text: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CurrentView {
-    Session,
-    Group(String),
-}
-
-struct GroupTerminalPane {
-    workspace_id: String,
-    title: String,
-    subtitle: String,
-    status: String,
-    terminal: TerminalState,
-}
-
-struct GroupViewState {
-    id: String,
-    title: String,
-    topic: String,
-    phase: HybridPhase,
-    members: Vec<GroupTerminalPane>,
-    summary: Vec<GroupSummaryEntry<'static>>,
-}
-
-impl Aterm {
-    fn boot() -> (Self, Task<Message>) {
-        let manager = core::PtyManager::shared();
-        let session_store = SessionStore::new();
-        let telepty = TeleptyClient::new();
-        let ime = ImeBridge::new();
-
-        let _ = session_store.restore_into(&manager);
-
-        let _ = PTY_SIGNAL.set(
-            manager
-                .lock()
-                .map(|m| m.output_signal())
-                .unwrap_or_else(|_| PtyOutputSignal::new()),
-        );
-
-        let mut app = Self {
-            manager,
-            session_store,
-            telepty,
-            ime,
-            terminal: TerminalState::new(DEFAULT_COLUMNS as usize, DEFAULT_ROWS as usize),
-            theme_mode: load_theme(),
-            palette_state: CommandPaletteState::default(),
-            commands: default_commands(),
-            current_view: CurrentView::Session,
-            active_workspace: String::new(),
-            group_view: None,
-            local_sessions: Vec::new(),
-            telepty_sessions: Vec::new(),
-            groups: Vec::new(),
-            create_session_state: CreateSessionState::default(),
-            deliberate_state: DeliberateDialogState::default(),
-            settings_state: SettingsState::default(),
-            status_text: "Ready".to_string(),
-        };
-
-        #[cfg(target_os = "macos")]
-        {
-            crate::ime::NativeImeHandler::initialize();
-            eprintln!("[NATIVE-IME] handler initialized");
+impl App {
+    fn new() -> Self {
+        let pty_manager = PtyManager::new();
+        let pty_signal = pty_manager.output_signal();
+        Self {
+            window: None,
+            gpu: None,
+            renderer: None,
+            terminal: None,
+            pty_manager,
+            pty_signal,
+            workspace_id: None,
+            dirty: false,
+            has_frame: true,
+            next_frame: None,
+            window_focused: false,
+            #[cfg(target_os = "macos")]
+            native_ime: None,
+            #[cfg(target_os = "macos")]
+            native_ime_active: false,
+            #[cfg(target_os = "macos")]
+            ime_marked: None,
+            ime_composing: false,
+            ime_recently_disabled: false,
+            ime_rearm_at: None,
+            ime_recovery_until: None,
+            ime_recovery_buffer: String::new(),
         }
+    }
 
-        app.ensure_default_workspace();
-        app.refresh_sessions();
-        app.refresh_active_terminal();
+    fn init_gpu(&mut self) {
+        let window = self.window.as_ref().unwrap().clone();
+        let size = window.inner_size();
 
-        let font_tasks = system_cjk_font_tasks();
-        let startup_task = if font_tasks.is_empty() {
-            Task::none()
-        } else {
-            Task::batch(font_tasks)
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(window).unwrap();
+
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))
+        .expect("No suitable GPU adapter");
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("aterm"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+            },
+            None,
+        ))
+        .expect("Failed to create device");
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         };
+        surface.configure(&device, &config);
 
-        (app, startup_task)
+        let renderer = TerminalGridRenderer::new(&device, &queue, format);
+        let (cols, rows) = renderer.grid_size(size.width as f32, size.height as f32);
+        let terminal = TerminalState::new(cols as usize, rows as usize);
+
+        self.renderer = Some(renderer);
+        self.terminal = Some(terminal);
+        self.gpu = Some(GpuState {
+            surface,
+            device,
+            queue,
+            config,
+        });
     }
 
-    fn palette(&self) -> Palette {
-        Palette::from_mode(self.theme_mode)
-    }
+    fn spawn_default_shell(&mut self) {
+        let Some(ref renderer) = self.renderer else { return };
+        let Some(ref gpu) = self.gpu else { return };
 
-    fn ensure_default_workspace(&mut self) {
-        let has_local = self
-            .manager
-            .lock()
-            .map(|manager| !manager.list_workspaces().is_empty())
-            .unwrap_or(false);
+        let (cols, rows) = renderer.grid_size(gpu.config.width as f32, gpu.config.height as f32);
+        let cwd = std::env::current_dir()
+            .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default())
+            .to_string_lossy()
+            .to_string();
 
-        if has_local {
-            if self.active_workspace.is_empty() {
-                if let Ok(manager) = self.manager.lock() {
-                    if let Some(first) = manager.list_workspaces().into_iter().next() {
-                        self.active_workspace = first.id;
-                    }
-                }
+        match self.pty_manager.create(
+            "main".to_string(),
+            cwd,
+            None,
+            None,
+            Some(cols),
+            Some(rows),
+            false,
+        ) {
+            Ok(id) => {
+                eprintln!("[aterm] shell spawned: {id}");
+                self.workspace_id = Some(id);
             }
-            return;
+            Err(e) => eprintln!("[aterm] failed to spawn shell: {e}"),
         }
+    }
 
-        let cwd = current_dir_string();
-        let id = "main".to_string();
+    fn write_to_pty(&self, text: &str) {
+        if let Some(ref id) = self.workspace_id {
+            if let Err(e) = self.pty_manager.send_to_workspace(id, text) {
+                eprintln!("[aterm] PTY write error: {e}");
+            }
+        }
+    }
 
-        if let Ok(mut manager) = self.manager.lock() {
-            if let Err(error) = manager.create(
-                id.clone(),
-                cwd,
-                None,
-                None,
-                Some(DEFAULT_COLUMNS),
-                Some(DEFAULT_ROWS),
-                false,
-            ) {
-                self.status_text = format!("Failed to create default session: {error}");
+    fn sync_pty_output(&mut self) {
+        let Some(ref id) = self.workspace_id else { return };
+        let Some(ref mut terminal) = self.terminal else { return };
+
+        match self.pty_manager.drain_term_bytes(id) {
+            Ok(bytes) if !bytes.is_empty() => terminal.advance(&bytes),
+            Err(e) => eprintln!("[aterm] drain_term_bytes error: {e}"),
+            _ => {}
+        }
+    }
+
+    fn handle_named_key(&mut self, key: &Key) -> bool {
+        let bytes: &str = match key {
+            Key::Named(NamedKey::Enter) => "\r",
+            Key::Named(NamedKey::Backspace) => "\x7f",
+            Key::Named(NamedKey::Delete) => "\x1b[3~",
+            Key::Named(NamedKey::Tab) => "\t",
+            Key::Named(NamedKey::Escape) => "\x1b",
+            Key::Named(NamedKey::ArrowUp) => "\x1b[A",
+            Key::Named(NamedKey::ArrowDown) => "\x1b[B",
+            Key::Named(NamedKey::ArrowRight) => "\x1b[C",
+            Key::Named(NamedKey::ArrowLeft) => "\x1b[D",
+            Key::Named(NamedKey::Home) => "\x1b[H",
+            Key::Named(NamedKey::End) => "\x1b[F",
+            Key::Named(NamedKey::PageUp) => "\x1b[5~",
+            Key::Named(NamedKey::PageDown) => "\x1b[6~",
+            _ => return false,
+        };
+        self.flush_ime_recovery_buffer(false);
+        self.ime_recovery_until = None;
+        self.write_to_pty(bytes);
+        true
+    }
+
+    /// Mark terminal content as changed. Request redraw if frame budget available.
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        if self.has_frame {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Called at the end of draw. Consumes the frame budget and schedules next frame.
+    fn request_frame(&mut self) {
+        self.has_frame = false;
+        self.next_frame = Some(Instant::now() + FRAME_INTERVAL);
+    }
+
+    fn draw(&mut self) {
+        self.dirty = false;
+        self.has_frame = false;
+        self.sync_pty_output();
+        let draw_start = Instant::now();
+
+        let (gpu, renderer, terminal) =
+            match (&self.gpu, &mut self.renderer, &self.terminal) {
+                (Some(g), Some(r), Some(t)) => (g, r, t),
+                _ => return,
+            };
+
+        let output = match gpu.surface.get_current_texture() {
+            Ok(t) => t,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                gpu.surface.configure(&gpu.device, &gpu.config);
+                self.has_frame = true;
                 return;
             }
-        }
-
-        self.active_workspace = id;
-        let _ = self.session_store.save_shared(&self.manager);
-    }
-
-    fn refresh_sessions(&mut self) {
-        let workspaces = self
-            .manager
-            .lock()
-            .map(|manager| manager.list_workspaces())
-            .unwrap_or_default();
-
-        if self.active_workspace.is_empty() {
-            if let Some(first) = workspaces.first() {
-                self.active_workspace = first.id.clone();
+            Err(e) => {
+                eprintln!("[wgpu] surface error: {e}");
+                self.has_frame = true;
+                return;
             }
-        }
-
-        self.local_sessions = workspaces
-            .iter()
-            .map(|workspace| {
-                let pending = self.manager.lock().ok()
-                    .and_then(|m| m.peek_queue(&workspace.id).ok())
-                    .map(|q| q.len())
-                    .unwrap_or(0);
-                map_local_session_with_injects(
-                    workspace,
-                    matches!(self.current_view, CurrentView::Session)
-                        && workspace.id == self.active_workspace,
-                    pending,
-                )
-            })
-            .collect();
-
-        // Sort: active (non-dead) first, then by created_at descending
-        self.local_sessions.sort_by(|a, b| {
-            let a_dead = matches!(a.status, SessionStatus::Dead);
-            let b_dead = matches!(b.status, SessionStatus::Dead);
-            a_dead.cmp(&b_dead).then_with(|| b.id.cmp(&a.id))
-        });
-
-        self.telepty_sessions = self
-            .telepty
-            .list_sessions()
-            .unwrap_or_default()
-            .iter()
-            .map(|session| {
-                let attach_id = format!("attach:{}", session.id);
-                map_telepty_session(
-                    session,
-                    matches!(self.current_view, CurrentView::Session)
-                        && self.active_workspace == attach_id,
-                )
-            })
-            .collect();
-
-        let total_sessions = self.local_sessions.len() + self.telepty_sessions.len();
-        self.groups = vec![GroupEntry {
-            id: Cow::Borrowed("all"),
-            title: Cow::Borrowed("All Sessions"),
-            subtitle: Cow::Owned(format!("{total_sessions} sessions available")),
-            members: total_sessions,
-            active: matches!(&self.current_view, CurrentView::Group(id) if id == "all"),
-        }];
-    }
-
-    fn refresh_active_terminal(&mut self) {
-        if self.active_workspace.is_empty() {
-            self.terminal.sync_snapshot("");
-            return;
-        }
-
-        let snapshot = self
-            .manager
-            .lock()
-            .ok()
-            .and_then(|manager| manager.read_screen(&self.active_workspace, None).ok())
-            .unwrap_or_default();
-
-        self.terminal.sync_snapshot(&snapshot);
-    }
-
-    fn open_group_view(&mut self, id: &str) {
-        let title = self
-            .groups
-            .iter()
-            .find(|group| group.id.as_ref() == id)
-            .map(|group| group.title.to_string())
-            .unwrap_or_else(|| id.to_string());
-
-        self.current_view = CurrentView::Group(id.to_string());
-        self.group_view = Some(GroupViewState {
-            id: id.to_string(),
-            title,
-            topic: String::new(),
-            phase: HybridPhase::Divergence,
-            members: Vec::new(),
-            summary: Vec::new(),
-        });
-        self.sync_group_view();
-    }
-
-    fn sync_group_view(&mut self) {
-        let Some(group_view) = self.group_view.as_mut() else {
-            return;
         };
 
-        let workspaces = self
-            .manager
-            .lock()
-            .map(|manager| manager.list_workspaces())
-            .unwrap_or_default();
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut next_members = Vec::new();
-        let mut existing = std::mem::take(&mut group_view.members);
+        let shared_term = terminal.terminal();
+        if let Ok(term) = shared_term.lock() {
+            renderer.render(
+                &term,
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+            );
+        }
 
-        for workspace in workspaces {
-            let snapshot = self
-                .manager
-                .lock()
-                .ok()
-                .and_then(|manager| manager.read_screen(&workspace.id, None).ok())
-                .unwrap_or_default();
+        output.present();
+        let draw_elapsed = draw_start.elapsed();
+        if draw_elapsed.as_millis() > 16 {
+            eprintln!("[perf] draw: {}ms", draw_elapsed.as_millis());
+        }
+        self.has_frame = true;
+    }
 
-            if let Some(index) = existing
-                .iter()
-                .position(|member| member.workspace_id == workspace.id)
-            {
-                let mut member = existing.swap_remove(index);
-                member.title = workspace.id.clone();
-                member.subtitle = workspace.cwd.clone();
-                member.status = workspace.status.clone();
-                member.terminal.sync_snapshot(&snapshot);
-                next_members.push(member);
-            } else {
-                let mut terminal = TerminalState::new(
-                    DEFAULT_COLUMNS as usize,
-                    DEFAULT_ROWS as usize,
-                );
-                terminal.sync_snapshot(&snapshot);
-                next_members.push(GroupTerminalPane {
-                    workspace_id: workspace.id.clone(),
-                    title: workspace.id.clone(),
-                    subtitle: workspace.cwd.clone(),
-                    status: workspace.status.clone(),
-                    terminal,
-                });
+    fn set_winit_ime_allowed(&self, allowed: bool) {
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(allowed);
+            eprintln!("[ime] set_ime_allowed({allowed})");
+        }
+    }
+
+    fn process_ime_recovery(&mut self) {
+        let now = Instant::now();
+
+        if let Some(rearm_at) = self.ime_rearm_at {
+            if now >= rearm_at && self.window_focused {
+                self.ime_rearm_at = None;
+                self.set_winit_ime_allowed(false);
+                self.set_winit_ime_allowed(true);
+                eprintln!("[ime/recovery] rearmed after Disabled→Enabled");
             }
         }
 
-        group_view.members = next_members;
+        if let Some(until) = self.ime_recovery_until {
+            if now >= until && !self.ime_composing {
+                self.flush_ime_recovery_buffer(false);
+                self.ime_recovery_until = None;
+                self.ime_recently_disabled = false;
+            }
+        }
     }
 
-    fn summarize_group(&mut self) {
-        let Some(group_view) = self.group_view.as_mut() else {
+    fn buffer_ime_recovery_text(&mut self, text: &str, source: &str) -> bool {
+        if self.ime_recovery_until.is_none() || !is_all_hangul_jamo(text) {
+            return false;
+        }
+
+        self.ime_recovery_buffer.push_str(text);
+        self.ime_recovery_until = Some(Instant::now() + IME_RECOVERY_WINDOW);
+        eprintln!("[ime/recovery] buffered {source}: {:?}", text);
+        true
+    }
+
+    fn flush_ime_recovery_buffer(&mut self, drop_partial: bool) {
+        if self.ime_recovery_buffer.is_empty() {
             return;
-        };
+        }
 
-        group_view.phase = HybridPhase::Convergence;
-        group_view.summary = group_view
-            .members
-            .iter()
-            .map(|member| {
-                let snapshot = self
-                    .manager
-                    .lock()
-                    .ok()
-                    .and_then(|manager| manager.read_screen(&member.workspace_id, Some(16 * 1024)).ok())
-                    .unwrap_or_default();
-                GroupSummaryEntry {
-                    id: Cow::Owned(member.workspace_id.clone()),
-                    title: Cow::Owned(member.title.clone()),
-                    summary: Cow::Owned(compact_terminal_summary(&snapshot)),
-                }
-            })
-            .collect();
+        let pending = std::mem::take(&mut self.ime_recovery_buffer);
+        let recovered = compose_hangul_jamo_sequence(&pending);
+        let has_syllable = recovered.chars().any(is_hangul_syllable);
 
-        self.status_text =
-            "Convergence summary generated from current group session screens".to_string();
-    }
-
-    fn next_workspace_id(&self) -> String {
-        let existing = self
-            .manager
-            .lock()
-            .map(|manager| {
-                manager
-                    .list_workspaces()
-                    .into_iter()
-                    .map(|workspace| workspace.id)
-                    .collect::<std::collections::HashSet<_>>()
-            })
-            .unwrap_or_else(|_| {
-                self.local_sessions
-                    .iter()
-                    .map(|entry| entry.id.to_string())
-                    .collect()
-            });
-
-        let mut index = 1usize;
-        loop {
-            let candidate = format!("session-{index}");
-            if !existing.contains(&candidate) {
-                return candidate;
+        if has_syllable || !drop_partial {
+            if !recovered.is_empty() {
+                eprintln!("[ime/recovery] flush {:?} -> {:?}", pending, recovered);
+                self.write_to_pty(&recovered);
             }
-            index += 1;
+        } else {
+            eprintln!("[ime/recovery] drop partial {:?}", pending);
         }
     }
 
-    fn create_workspace(&mut self) {
-        let previous_workspace = self.active_workspace.clone();
-        let next_id = self.next_workspace_id();
-        let result = self
-            .manager
-            .lock()
-            .map_err(|error| error.to_string())
-            .and_then(|mut manager| {
-                manager.create(
-                    next_id.clone(),
-                    current_dir_string(),
-                    None,
-                    None,
-                    Some(DEFAULT_COLUMNS),
-                    Some(DEFAULT_ROWS),
-                    false,
-                )
-            });
-
-        match result {
-            Ok(_) => {
-                if previous_workspace.starts_with("attach:") && previous_workspace != next_id {
-                    if let Ok(mut manager) = self.manager.lock() {
-                        let _ = manager.close(&previous_workspace);
-                    }
-                }
-
-                self.current_view = CurrentView::Session;
-                self.group_view = None;
-                self.active_workspace = next_id;
-                self.status_text = "Created a new local session".to_string();
-                let _ = self.session_store.save_shared(&self.manager);
-            }
-            Err(error) => {
-                self.status_text = format!("Create session failed: {error}");
-            }
+    fn refresh_window_title(&self) {
+        let mut title = String::from("aterm v3");
+        #[cfg(target_os = "macos")]
+        if let Some(marked) = self.ime_marked.as_ref().filter(|marked| !marked.is_empty()) {
+            title.push_str(" [");
+            title.push_str(marked);
+            title.push(']');
         }
 
-        self.refresh_sessions();
-        self.refresh_active_terminal();
-    }
-
-    fn handle_sidebar(&mut self, action: SidebarAction) -> Task<Message> {
-        match action {
-            SidebarAction::SelectSession(id) => {
-                let previous_workspace = self.active_workspace.clone();
-
-                if self.local_sessions.iter().any(|entry| entry.id.as_ref() == id) {
-                    self.current_view = CurrentView::Session;
-                    self.group_view = None;
-                    self.active_workspace = id;
-                    self.status_text = "Selected local session".to_string();
-                } else if self.telepty_sessions.iter().any(|entry| entry.id.as_ref() == id) {
-                    let attach_id = format!("attach:{}", id);
-
-                    let exists = match self.manager.lock() {
-                        Ok(mgr) => mgr.list_workspaces().iter().any(|ws| ws.id == attach_id),
-                        Err(_) => false,
-                    };
-
-                    if !exists {
-                        if let Ok(mut manager) = self.manager.lock() {
-                            let args = vec!["attach".to_string(), id.clone()];
-                            let _ = manager.create(
-                                attach_id.clone(),
-                                std::env::current_dir().unwrap_or_default().to_string_lossy().to_string(),
-                                Some("telepty".to_string()),
-                                Some(args),
-                                None,
-                                None,
-                                true,
-                            );
-                        }
-                    }
-
-                    self.current_view = CurrentView::Session;
-                    self.group_view = None;
-                    self.active_workspace = attach_id;
-                    self.status_text = format!("Attached to telepty session {}", id);
-                } else if id.starts_with("attach:") {
-                    self.current_view = CurrentView::Session;
-                    self.group_view = None;
-                    self.active_workspace = id.clone();
-                    self.status_text = "Selected attached session".to_string();
-                } else {
-                    self.status_text = format!("Session not found: {}", id);
-                }
-
-                if previous_workspace.starts_with("attach:") && previous_workspace != self.active_workspace {
-                    if let Ok(mut manager) = self.manager.lock() {
-                        let _ = manager.close(&previous_workspace);
-                    }
-                }
-
-                self.refresh_sessions();
-                self.refresh_active_terminal();
-            }
-            SidebarAction::SelectGroup(id) => {
-                self.open_group_view(&id);
-                self.refresh_sessions();
-                self.status_text = format!("Selected group: {id}");
-            }
-            SidebarAction::CreateSession => {
-                return iced::Task::future(async {
-                    let folder = rfd::AsyncFileDialog::new()
-                        .set_title("Select project folder")
-                        .pick_folder()
-                        .await;
-                    Message::FolderSelected(folder.map(|f| f.path().to_path_buf()))
-                });
-            }
-            SidebarAction::DeleteSession(id) => {
-                if let Ok(mut manager) = self.manager.lock() {
-                    let _ = manager.close(&id);
-                }
-                if self.active_workspace == id {
-                    self.active_workspace = self.local_sessions.iter()
-                        .find(|s| s.id.as_ref() != id)
-                        .map(|s| s.id.to_string())
-                        .unwrap_or_default();
-                }
-                self.refresh_sessions();
-                self.refresh_active_terminal();
-                let _ = self.session_store.save_shared(&self.manager);
-                self.status_text = format!("Closed session: {id}");
-            }
-            SidebarAction::OpenSettings => {
-                self.settings_state.open = !self.settings_state.open;
-            }
-        }
-
-        Task::none()
-    }
-
-    fn handle_palette(&mut self, action: CommandPaletteAction) {
-        match action {
-            CommandPaletteAction::Close => {
-                self.palette_state.open = false;
-            }
-            CommandPaletteAction::QueryChanged(query) => {
-                self.palette_state.query = query;
-                self.palette_state.selected = 0;
-            }
-            CommandPaletteAction::Execute(command) => {
-                self.execute_command(command);
-            }
-            CommandPaletteAction::Submit => {
-                let palette = CommandPalette::new(self.palette());
-                if let Some(entry) =
-                    palette.selected_command(&self.palette_state, &self.commands)
-                {
-                    self.execute_command(entry.command);
-                }
-            }
-            CommandPaletteAction::Select(index) => {
-                self.palette_state.selected = index;
-            }
+        if let Some(window) = &self.window {
+            window.set_title(&title);
         }
     }
 
-    fn execute_command(&mut self, command: PaletteCommand) {
-        match command {
-            PaletteCommand::NewSession => {
-                self.create_workspace();
-            }
-            PaletteCommand::Deliberate => {
-                self.deliberate_state.open = true;
-                self.deliberate_state.topic.clear();
-            }
-            PaletteCommand::Group => {
-                self.status_text = "group: UI scaffold ready, creation flow pending".to_string();
-            }
-            PaletteCommand::Broadcast => {
-                let result = self
-                    .manager
-                    .lock()
-                    .ok()
-                    .and_then(|manager| {
-                        manager
-                            .queue_inject(
-                                &self.active_workspace,
-                                "command-palette",
-                                "broadcast placeholder".to_string(),
-                            )
-                            .ok()
-                    });
+    #[cfg(target_os = "macos")]
+    fn activate_native_ime(&mut self) {
+        let Some(window) = self.window.as_ref() else { return };
+        let handler = *self
+            .native_ime
+            .get_or_insert_with(NativeImeHandler::initialize);
 
-                self.status_text = if result.is_some() {
-                    "broadcast: queued inject into the active workspace".to_string()
-                } else {
-                    "broadcast: no active local workspace to inject into".to_string()
-                };
-            }
-            PaletteCommand::Theme(mode) => {
-                self.theme_mode = mode;
-                save_theme(mode);
-                self.status_text = match mode {
-                    ThemeMode::Light => "Theme switched to light".to_string(),
-                    ThemeMode::Dark => "Theme switched to dark".to_string(),
-                };
-            }
-        }
-
-        self.palette_state.open = false;
+        let attached = handler.attach_to_window(window.as_ref());
+        let active = attached && handler.activate_for_window(window.as_ref());
+        self.native_ime_active = active;
+        eprintln!("[ime] activate_native_ime: active={}", active);
     }
 
-    fn handle_terminal(&mut self, event: TerminalEvent) {
-        match event {
-            TerminalEvent::Input(bytes) => {
-                if let Ok(text) = String::from_utf8(bytes) {
-                    let result = self
-                        .manager
-                        .lock()
-                        .ok()
-                        .and_then(|manager| manager.send_to_workspace(&self.active_workspace, &text).ok());
-                    if result.is_none() {
-                        self.status_text = "Failed to forward terminal input".to_string();
-                    }
-                }
-            }
-            TerminalEvent::Resize { columns, rows } => {
-                eprintln!("[RESIZE] terminal {}x{} for workspace '{}'", columns, rows, self.active_workspace);
-                self.terminal.resize(columns as usize, rows as usize);
-                match self.manager.lock() {
-                    Ok(manager) => {
-                        match manager.resize(&self.active_workspace, columns, rows) {
-                            Ok(()) => eprintln!("[RESIZE] PTY resize OK: {}x{}", columns, rows),
-                            Err(e) => eprintln!("[RESIZE] PTY resize FAILED: {}", e),
-                        }
-                    }
-                    Err(e) => eprintln!("[RESIZE] manager lock FAILED: {}", e),
-                }
+    #[cfg(not(target_os = "macos"))]
+    fn activate_native_ime(&mut self) {}
 
-                self.ime.set_candidate_rect(CandidateRect {
-                    rect: Rect::new(360.0, 88.0, 0.0, 24.0),
-                    actual_range: TextRange::empty(0),
-                });
-            }
-            TerminalEvent::FocusChanged(focused) => {
-                self.status_text = if focused {
-                    "Terminal focused".to_string()
-                } else {
-                    "Terminal unfocused".to_string()
-                };
-            }
-            TerminalEvent::Scroll(delta) => {
-                self.terminal.scroll(delta);
-            }
+    #[cfg(target_os = "macos")]
+    fn deactivate_native_ime(&mut self) {
+        let Some(window) = self.window.as_ref() else { return };
+        if let Some(handler) = self.native_ime {
+            handler.deactivate_for_window(window.as_ref());
+            self.native_ime_active = false;
+            self.ime_marked = None;
+            self.refresh_window_title();
         }
     }
 
-    fn handle_group_terminal(&mut self, workspace_id: String, event: TerminalEvent) {
-        match event {
-            TerminalEvent::Input(bytes) => {
-                if let Ok(text) = String::from_utf8(bytes) {
-                    let result = self
-                        .manager
-                        .lock()
-                        .ok()
-                        .and_then(|manager| manager.send_to_workspace(&workspace_id, &text).ok());
-                    if result.is_none() {
-                        self.status_text =
-                            format!("Failed to forward input to group session {workspace_id}");
-                    }
-                }
+    #[cfg(not(target_os = "macos"))]
+    fn deactivate_native_ime(&mut self) {}
+
+    #[cfg(target_os = "macos")]
+    fn sync_native_ime(&mut self) {
+        if !self.native_ime_active {
+            return;
+        }
+
+        let Some(handler) = self.native_ime else { return };
+        let mut wrote_input = false;
+
+        for bytes in handler.drain_key_bytes() {
+            let text = String::from_utf8_lossy(&bytes);
+            if !text.is_empty() {
+                self.write_to_pty(text.as_ref());
+                wrote_input = true;
             }
-            TerminalEvent::Resize { columns, rows } => {
-                if let Some(group_view) = self.group_view.as_mut() {
-                    if let Some(member) = group_view
-                        .members
-                        .iter_mut()
-                        .find(|member| member.workspace_id == workspace_id)
+        }
+
+        for text in handler.drain_committed() {
+            if !text.is_empty() {
+                eprintln!("[ime] sync drain_committed: {:?}", text);
+                self.write_to_pty(&text);
+                wrote_input = true;
+            }
+        }
+
+        let marked = handler.marked_text();
+        if marked != self.ime_marked {
+            self.ime_marked = marked;
+            self.refresh_window_title();
+            wrote_input = true;
+        }
+
+        if wrote_input {
+            self.mark_dirty();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn sync_native_ime(&mut self) {}
+}
+
+impl ApplicationHandler for App {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        // PTY thread sent Wakeup via EventLoopProxy (alacritty pattern).
+        self.mark_dirty();
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.process_ime_recovery();
+        // Native IME disabled — no sync needed.
+        // self.sync_native_ime();
+        // Poll PTY dirty flag every tick (EventLoopProxy unreliable on macOS).
+        if self.pty_signal.take_dirty() {
+            self.dirty = true;
+        }
+        if self.dirty && self.has_frame {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        // Wake every 8ms (~120fps). CPU cost: ~1-2%.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + FRAME_INTERVAL,
+        ));
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() {
+            let attrs = WindowAttributes::default()
+                .with_title("aterm v3")
+                .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0));
+            match event_loop.create_window(attrs) {
+                Ok(w) => {
+                    self.window = Some(Arc::new(w));
+                    self.set_winit_ime_allowed(true);
+                    self.refresh_window_title();
+                    self.init_gpu();
+                    self.spawn_default_shell();
+                    // Native IME disabled — using winit's built-in Ime events.
+                    // self.activate_native_ime();
+                    #[cfg(target_os = "macos")]
                     {
-                        member.terminal.resize(columns as usize, rows as usize);
-                    }
-                }
-
-                let _ = self
-                    .manager
-                    .lock()
-                    .ok()
-                    .and_then(|manager| manager.resize(&workspace_id, columns, rows).ok());
-            }
-            TerminalEvent::FocusChanged(focused) => {
-                self.status_text = if focused {
-                    format!("Focused group session {workspace_id}")
-                } else {
-                    format!("Unfocused group session {workspace_id}")
-                };
-            }
-            TerminalEvent::Scroll(delta) => {
-                if let Some(group_view) = self.group_view.as_mut() {
-                    if let Some(member) = group_view
-                        .members
-                        .iter_mut()
-                        .find(|member| member.workspace_id == workspace_id)
-                    {
-                        member.terminal.scroll(delta);
-                    }
-                }
-            }
-        }
-    }
-
-    fn handle_group_grid(&mut self, action: GroupGridAction) {
-        let Some(group_view) = self.group_view.as_mut() else {
-            return;
-        };
-
-        match action {
-            GroupGridAction::TopicChanged(topic) => {
-                group_view.topic = topic;
-            }
-            GroupGridAction::Converge => {
-                self.summarize_group();
-            }
-            GroupGridAction::Broadcast(topic) => {
-                if let Some(gv) = self.group_view.as_ref() {
-                    let ws_ids: Vec<String> = gv.members.iter().map(|m| m.workspace_id.clone()).collect();
-                    if let Ok(manager) = self.manager.lock() {
-                        for ws_id in &ws_ids {
-                            let _ = manager.queue_inject(ws_id, "broadcast", topic.clone());
+                        use objc2_app_kit::NSApplication;
+                        use objc2_foundation::MainThreadMarker;
+                        if let Some(mtm) = MainThreadMarker::new() {
+                            let ns_app = NSApplication::sharedApplication(mtm);
+                            #[allow(deprecated)]
+                            ns_app.activateIgnoringOtherApps(true);
                         }
                     }
-                    self.status_text = format!("Broadcast to {} sessions", ws_ids.len());
+                    if let Some(window) = &self.window {
+                        window.focus_window();
+                    }
+                    self.set_winit_ime_allowed(true);
                 }
+                Err(e) => eprintln!("[aterm] failed to create window: {e}"),
             }
         }
     }
 
-    fn handle_event(&mut self, event: iced::Event) {
-        if let iced::Event::Keyboard(keyboard::Event::KeyPressed {
-            key, modifiers, ..
-        }) = event
-        {
-            match key.as_ref() {
-                keyboard::Key::Character("k") if modifiers.command() => {
-                    self.palette_state.open = !self.palette_state.open;
-                    if self.palette_state.open {
-                        self.palette_state.query.clear();
-                        self.palette_state.selected = 0;
-                    }
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                if let Some(ref id) = self.workspace_id {
+                    let _ = self.pty_manager.close(id);
                 }
-                keyboard::Key::Named(keyboard::key::Named::Escape)
-                    if self.create_session_state.open =>
-                {
-                    self.create_session_state.open = false;
-                }
-                keyboard::Key::Named(keyboard::key::Named::Escape)
-                    if self.palette_state.open =>
-                {
-                    self.palette_state.open = false;
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowDown)
-                    if self.palette_state.open =>
-                {
-                    let len = CommandPalette::new(self.palette())
-                        .filtered_commands(&self.palette_state, &self.commands)
-                        .len();
-                    if len > 0 {
-                        self.palette_state.selected =
-                            (self.palette_state.selected + 1).min(len - 1);
-                    }
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowUp)
-                    if self.palette_state.open =>
-                {
-                    self.palette_state.selected =
-                        self.palette_state.selected.saturating_sub(1);
-                }
-                _ => {}
+                event_loop.exit();
             }
+
+            WindowEvent::Resized(new_size) => {
+                if new_size.width == 0 || new_size.height == 0 {
+                    return;
+                }
+                if let Some(ref mut gpu) = self.gpu {
+                    gpu.config.width = new_size.width;
+                    gpu.config.height = new_size.height;
+                    gpu.surface.configure(&gpu.device, &gpu.config);
+                }
+                if let Some(ref renderer) = self.renderer {
+                    let (cols, rows) =
+                        renderer.grid_size(new_size.width as f32, new_size.height as f32);
+                    if let Some(ref mut terminal) = self.terminal {
+                        terminal.resize(cols as usize, rows as usize);
+                    }
+                    if let Some(ref id) = self.workspace_id {
+                        let _ = self.pty_manager.resize(id, cols, rows);
+                    }
+                }
+                self.mark_dirty();
+            }
+
+            WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
+                eprintln!("[ime] Window focused={focused}");
+                if focused {
+                    self.set_winit_ime_allowed(true);
+                } else {
+                    self.flush_ime_recovery_buffer(false);
+                    self.ime_recently_disabled = false;
+                    self.ime_rearm_at = None;
+                    self.ime_recovery_until = None;
+                    self.ime_composing = false;
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.ime_marked = None;
+                        self.refresh_window_title();
+                    }
+                }
+            }
+
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } if key_event.state == ElementState::Pressed => {
+                if !self.handle_named_key(&key_event.logical_key) {
+                    if let Some(ref text) = key_event.text {
+                        let s = text.as_str();
+                        if !s.is_empty() && !self.ime_composing {
+                            if self.buffer_ime_recovery_text(s, "keyboard") {
+                                self.mark_dirty();
+                                return;
+                            }
+                            self.flush_ime_recovery_buffer(false);
+                            self.ime_recovery_until = None;
+                            self.ime_recently_disabled = false;
+                            self.write_to_pty(s);
+                        }
+                    }
+                }
+                self.mark_dirty();
+            }
+
+            WindowEvent::Ime(Ime::Enabled) => {
+                eprintln!("[ime] Enabled");
+                if self.ime_recently_disabled {
+                    self.ime_rearm_at = Some(Instant::now() + IME_REARM_DELAY);
+                    self.ime_recovery_until = Some(Instant::now() + IME_RECOVERY_WINDOW);
+                    eprintln!("[ime/recovery] scheduled after Disabled→Enabled");
+                }
+            }
+
+            WindowEvent::Ime(Ime::Preedit(ref text, _cursor)) => {
+                self.ime_composing = !text.is_empty();
+                eprintln!("[ime] Preedit: composing={} text={:?}", self.ime_composing, text);
+                #[cfg(target_os = "macos")]
+                {
+                    self.ime_marked = if text.is_empty() { None } else { Some(text.clone()) };
+                    self.refresh_window_title();
+                }
+                self.mark_dirty();
+            }
+
+            WindowEvent::Ime(Ime::Commit(ref text)) => {
+                self.ime_composing = false;
+                #[cfg(target_os = "macos")]
+                {
+                    self.ime_marked = None;
+                    self.refresh_window_title();
+                }
+                if self.buffer_ime_recovery_text(text, "commit") {
+                    self.mark_dirty();
+                    return;
+                }
+                let drop_partial = text.chars().any(is_hangul_syllable);
+                self.flush_ime_recovery_buffer(drop_partial);
+                self.ime_recovery_until = None;
+                self.ime_recently_disabled = false;
+                self.write_to_pty(text);
+                eprintln!("[ime] Commit: {:?}", text);
+                self.mark_dirty();
+            }
+
+            WindowEvent::Ime(Ime::Disabled) => {
+                self.ime_composing = false;
+                #[cfg(target_os = "macos")]
+                {
+                    self.ime_marked = None;
+                    self.refresh_window_title();
+                }
+                self.ime_recently_disabled = self.window_focused;
+                self.ime_rearm_at = None;
+                self.ime_recovery_until = Some(Instant::now() + IME_RECOVERY_WINDOW);
+                eprintln!("[ime] Disabled");
+            }
+
+            WindowEvent::RedrawRequested => {
+                self.draw();
+            }
+
+            _ => {}
         }
-    }
-
-    fn header_text(&self) -> String {
-        let active = self
-            .local_sessions
-            .iter()
-            .find(|entry| entry.id.as_ref() == self.active_workspace)
-            .map(|entry| entry.title.as_ref())
-            .unwrap_or("No session");
-
-        format!("aterm   {}   {}", active, self.status_text)
     }
 }
 
-fn pty_output_stream() -> impl iced::futures::Stream<Item = Message> {
-    iced::stream::channel(1, |mut sender: iced::futures::channel::mpsc::Sender<Message>| async move {
-        use iced::futures::SinkExt;
-        let Some(signal) = PTY_SIGNAL.get().cloned() else {
-            return;
-        };
-        loop {
-            signal.notified().await;
-            tokio::time::sleep(PTY_OUTPUT_DEBOUNCE).await;
+fn main() {
+    let event_loop = EventLoop::new().unwrap();
+    let mut app = App::new();
 
-            if PTY_DISPATCH_IN_FLIGHT.load(Ordering::Acquire) {
-                continue;
+    // Push-driven wakeup: PTY reader thread calls mark_dirty() which invokes
+    // this callback, posting an NSEvent to wake the macOS run loop immediately.
+    let proxy = event_loop.create_proxy();
+    app.pty_signal.set_wake_callback(move || {
+        let _ = proxy.send_event(());
+    });
+
+    event_loop.run_app(&mut app).unwrap();
+}
+
+fn is_hangul_syllable(ch: char) -> bool {
+    ('\u{AC00}'..='\u{D7A3}').contains(&ch)
+}
+
+fn is_hangul_jamo(ch: char) -> bool {
+    ('\u{1100}'..='\u{11FF}').contains(&ch) || ('\u{3131}'..='\u{318E}').contains(&ch)
+}
+
+fn is_all_hangul_jamo(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(is_hangul_jamo)
+}
+
+fn compose_hangul_jamo_sequence(input: &str) -> String {
+    let mut output = String::new();
+    let mut lead: Option<char> = None;
+    let mut vowel: Option<char> = None;
+    let mut trail: Option<char> = None;
+
+    let mut flush = |output: &mut String,
+                     lead: &mut Option<char>,
+                     vowel: &mut Option<char>,
+                     trail: &mut Option<char>| {
+        match (*lead, *vowel, *trail) {
+            (Some(l), Some(v), t) => {
+                if let Some(syllable) = compose_hangul_syllable(l, v, t) {
+                    output.push(syllable);
+                } else {
+                    output.push(l);
+                    output.push(v);
+                    if let Some(t) = t {
+                        output.push(t);
+                    }
+                }
             }
-
-            if !signal.take_dirty() {
-                continue;
-            }
-
-            PTY_DISPATCH_IN_FLIGHT.store(true, Ordering::Release);
-
-            if sender.send(Message::PtyDataReady).await.is_err() {
-                break;
-            }
+            (Some(l), None, _) => output.push(l),
+            (None, Some(v), _) => output.push(v),
+            _ => {}
         }
+        *lead = None;
+        *vowel = None;
+        *trail = None;
+    };
+
+    for ch in input.chars() {
+        let mapped = normalize_compat_jamo(ch).unwrap_or(ch);
+
+        if is_vowel_jamo(mapped) {
+            match (lead, vowel, trail) {
+                (Some(_), None, None) => vowel = Some(mapped),
+                (Some(_), Some(v), None) => {
+                    if let Some(compound) = combine_vowel(v, mapped) {
+                        vowel = Some(compound);
+                    } else {
+                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                        lead = Some('ㅇ');
+                        vowel = Some(mapped);
+                    }
+                }
+                (Some(l), Some(v), Some(t)) => {
+                    if let Some((left_t, next_l)) = split_trailing_for_vowel(t) {
+                        trail = left_t;
+                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                        lead = Some(next_l);
+                        vowel = Some(mapped);
+                    } else {
+                        let moved = trail.take();
+                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                        lead = moved.or(Some(l));
+                        vowel = Some(mapped);
+                    }
+                }
+                (None, None, None) => {
+                    lead = Some('ㅇ');
+                    vowel = Some(mapped);
+                }
+                _ => {
+                    flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                    lead = Some('ㅇ');
+                    vowel = Some(mapped);
+                }
+            }
+            continue;
+        }
+
+        if is_leading_jamo(mapped) {
+            match (lead, vowel, trail) {
+                (None, None, None) => lead = Some(mapped),
+                (Some(l), None, None) => {
+                    flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                    lead = Some(mapped);
+                }
+                (Some(_), Some(_), None) => {
+                    if trailing_index(mapped).is_some() {
+                        trail = Some(mapped);
+                    } else {
+                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                        lead = Some(mapped);
+                    }
+                }
+                (Some(_), Some(_), Some(t)) => {
+                    if let Some(compound) = combine_trailing(t, mapped) {
+                        trail = Some(compound);
+                    } else {
+                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                        lead = Some(mapped);
+                    }
+                }
+                _ => {
+                    flush(&mut output, &mut lead, &mut vowel, &mut trail);
+                    lead = Some(mapped);
+                }
+            }
+            continue;
+        }
+
+        flush(&mut output, &mut lead, &mut vowel, &mut trail);
+        output.push(ch);
+    }
+
+    flush(&mut output, &mut lead, &mut vowel, &mut trail);
+    output
+}
+
+fn compose_hangul_syllable(lead: char, vowel: char, trail: Option<char>) -> Option<char> {
+    let l = leading_index(lead)? as u32;
+    let v = vowel_index(vowel)? as u32;
+    let t = trail.and_then(trailing_index).unwrap_or(0) as u32;
+    char::from_u32(0xAC00 + (l * 21 + v) * 28 + t)
+}
+
+fn normalize_compat_jamo(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{1100}' => 'ㄱ',
+        '\u{1101}' => 'ㄲ',
+        '\u{1102}' => 'ㄴ',
+        '\u{1103}' => 'ㄷ',
+        '\u{1104}' => 'ㄸ',
+        '\u{1105}' => 'ㄹ',
+        '\u{1106}' => 'ㅁ',
+        '\u{1107}' => 'ㅂ',
+        '\u{1108}' => 'ㅃ',
+        '\u{1109}' => 'ㅅ',
+        '\u{110A}' => 'ㅆ',
+        '\u{110B}' => 'ㅇ',
+        '\u{110C}' => 'ㅈ',
+        '\u{110D}' => 'ㅉ',
+        '\u{110E}' => 'ㅊ',
+        '\u{110F}' => 'ㅋ',
+        '\u{1110}' => 'ㅌ',
+        '\u{1111}' => 'ㅍ',
+        '\u{1112}' => 'ㅎ',
+        '\u{1161}' => 'ㅏ',
+        '\u{1162}' => 'ㅐ',
+        '\u{1163}' => 'ㅑ',
+        '\u{1164}' => 'ㅒ',
+        '\u{1165}' => 'ㅓ',
+        '\u{1166}' => 'ㅔ',
+        '\u{1167}' => 'ㅕ',
+        '\u{1168}' => 'ㅖ',
+        '\u{1169}' => 'ㅗ',
+        '\u{116A}' => 'ㅘ',
+        '\u{116B}' => 'ㅙ',
+        '\u{116C}' => 'ㅚ',
+        '\u{116D}' => 'ㅛ',
+        '\u{116E}' => 'ㅜ',
+        '\u{116F}' => 'ㅝ',
+        '\u{1170}' => 'ㅞ',
+        '\u{1171}' => 'ㅟ',
+        '\u{1172}' => 'ㅠ',
+        '\u{1173}' => 'ㅡ',
+        '\u{1174}' => 'ㅢ',
+        '\u{1175}' => 'ㅣ',
+        '\u{11A8}' => 'ㄱ',
+        '\u{11A9}' => 'ㄲ',
+        '\u{11AA}' => 'ㄳ',
+        '\u{11AB}' => 'ㄴ',
+        '\u{11AC}' => 'ㄵ',
+        '\u{11AD}' => 'ㄶ',
+        '\u{11AE}' => 'ㄷ',
+        '\u{11AF}' => 'ㄹ',
+        '\u{11B0}' => 'ㄺ',
+        '\u{11B1}' => 'ㄻ',
+        '\u{11B2}' => 'ㄼ',
+        '\u{11B3}' => 'ㄽ',
+        '\u{11B4}' => 'ㄾ',
+        '\u{11B5}' => 'ㄿ',
+        '\u{11B6}' => 'ㅀ',
+        '\u{11B7}' => 'ㅁ',
+        '\u{11B8}' => 'ㅂ',
+        '\u{11B9}' => 'ㅄ',
+        '\u{11BA}' => 'ㅅ',
+        '\u{11BB}' => 'ㅆ',
+        '\u{11BC}' => 'ㅇ',
+        '\u{11BD}' => 'ㅈ',
+        '\u{11BE}' => 'ㅊ',
+        '\u{11BF}' => 'ㅋ',
+        '\u{11C0}' => 'ㅌ',
+        '\u{11C1}' => 'ㅍ',
+        '\u{11C2}' => 'ㅎ',
+        _ => return None,
     })
 }
 
-fn subscription(_app: &Aterm) -> Subscription<Message> {
-    Subscription::batch([
-        Subscription::run(pty_output_stream),
-        time::every(SESSION_REFRESH_INTERVAL).map(Message::Tick),
-        event::listen().map(Message::Event),
-    ])
-}
-
-fn update(app: &mut Aterm, message: Message) -> Task<Message> {
-    match message {
-        Message::PtyDataReady => {
-            match app.current_view {
-                CurrentView::Session => app.refresh_active_terminal(),
-                CurrentView::Group(_) => app.sync_group_view(),
-            }
-
-            PTY_DISPATCH_IN_FLIGHT.store(false, Ordering::Release);
-            if let Some(signal) = PTY_SIGNAL.get() {
-                if signal.has_dirty() {
-                    signal.poke();
-                }
-            }
-        }
-        Message::Tick(_now) => {
-            eprintln!("[TICK] session refresh");
-            app.refresh_sessions();
-        }
-        Message::Event(event) => app.handle_event(event),
-        Message::FontLoaded(label, result) => {
-            eprintln!("[FONT] loaded: {} ok={}", label, result.is_ok());
-            if result.is_err() {
-                app.status_text = format!("Failed to load CJK font: {label}");
-            }
-        }
-        Message::Sidebar(action) => {
-            return app.handle_sidebar(action);
-        }
-        Message::Palette(action) => app.handle_palette(action),
-        Message::Terminal(event) => app.handle_terminal(event),
-        Message::GroupGrid(action) => app.handle_group_grid(action),
-        Message::GroupTerminal(workspace_id, event) => {
-            app.handle_group_terminal(workspace_id, event)
-        }
-        Message::FolderSelected(Some(path)) => {
-            app.create_session_state.cwd = path.display().to_string();
-            app.create_session_state.open = true;
-            app.create_session_state.selected_preset = 0;
-        }
-        Message::FolderSelected(None) => {
-            // User cancelled folder selection
-        }
-        Message::CreateSession(action) => {
-            match action {
-                CreateSessionAction::Close => {
-                    app.create_session_state.open = false;
-                }
-                CreateSessionAction::SelectPreset(i) => {
-                    app.create_session_state.selected_preset = i;
-                }
-                CreateSessionAction::CustomCommandChanged(cmd) => {
-                    app.create_session_state.custom_command = cmd;
-                }
-                CreateSessionAction::CustomArgsChanged(args) => {
-                    app.create_session_state.custom_args = args;
-                }
-                CreateSessionAction::Create => {
-                    let state = &app.create_session_state;
-                    let preset = &CLI_PRESETS[state.selected_preset];
-                    let cwd = state.cwd.clone();
-                    let folder = cwd
-                        .trim_end_matches('/')
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("workspace");
-
-                    // Generate unique session ID
-                    let base_id = format!("{}-{}", folder, preset.id);
-                    let existing: std::collections::HashSet<String> = app
-                        .local_sessions
-                        .iter()
-                        .map(|s| s.id.to_string())
-                        .collect();
-                    let id = if !existing.contains(&base_id) {
-                        base_id.clone()
-                    } else {
-                        let mut n = 2;
-                        loop {
-                            let candidate = format!("{}-{}", base_id, n);
-                            if !existing.contains(&candidate) {
-                                break candidate;
-                            }
-                            n += 1;
-                        }
-                    };
-
-                    let is_custom = preset.id == "custom";
-                    let (cmd, args) = if is_custom {
-                        let cmd = state.custom_command.trim().to_string();
-                        let args: Vec<String> = state.custom_args.split_whitespace().map(|s| s.to_string()).collect();
-                        (cmd, args)
-                    } else {
-                        (preset.command.to_string(), preset.args.iter().map(|s| s.to_string()).collect())
-                    };
-                    if let Ok(mut manager) = app.manager.lock() {
-                        let _ = manager.create(
-                            id.clone(),
-                            cwd,
-                            Some(cmd),
-                            Some(args),
-                            None,
-                            None,
-                            false,
-                        );
-                    }
-
-                    app.active_workspace = id;
-                    app.current_view = CurrentView::Session;
-                    app.create_session_state.open = false;
-                    app.refresh_sessions();
-                    app.refresh_active_terminal();
-                    let _ = app.session_store.save_shared(&app.manager);
-                }
-            }
-        }
-        Message::Deliberate(action) => {
-            match action {
-                DeliberateAction::Close => {
-                    app.deliberate_state.open = false;
-                }
-                DeliberateAction::TopicChanged(topic) => {
-                    app.deliberate_state.topic = topic;
-                }
-                DeliberateAction::Submit => {
-                    let topic = app.deliberate_state.topic.trim().to_string();
-                    app.deliberate_state.open = false;
-                    if !topic.is_empty() {
-                        app.status_text = format!("Deliberation started: {}", topic);
-                        // TODO: spawn Codex + Gemini ephemeral sessions and create group
-                    }
-                }
-            }
-        }
-        Message::Settings(action) => {
-            match action {
-                SettingsAction::Close => {
-                    app.settings_state.open = false;
-                }
-                SettingsAction::SetTheme(mode) => {
-                    app.theme_mode = mode;
-                    app.settings_state.open = false;
-                    save_theme(mode);
-                    app.status_text = format!("Theme: {:?}", mode);
-                }
-            }
-        }
-        Message::RouteToWorkspace { workspace_id, text } => {
-            eprintln!("[ROUTE] inject {} bytes to '{}'", text.len(), workspace_id);
-            match app.manager.lock() {
-                Ok(manager) => {
-                    match manager.queue_inject(&workspace_id, "aterm-internal", text) {
-                        Ok(pending) => {
-                            app.status_text = format!("Queued inject to {workspace_id} ({pending} pending)");
-                        }
-                        Err(e) => {
-                            app.status_text = format!("Route failed: {e}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    app.status_text = format!("Manager lock failed: {e}");
-                }
-            }
-        }
-    }
-
-    Task::none()
-}
-
-fn view(app: &Aterm) -> Element<'_, Message> {
-    let palette = app.palette();
-    let sidebar = Sidebar::new(palette)
-        .view(SidebarModel {
-            local_sessions: &app.local_sessions,
-            telepty_sessions: &app.telepty_sessions,
-            groups: &app.groups,
-        })
-        .map(Message::Sidebar);
-
-    let header = container(
-        row![
-            row![
-                text("·⣿·").size(14).style(move |_| iced::widget::text::Style {
-                    color: Some(palette.accent),
-                }),
-                text("aterm").size(15).style(move |_| iced::widget::text::Style {
-                    color: Some(palette.text),
-                }),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            Space::new().width(Fill),
-            row![
-                container(Space::new().width(6).height(6))
-                    .width(6)
-                    .height(6)
-                    .style(palette.status_dot_style(palette.success)),
-                text("Connected").size(12).style(move |_| iced::widget::text::Style {
-                    color: Some(palette.text_muted),
-                }),
-                container(Space::new().width(1).height(16))
-                    .width(1)
-                    .height(16)
-                    .style(move |_| iced::widget::container::Style {
-                        text_color: None,
-                        background: Some(Background::Color(palette.border)),
-                        border: Border::default(),
-                        shadow: iced::Shadow::default(),
-                        snap: true,
-                    }),
-                text("⌘K").size(12).style(move |_| iced::widget::text::Style {
-                    color: Some(palette.text_muted),
-                }),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        ]
-        .align_y(Alignment::Center)
-        .padding([0, 20]),
+fn is_vowel_jamo(ch: char) -> bool {
+    matches!(
+        ch,
+        'ㅏ' | 'ㅐ' | 'ㅑ' | 'ㅒ' | 'ㅓ' | 'ㅔ' | 'ㅕ' | 'ㅖ' | 'ㅗ' | 'ㅘ' | 'ㅙ' | 'ㅚ'
+            | 'ㅛ' | 'ㅜ' | 'ㅝ' | 'ㅞ' | 'ㅟ' | 'ㅠ' | 'ㅡ' | 'ㅢ' | 'ㅣ'
     )
-    .height(48)
-    .width(Fill)
-    .style(move |_| iced::widget::container::Style {
-        text_color: Some(palette.text),
-        background: Some(Background::Color(palette.surface)),
-        border: Border {
-            width: 0.0,
-            radius: 0.0.into(),
-            color: palette.border,
-        },
-        shadow: iced::Shadow::default(),
-        snap: true,
-    });
-
-    let header_with_border = column![
-        header,
-        container(Space::new().height(1).width(Fill))
-            .height(1)
-            .width(Fill)
-            .style(move |_| iced::widget::container::Style {
-                text_color: None,
-                background: Some(Background::Color(palette.border)),
-                border: Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: true,
-            }),
-    ]
-    .width(Fill);
-
-    let content_panel: Element<'_, Message> = match &app.current_view {
-        CurrentView::Session => {
-            let active_session = app
-                .local_sessions
-                .iter()
-                .find(|session| session.id.as_ref() == app.active_workspace);
-            let session_name = active_session
-                .map(|session| session.title.to_string())
-                .unwrap_or_default();
-            let session_status = active_session
-                .map(|session| session.status)
-                .unwrap_or(SessionStatus::Unknown);
-            let session_status_label = match session_status {
-                SessionStatus::Online | SessionStatus::Running => "active",
-                SessionStatus::Busy => "busy",
-                SessionStatus::Offline => "offline",
-                SessionStatus::Stale => "stale",
-                SessionStatus::Dead => "dead",
-                SessionStatus::Unknown => "unknown",
-            };
-            let session_status_color = session_status.color(palette);
-
-            let session_header = container(
-                row![
-                    container(Space::new().width(7).height(7))
-                        .width(7)
-                        .height(7)
-                        .style(palette.status_dot_style(session_status_color)),
-                    text(session_name).size(13).style(move |_| iced::widget::text::Style {
-                        color: Some(palette.text),
-                    }),
-                    Space::new().width(Fill),
-                    text(session_status_label).size(11).style(move |_| iced::widget::text::Style {
-                        color: Some(session_status_color),
-                    }),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .padding([0, 14]),
-            )
-            .height(36)
-            .width(Fill)
-            .style(move |_| iced::widget::container::Style {
-                text_color: Some(palette.text),
-                background: Some(Background::Color(palette.surface_alt)),
-                border: Border {
-                    width: 0.0,
-                    radius: 0.0.into(),
-                    color: palette.border_subtle,
-                },
-                shadow: iced::Shadow::default(),
-                snap: true,
-            });
-
-            let term_renderer = crate::terminal::TerminalRenderer::default()
-                .with_colors(palette.text, palette.background)
-                .with_light_mode(matches!(app.theme_mode, ThemeMode::Light));
-            let terminal_container = container(
-                TerminalWidget::new(app.terminal.terminal())
-                    .with_terminal_renderer(term_renderer)
-                    .on_event(Message::Terminal),
-            )
-            .width(Fill)
-            .height(Fill)
-            .style(move |_| iced::widget::container::Style {
-                text_color: Some(palette.text),
-                background: Some(Background::Color(palette.background)),
-                border: Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: true,
-            })
-            .padding(4);
-
-            container(column![session_header, terminal_container].spacing(0).padding(0))
-                .width(Fill)
-                .height(Fill)
-                .into()
-        }
-        CurrentView::Group(_) => view_group_content(app, palette),
-    };
-
-    let base = column![
-        header_with_border,
-        row![sidebar, content_panel].width(Fill).height(Fill),
-    ]
-    .width(Fill)
-    .height(Fill);
-
-    let overlay = CommandPalette::new(palette)
-        .view(&app.palette_state, &app.commands)
-        .map(Message::Palette);
-
-    let create_dialog = CreateSessionDialog::new(palette)
-        .view(&app.create_session_state)
-        .map(Message::CreateSession);
-
-    let deliberate_dialog = DeliberateDialog::new(palette)
-        .view(&app.deliberate_state)
-        .map(Message::Deliberate);
-
-    let settings_panel = SettingsPanel::new(palette)
-        .view(&app.settings_state, app.theme_mode)
-        .map(Message::Settings);
-
-    stack([base.into(), overlay, create_dialog, deliberate_dialog, settings_panel]).into()
 }
 
-fn settings_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".aterm")
-        .join("settings.json")
-}
-
-fn load_theme() -> ThemeMode {
-    let path = settings_path();
-    let contents = std::fs::read_to_string(&path).unwrap_or_default();
-    if contents.contains("\"light\"") {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
-    }
-}
-
-fn save_theme(mode: ThemeMode) {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let value = match mode {
-        ThemeMode::Dark => r#"{"theme":"dark"}"#,
-        ThemeMode::Light => r#"{"theme":"light"}"#,
-    };
-    let _ = std::fs::write(&path, value);
-}
-
-fn current_dir_string() -> String {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("/"))
-        .display()
-        .to_string()
-}
-
-fn view_group_content(app: &Aterm, palette: Palette) -> Element<'_, Message> {
-    let Some(group_view) = app.group_view.as_ref() else {
-        return container(text("No active group")).width(Fill).height(Fill).into();
-    };
-
-    let cells = group_view
-        .members
-        .iter()
-        .map(|member| {
-            let workspace_id = member.workspace_id.clone();
-            let status = member.status.clone();
-
-            container(
-                column![
-                    row![
-                        column![
-                            text(member.title.clone()).size(14),
-                            text(member.subtitle.clone()).size(12).style(move |_| {
-                                iced::widget::text::Style {
-                                    color: Some(palette.text_muted),
-                                }
-                            }),
-                        ]
-                        .spacing(2),
-                        Space::new().width(Fill),
-                        text(status).size(11).style(move |_| {
-                            iced::widget::text::Style {
-                                color: Some(palette.text_muted),
-                            }
-                        }),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                    container({
-                        let grp_renderer = crate::terminal::TerminalRenderer::default()
-                            .with_colors(palette.text, palette.background)
-                .with_light_mode(matches!(app.theme_mode, ThemeMode::Light));
-                        TerminalWidget::new(member.terminal.terminal())
-                            .with_terminal_renderer(grp_renderer)
-                            .on_event({
-                                let workspace_id = workspace_id.clone();
-                                move |event| Message::GroupTerminal(workspace_id.clone(), event)
-                            })
-                    }
-                    )
-                    .width(Fill)
-                    .height(Fill)
-                    .style(palette.panel_style())
-                    .padding(10),
-                ]
-                .spacing(10),
-            )
-            .padding(12)
-            .width(Fill)
-            .height(Fill)
-            .style(palette.panel_style())
-            .into()
-        })
-        .collect();
-
-    container(
-        GroupGrid::new(palette).view(
-            group_view.title.as_str(),
-            group_view.topic.as_str(),
-            group_view.phase,
-            &group_view.summary,
-            cells,
-            Message::GroupGrid,
-        ),
+fn is_leading_jamo(ch: char) -> bool {
+    matches!(
+        ch,
+        'ㄱ' | 'ㄲ' | 'ㄴ' | 'ㄷ' | 'ㄸ' | 'ㄹ' | 'ㅁ' | 'ㅂ' | 'ㅃ' | 'ㅅ' | 'ㅆ' | 'ㅇ'
+            | 'ㅈ' | 'ㅉ' | 'ㅊ' | 'ㅋ' | 'ㅌ' | 'ㅍ' | 'ㅎ'
     )
-    .padding(16)
-    .width(Fill)
-    .height(Fill)
-    .into()
 }
 
-fn compact_terminal_summary(snapshot: &str) -> String {
-    let normalized = normalize_terminal_text(snapshot);
-    if normalized.is_empty() {
-        return "No visible terminal output yet.".to_string();
-    }
-
-    let mut lines = Vec::new();
-    let words = normalized.split_whitespace().collect::<Vec<_>>();
-    let mut current = String::new();
-
-    for word in words {
-        let next_len = if current.is_empty() {
-            word.len()
-        } else {
-            current.len() + 1 + word.len()
-        };
-
-        if next_len > 72 && !current.is_empty() {
-            lines.push(current);
-            current = word.to_string();
-            if lines.len() == 3 {
-                break;
-            }
-        } else {
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(word);
-        }
-    }
-
-    if lines.len() < 3 && !current.is_empty() {
-        lines.push(current);
-    }
-
-    let mut summary = lines.join("\n");
-    if normalized.len() > summary.len() {
-        summary.push_str("\n...");
-    }
-    summary
+fn leading_index(ch: char) -> Option<usize> {
+    Some(match ch {
+        'ㄱ' => 0,
+        'ㄲ' => 1,
+        'ㄴ' => 2,
+        'ㄷ' => 3,
+        'ㄸ' => 4,
+        'ㄹ' => 5,
+        'ㅁ' => 6,
+        'ㅂ' => 7,
+        'ㅃ' => 8,
+        'ㅅ' => 9,
+        'ㅆ' => 10,
+        'ㅇ' => 11,
+        'ㅈ' => 12,
+        'ㅉ' => 13,
+        'ㅊ' => 14,
+        'ㅋ' => 15,
+        'ㅌ' => 16,
+        'ㅍ' => 17,
+        'ㅎ' => 18,
+        _ => return None,
+    })
 }
 
-fn default_commands() -> Vec<CommandEntry<'static>> {
-    vec![
-        CommandEntry {
-            command: PaletteCommand::NewSession,
-            title: Cow::Borrowed("new"),
-            description: Cow::Borrowed("Create a new local session"),
-            shortcut: None,
-        },
-        CommandEntry {
-            command: PaletteCommand::Deliberate,
-            title: Cow::Borrowed("deliberate"),
-            description: Cow::Borrowed("Start a multi-agent deliberation"),
-            shortcut: Some(Cow::Borrowed("Cmd+K")),
-        },
-        CommandEntry {
-            command: PaletteCommand::Group,
-            title: Cow::Borrowed("group"),
-            description: Cow::Borrowed("Create a group from the current session list"),
-            shortcut: None,
-        },
-        CommandEntry {
-            command: PaletteCommand::Broadcast,
-            title: Cow::Borrowed("broadcast"),
-            description: Cow::Borrowed(
-                "Queue a broadcast-style inject into the active session",
-            ),
-            shortcut: None,
-        },
-        CommandEntry {
-            command: PaletteCommand::Theme(ThemeMode::Dark),
-            title: Cow::Borrowed("theme dark"),
-            description: Cow::Borrowed("Switch to the dark palette"),
-            shortcut: None,
-        },
-        CommandEntry {
-            command: PaletteCommand::Theme(ThemeMode::Light),
-            title: Cow::Borrowed("theme light"),
-            description: Cow::Borrowed("Switch to the light palette"),
-            shortcut: None,
-        },
-    ]
+fn vowel_index(ch: char) -> Option<usize> {
+    Some(match ch {
+        'ㅏ' => 0,
+        'ㅐ' => 1,
+        'ㅑ' => 2,
+        'ㅒ' => 3,
+        'ㅓ' => 4,
+        'ㅔ' => 5,
+        'ㅕ' => 6,
+        'ㅖ' => 7,
+        'ㅗ' => 8,
+        'ㅘ' => 9,
+        'ㅙ' => 10,
+        'ㅚ' => 11,
+        'ㅛ' => 12,
+        'ㅜ' => 13,
+        'ㅝ' => 14,
+        'ㅞ' => 15,
+        'ㅟ' => 16,
+        'ㅠ' => 17,
+        'ㅡ' => 18,
+        'ㅢ' => 19,
+        'ㅣ' => 20,
+        _ => return None,
+    })
 }
 
-fn display_name(cwd: &str, command: &str, args: &[String]) -> String {
-    let folder = cwd
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or("~");
-    let cli = extract_cli_name(command, args);
-    format!("{folder} · {cli}")
+fn trailing_index(ch: char) -> Option<usize> {
+    Some(match ch {
+        'ㄱ' => 1,
+        'ㄲ' => 2,
+        'ㄳ' => 3,
+        'ㄴ' => 4,
+        'ㄵ' => 5,
+        'ㄶ' => 6,
+        'ㄷ' => 7,
+        'ㄹ' => 8,
+        'ㄺ' => 9,
+        'ㄻ' => 10,
+        'ㄼ' => 11,
+        'ㄽ' => 12,
+        'ㄾ' => 13,
+        'ㄿ' => 14,
+        'ㅀ' => 15,
+        'ㅁ' => 16,
+        'ㅂ' => 17,
+        'ㅄ' => 18,
+        'ㅅ' => 19,
+        'ㅆ' => 20,
+        'ㅇ' => 21,
+        'ㅈ' => 22,
+        'ㅊ' => 23,
+        'ㅋ' => 24,
+        'ㅌ' => 25,
+        'ㅍ' => 26,
+        'ㅎ' => 27,
+        _ => return None,
+    })
 }
 
-fn extract_cli_name(command: &str, args: &[String]) -> String {
-    match basename(command) {
-        "claude" => "Claude".to_string(),
-        "codex" => "Codex".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "telepty" => extract_telepty_cli(args),
-        other => title_case_command(other),
-    }
+fn combine_vowel(first: char, second: char) -> Option<char> {
+    Some(match (first, second) {
+        ('ㅗ', 'ㅏ') => 'ㅘ',
+        ('ㅗ', 'ㅐ') => 'ㅙ',
+        ('ㅗ', 'ㅣ') => 'ㅚ',
+        ('ㅜ', 'ㅓ') => 'ㅝ',
+        ('ㅜ', 'ㅔ') => 'ㅞ',
+        ('ㅜ', 'ㅣ') => 'ㅟ',
+        ('ㅡ', 'ㅣ') => 'ㅢ',
+        _ => return None,
+    })
 }
 
-fn extract_telepty_cli(args: &[String]) -> String {
-    let mut args = args.iter();
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "allow" => continue,
-            "--id" => {
-                let _ = args.next();
-            }
-            value if value.starts_with('-') => continue,
-            value => return extract_cli_name(value, &[]),
-        }
-    }
-
-    "Shell".to_string()
+fn combine_trailing(first: char, second: char) -> Option<char> {
+    Some(match (first, second) {
+        ('ㄱ', 'ㅅ') => 'ㄳ',
+        ('ㄴ', 'ㅈ') => 'ㄵ',
+        ('ㄴ', 'ㅎ') => 'ㄶ',
+        ('ㄹ', 'ㄱ') => 'ㄺ',
+        ('ㄹ', 'ㅁ') => 'ㄻ',
+        ('ㄹ', 'ㅂ') => 'ㄼ',
+        ('ㄹ', 'ㅅ') => 'ㄽ',
+        ('ㄹ', 'ㅌ') => 'ㄾ',
+        ('ㄹ', 'ㅍ') => 'ㄿ',
+        ('ㄹ', 'ㅎ') => 'ㅀ',
+        ('ㅂ', 'ㅅ') => 'ㅄ',
+        _ => return None,
+    })
 }
 
-fn title_case_command(command: &str) -> String {
-    let name = basename(command);
-    let mut chars = name.chars();
-
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => "Shell".to_string(),
-    }
-}
-
-fn basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-fn split_command_line(command_line: &str) -> (String, Vec<String>) {
-    let mut parts = command_line.split_whitespace();
-    let command = parts.next().unwrap_or("").to_string();
-    let args = parts.map(str::to_owned).collect();
-
-    (command, args)
-}
-
-fn current_os_label() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macOS"
-    } else if cfg!(target_os = "linux") {
-        "Linux"
-    } else if cfg!(target_os = "windows") {
-        "Windows"
-    } else {
-        "Unknown"
-    }
-}
-
-fn local_session_meta() -> String {
-    format!("{} · aterm · local", current_os_label())
-}
-
-fn infer_tool(session: &TeleptySessionInfo) -> String {
-    let (command, args) = split_command_line(&session.command);
-    let mut haystack = session.id.to_lowercase();
-
-    if !command.is_empty() {
-        haystack.push(' ');
-        haystack.push_str(&command.to_lowercase());
-    }
-
-    if !args.is_empty() {
-        haystack.push(' ');
-        haystack.push_str(&args.join(" ").to_lowercase());
-    }
-
-    for tool in [
-        "cmux",
-        "kitty",
-        "tmux",
-        "aterm",
-        "claude",
-        "codex",
-        "gemini",
-    ] {
-        if haystack.contains(tool) {
-            return tool.to_string();
-        }
-    }
-
-    if !command.is_empty() {
-        return basename(&command).to_string();
-    }
-
-    "telepty".to_string()
-}
-
-fn remote_session_meta(session: &TeleptySessionInfo) -> String {
-    let host_label = if session.host.is_empty()
-        || session.host.eq_ignore_ascii_case("local")
-        || session.host.eq_ignore_ascii_case("localhost")
-    {
-        "local".to_string()
-    } else {
-        session.host.clone()
-    };
-
-    let os = if host_label == "local" {
-        current_os_label()
-    } else {
-        "Remote"
-    };
-
-    format!("{} · {} · {}", os, infer_tool(session), host_label)
-}
-
-fn system_cjk_font_tasks() -> Vec<Task<Message>> {
-    // Load only the FIRST available CJK font to save memory.
-    // Apple SD Gothic Neo alone is ~27MB; loading all 3 wastes ~74MB.
-    for (label, path) in system_cjk_font_candidates() {
-        if let Ok(bytes) = std::fs::read(path) {
-            let label = (*label).to_string();
-            eprintln!("[FONT] loading CJK font: {} ({} bytes)", label, bytes.len());
-            return vec![iced::font::load(bytes).map(move |result| {
-                Message::FontLoaded(label.clone(), result)
-            })];
-        }
-    }
-    Vec::new()
-}
-
-fn system_cjk_font_candidates() -> &'static [(&'static str, &'static str)] {
-    // Only the first available font is loaded (see system_cjk_font_tasks).
-    // Order matters: preferred font first, fallbacks after.
-    #[cfg(target_os = "macos")]
-    {
-        &[
-            ("Apple SD Gothic Neo", "/System/Library/Fonts/AppleSDGothicNeo.ttc"),
-        ]
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        &[
-            ("Noto Sans CJK KR", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-            ("Noto Sans CJK KR", "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf"),
-        ]
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        &[
-            ("Malgun Gothic", "C:\\Windows\\Fonts\\malgun.ttf"),
-        ]
-    }
-
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    )))]
-    {
-        &[]
-    }
-}
-
-fn map_local_session(workspace: &WorkspaceInfo, active: bool) -> SessionEntry<'static> {
-    SessionEntry {
-        id: Cow::Owned(workspace.id.clone()),
-        title: Cow::Owned(display_name(
-            &workspace.cwd,
-            &workspace.command,
-            &workspace.args,
-        )),
-        subtitle: Cow::Owned(local_session_meta()),
-        status: match workspace.status.as_str() {
-            "running" => SessionStatus::Running,
-            "dead" => SessionStatus::Dead,
-            _ => SessionStatus::Unknown,
-        },
-        kind: SessionKind::Local,
-        pending_injects: 0,
-        active,
-    }
-}
-
-fn map_local_session_with_injects(workspace: &WorkspaceInfo, active: bool, pending: usize) -> SessionEntry<'static> {
-    let mut entry = map_local_session(workspace, active);
-    entry.pending_injects = pending;
-    entry
-}
-
-fn map_telepty_session(session: &TeleptySessionInfo, active: bool) -> SessionEntry<'static> {
-    let (command, args) = split_command_line(&session.command);
-    let title = if !session.cwd.is_empty() && !command.is_empty() {
-        display_name(&session.cwd, &command, &args)
-    } else if !command.is_empty() {
-        extract_cli_name(&command, &args)
-    } else {
-        session.id.clone()
-    };
-
-    SessionEntry {
-        id: Cow::Owned(session.id.clone()),
-        title: Cow::Owned(title),
-        subtitle: Cow::Owned(remote_session_meta(session)),
-        status: match session.status.as_str() {
-            "active" | "online" => SessionStatus::Online,
-            "busy" => SessionStatus::Busy,
-            "offline" => SessionStatus::Offline,
-            "stale" => SessionStatus::Stale,
-            _ => SessionStatus::Unknown,
-        },
-        kind: SessionKind::Telepty,
-        pending_injects: 0,
-        active,
-    }
+fn split_trailing_for_vowel(trailing: char) -> Option<(Option<char>, char)> {
+    Some(match trailing {
+        'ㄳ' => (Some('ㄱ'), 'ㅅ'),
+        'ㄵ' => (Some('ㄴ'), 'ㅈ'),
+        'ㄶ' => (Some('ㄴ'), 'ㅎ'),
+        'ㄺ' => (Some('ㄹ'), 'ㄱ'),
+        'ㄻ' => (Some('ㄹ'), 'ㅁ'),
+        'ㄼ' => (Some('ㄹ'), 'ㅂ'),
+        'ㄽ' => (Some('ㄹ'), 'ㅅ'),
+        'ㄾ' => (Some('ㄹ'), 'ㅌ'),
+        'ㄿ' => (Some('ㄹ'), 'ㅍ'),
+        'ㅀ' => (Some('ㄹ'), 'ㅎ'),
+        'ㅄ' => (Some('ㅂ'), 'ㅅ'),
+        other if trailing_index(other).is_some() => (None, other),
+        _ => return None,
+    })
 }

@@ -1,3 +1,4 @@
+pub mod cli_presets;
 pub mod inject;
 pub mod pty;
 pub mod session;

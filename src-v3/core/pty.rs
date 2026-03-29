@@ -20,11 +20,25 @@ pub const DEFAULT_SNAPSHOT_BYTES: usize = 256 * 1024;
 const CODEX_RESUME_BUFFER_BYTES: usize = 8 * 1024;
 
 pub type SharedPtyManager = Arc<Mutex<PtyManager>>;
+pub type PtyByteQueue = Arc<Mutex<Vec<u8>>>;
 
-#[derive(Clone, Default)]
+type WakeCallback = Arc<std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>>;
+
+#[derive(Clone)]
 pub struct PtyOutputSignal {
     notify: Arc<Notify>,
     dirty: Arc<AtomicBool>,
+    wake_callback: WakeCallback,
+}
+
+impl Default for PtyOutputSignal {
+    fn default() -> Self {
+        Self {
+            notify: Arc::new(Notify::new()),
+            dirty: Arc::new(AtomicBool::new(false)),
+            wake_callback: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
 }
 
 impl PtyOutputSignal {
@@ -32,9 +46,18 @@ impl PtyOutputSignal {
         Self::default()
     }
 
+    /// Set a callback invoked on every mark_dirty() — used to wake the
+    /// platform event loop (e.g. via winit EventLoopProxy).
+    pub fn set_wake_callback(&self, cb: impl Fn() + Send + Sync + 'static) {
+        let _ = self.wake_callback.set(Box::new(cb));
+    }
+
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
         self.notify.notify_one();
+        if let Some(f) = self.wake_callback.get() {
+            f();
+        }
     }
 
     pub fn notified(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
@@ -78,6 +101,7 @@ struct Workspace {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
     buffer: Arc<Mutex<OutputBuffer>>,
+    term_bytes: PtyByteQueue,
     created_at: String,
     status: Arc<Mutex<String>>,
     inject_queue: SharedInjectQueue,
@@ -231,10 +255,12 @@ impl PtyManager {
         let master: Arc<Mutex<Box<dyn MasterPty + Send>>> = Arc::new(Mutex::new(spawned.master));
         let child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>> = Arc::new(Mutex::new(spawned.child));
         let buffer: Arc<Mutex<OutputBuffer>> = Arc::new(Mutex::new(OutputBuffer::new()));
+        let term_bytes: PtyByteQueue = Arc::new(Mutex::new(Vec::new()));
         let status: Arc<Mutex<String>> = Arc::new(Mutex::new("running".to_string()));
         let now = chrono_now();
 
         let reader_buffer = buffer.clone();
+        let reader_term_bytes = term_bytes.clone();
         let reader_status = status.clone();
         let reader_idle = idle_state.clone();
         let reader_writer = writer.clone();
@@ -254,6 +280,7 @@ impl PtyManager {
                 spawned.reader,
                 ws_id,
                 reader_buffer,
+                reader_term_bytes,
                 reader_status,
                 reader_idle,
                 reader_writer,
@@ -293,6 +320,7 @@ impl PtyManager {
             writer,
             child,
             buffer,
+            term_bytes,
             created_at: now,
             status,
             inject_queue,
@@ -448,6 +476,12 @@ impl PtyManager {
             .collect()
     }
 
+    pub fn drain_term_bytes(&self, id: &str) -> Result<Vec<u8>, String> {
+        let ws = self.workspace(id)?;
+        let mut queue = ws.term_bytes.lock().map_err(|e| e.to_string())?;
+        Ok(std::mem::take(&mut *queue))
+    }
+
     fn workspace(&self, id: &str) -> Result<&Workspace, String> {
         self.workspaces
             .get(id)
@@ -503,6 +537,7 @@ fn try_restart_workspace(
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     child: &Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
     buffer: &Arc<Mutex<OutputBuffer>>,
+    term_bytes: &PtyByteQueue,
     status: &Arc<Mutex<String>>,
     idle_state: &Arc<Mutex<IdleState>>,
     inject_queue: &SharedInjectQueue,
@@ -541,6 +576,9 @@ fn try_restart_workspace(
     if let Ok(mut b) = buffer.lock() {
         b.clear();
     }
+    if let Ok(mut tb) = term_bytes.lock() {
+        tb.clear();
+    }
     if let Ok(mut idle) = idle_state.lock() {
         *idle = IdleState::new();
     }
@@ -550,6 +588,7 @@ fn try_restart_workspace(
 
     // Spawn new reader thread
     let reader_buffer = buffer.clone();
+    let reader_term_bytes = term_bytes.clone();
     let reader_status = status.clone();
     let reader_idle = idle_state.clone();
     let reader_writer = writer.clone();
@@ -569,6 +608,7 @@ fn try_restart_workspace(
             spawned.reader,
             ws_id_clone,
             reader_buffer,
+            reader_term_bytes,
             reader_status,
             reader_idle,
             reader_writer,
@@ -603,6 +643,7 @@ fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     ws_id: String,
     buffer: Arc<Mutex<OutputBuffer>>,
+    term_bytes: PtyByteQueue,
     status: Arc<Mutex<String>>,
     idle_state: Arc<Mutex<IdleState>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -642,6 +683,9 @@ fn reader_loop(
 
                 if let Ok(mut b) = buffer.lock() {
                     b.push(data.clone());
+                }
+                if let Ok(mut tb) = term_bytes.lock() {
+                    tb.extend_from_slice(data.as_bytes());
                 }
                 signal.mark_dirty();
 
@@ -694,7 +738,7 @@ fn reader_loop(
         let restarted = try_restart_workspace(
             &ws_id, &cwd, &command, &args,
             &size, &master, &writer, &child,
-            &buffer, &status, &idle_state, &inject_queue, &signal,
+            &buffer, &term_bytes, &status, &idle_state, &inject_queue, &signal,
         );
         if restarted {
             return; // New reader thread is running
