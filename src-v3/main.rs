@@ -21,7 +21,6 @@ use crate::terminal::TerminalState;
 /// 60fps is sufficient for a terminal.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const IME_REARM_DELAY: Duration = Duration::from_millis(30);
-const IME_RECOVERY_WINDOW: Duration = Duration::from_millis(500);
 
 struct GpuState {
     surface: wgpu::Surface<'static>,
@@ -54,8 +53,6 @@ struct App {
     ime_composing: bool,
     ime_recently_disabled: bool,
     ime_rearm_at: Option<Instant>,
-    ime_recovery_until: Option<Instant>,
-    ime_recovery_buffer: String,
 }
 
 impl App {
@@ -83,8 +80,6 @@ impl App {
             ime_composing: false,
             ime_recently_disabled: false,
             ime_rearm_at: None,
-            ime_recovery_until: None,
-            ime_recovery_buffer: String::new(),
         }
     }
 
@@ -214,8 +209,6 @@ impl App {
             Key::Named(NamedKey::PageDown) => "\x1b[6~",
             _ => return false,
         };
-        self.flush_ime_recovery_buffer(false);
-        self.ime_recovery_until = None;
         self.write_to_pty(bytes);
         true
     }
@@ -299,48 +292,20 @@ impl App {
         if let Some(rearm_at) = self.ime_rearm_at {
             if now >= rearm_at && self.window_focused {
                 self.ime_rearm_at = None;
+                self.ime_recently_disabled = false;
                 self.set_winit_ime_allowed(false);
                 self.set_winit_ime_allowed(true);
                 eprintln!("[ime/recovery] rearmed after Disabled→Enabled");
             }
         }
-
-        if let Some(until) = self.ime_recovery_until {
-            if now >= until && !self.ime_composing {
-                self.flush_ime_recovery_buffer(false);
-                self.ime_recovery_until = None;
-                self.ime_recently_disabled = false;
-            }
-        }
     }
 
-    fn buffer_ime_recovery_text(&mut self, text: &str, source: &str) -> bool {
-        if self.ime_recovery_until.is_none() || !is_all_hangul_jamo(text) {
-            return false;
-        }
-
-        self.ime_recovery_buffer.push_str(text);
-        self.ime_recovery_until = Some(Instant::now() + IME_RECOVERY_WINDOW);
-        eprintln!("[ime/recovery] buffered {source}: {:?}", text);
-        true
-    }
-
-    fn flush_ime_recovery_buffer(&mut self, drop_partial: bool) {
-        if self.ime_recovery_buffer.is_empty() {
-            return;
-        }
-
-        let pending = std::mem::take(&mut self.ime_recovery_buffer);
-        let recovered = compose_hangul_jamo_sequence(&pending);
-        let has_syllable = recovered.chars().any(is_hangul_syllable);
-
-        if has_syllable || !drop_partial {
-            if !recovered.is_empty() {
-                eprintln!("[ime/recovery] flush {:?} -> {:?}", pending, recovered);
-                self.write_to_pty(&recovered);
-            }
-        } else {
-            eprintln!("[ime/recovery] drop partial {:?}", pending);
+    fn clear_ime_preedit_state(&mut self) {
+        self.ime_composing = false;
+        #[cfg(target_os = "macos")]
+        {
+            self.ime_marked = None;
+            self.refresh_window_title();
         }
     }
 
@@ -525,16 +490,9 @@ impl ApplicationHandler for App {
                 if focused {
                     self.set_winit_ime_allowed(true);
                 } else {
-                    self.flush_ime_recovery_buffer(false);
                     self.ime_recently_disabled = false;
                     self.ime_rearm_at = None;
-                    self.ime_recovery_until = None;
-                    self.ime_composing = false;
-                    #[cfg(target_os = "macos")]
-                    {
-                        self.ime_marked = None;
-                        self.refresh_window_title();
-                    }
+                    self.clear_ime_preedit_state();
                 }
             }
 
@@ -545,12 +503,6 @@ impl ApplicationHandler for App {
                     if let Some(ref text) = key_event.text {
                         let s = text.as_str();
                         if !s.is_empty() && !self.ime_composing {
-                            if self.buffer_ime_recovery_text(s, "keyboard") {
-                                self.mark_dirty();
-                                return;
-                            }
-                            self.flush_ime_recovery_buffer(false);
-                            self.ime_recovery_until = None;
                             self.ime_recently_disabled = false;
                             self.write_to_pty(s);
                         }
@@ -563,7 +515,6 @@ impl ApplicationHandler for App {
                 eprintln!("[ime] Enabled");
                 if self.ime_recently_disabled {
                     self.ime_rearm_at = Some(Instant::now() + IME_REARM_DELAY);
-                    self.ime_recovery_until = Some(Instant::now() + IME_RECOVERY_WINDOW);
                     eprintln!("[ime/recovery] scheduled after Disabled→Enabled");
                 }
             }
@@ -580,19 +531,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Ime(Ime::Commit(ref text)) => {
-                self.ime_composing = false;
-                #[cfg(target_os = "macos")]
-                {
-                    self.ime_marked = None;
-                    self.refresh_window_title();
-                }
-                if self.buffer_ime_recovery_text(text, "commit") {
-                    self.mark_dirty();
-                    return;
-                }
-                let drop_partial = text.chars().any(is_hangul_syllable);
-                self.flush_ime_recovery_buffer(drop_partial);
-                self.ime_recovery_until = None;
+                self.clear_ime_preedit_state();
                 self.ime_recently_disabled = false;
                 self.write_to_pty(text);
                 eprintln!("[ime] Commit: {:?}", text);
@@ -600,15 +539,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Ime(Ime::Disabled) => {
-                self.ime_composing = false;
-                #[cfg(target_os = "macos")]
-                {
-                    self.ime_marked = None;
-                    self.refresh_window_title();
-                }
+                self.clear_ime_preedit_state();
                 self.ime_recently_disabled = self.window_focused;
                 self.ime_rearm_at = None;
-                self.ime_recovery_until = Some(Instant::now() + IME_RECOVERY_WINDOW);
                 eprintln!("[ime] Disabled");
             }
 
@@ -633,356 +566,4 @@ fn main() {
     });
 
     event_loop.run_app(&mut app).unwrap();
-}
-
-fn is_hangul_syllable(ch: char) -> bool {
-    ('\u{AC00}'..='\u{D7A3}').contains(&ch)
-}
-
-fn is_hangul_jamo(ch: char) -> bool {
-    ('\u{1100}'..='\u{11FF}').contains(&ch) || ('\u{3131}'..='\u{318E}').contains(&ch)
-}
-
-fn is_all_hangul_jamo(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(is_hangul_jamo)
-}
-
-fn compose_hangul_jamo_sequence(input: &str) -> String {
-    let mut output = String::new();
-    let mut lead: Option<char> = None;
-    let mut vowel: Option<char> = None;
-    let mut trail: Option<char> = None;
-
-    let mut flush = |output: &mut String,
-                     lead: &mut Option<char>,
-                     vowel: &mut Option<char>,
-                     trail: &mut Option<char>| {
-        match (*lead, *vowel, *trail) {
-            (Some(l), Some(v), t) => {
-                if let Some(syllable) = compose_hangul_syllable(l, v, t) {
-                    output.push(syllable);
-                } else {
-                    output.push(l);
-                    output.push(v);
-                    if let Some(t) = t {
-                        output.push(t);
-                    }
-                }
-            }
-            (Some(l), None, _) => output.push(l),
-            (None, Some(v), _) => output.push(v),
-            _ => {}
-        }
-        *lead = None;
-        *vowel = None;
-        *trail = None;
-    };
-
-    for ch in input.chars() {
-        let mapped = normalize_compat_jamo(ch).unwrap_or(ch);
-
-        if is_vowel_jamo(mapped) {
-            match (lead, vowel, trail) {
-                (Some(_), None, None) => vowel = Some(mapped),
-                (Some(_), Some(v), None) => {
-                    if let Some(compound) = combine_vowel(v, mapped) {
-                        vowel = Some(compound);
-                    } else {
-                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                        lead = Some('ㅇ');
-                        vowel = Some(mapped);
-                    }
-                }
-                (Some(l), Some(v), Some(t)) => {
-                    if let Some((left_t, next_l)) = split_trailing_for_vowel(t) {
-                        trail = left_t;
-                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                        lead = Some(next_l);
-                        vowel = Some(mapped);
-                    } else {
-                        let moved = trail.take();
-                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                        lead = moved.or(Some(l));
-                        vowel = Some(mapped);
-                    }
-                }
-                (None, None, None) => {
-                    lead = Some('ㅇ');
-                    vowel = Some(mapped);
-                }
-                _ => {
-                    flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                    lead = Some('ㅇ');
-                    vowel = Some(mapped);
-                }
-            }
-            continue;
-        }
-
-        if is_leading_jamo(mapped) {
-            match (lead, vowel, trail) {
-                (None, None, None) => lead = Some(mapped),
-                (Some(l), None, None) => {
-                    flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                    lead = Some(mapped);
-                }
-                (Some(_), Some(_), None) => {
-                    if trailing_index(mapped).is_some() {
-                        trail = Some(mapped);
-                    } else {
-                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                        lead = Some(mapped);
-                    }
-                }
-                (Some(_), Some(_), Some(t)) => {
-                    if let Some(compound) = combine_trailing(t, mapped) {
-                        trail = Some(compound);
-                    } else {
-                        flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                        lead = Some(mapped);
-                    }
-                }
-                _ => {
-                    flush(&mut output, &mut lead, &mut vowel, &mut trail);
-                    lead = Some(mapped);
-                }
-            }
-            continue;
-        }
-
-        flush(&mut output, &mut lead, &mut vowel, &mut trail);
-        output.push(ch);
-    }
-
-    flush(&mut output, &mut lead, &mut vowel, &mut trail);
-    output
-}
-
-fn compose_hangul_syllable(lead: char, vowel: char, trail: Option<char>) -> Option<char> {
-    let l = leading_index(lead)? as u32;
-    let v = vowel_index(vowel)? as u32;
-    let t = trail.and_then(trailing_index).unwrap_or(0) as u32;
-    char::from_u32(0xAC00 + (l * 21 + v) * 28 + t)
-}
-
-fn normalize_compat_jamo(ch: char) -> Option<char> {
-    Some(match ch {
-        '\u{1100}' => 'ㄱ',
-        '\u{1101}' => 'ㄲ',
-        '\u{1102}' => 'ㄴ',
-        '\u{1103}' => 'ㄷ',
-        '\u{1104}' => 'ㄸ',
-        '\u{1105}' => 'ㄹ',
-        '\u{1106}' => 'ㅁ',
-        '\u{1107}' => 'ㅂ',
-        '\u{1108}' => 'ㅃ',
-        '\u{1109}' => 'ㅅ',
-        '\u{110A}' => 'ㅆ',
-        '\u{110B}' => 'ㅇ',
-        '\u{110C}' => 'ㅈ',
-        '\u{110D}' => 'ㅉ',
-        '\u{110E}' => 'ㅊ',
-        '\u{110F}' => 'ㅋ',
-        '\u{1110}' => 'ㅌ',
-        '\u{1111}' => 'ㅍ',
-        '\u{1112}' => 'ㅎ',
-        '\u{1161}' => 'ㅏ',
-        '\u{1162}' => 'ㅐ',
-        '\u{1163}' => 'ㅑ',
-        '\u{1164}' => 'ㅒ',
-        '\u{1165}' => 'ㅓ',
-        '\u{1166}' => 'ㅔ',
-        '\u{1167}' => 'ㅕ',
-        '\u{1168}' => 'ㅖ',
-        '\u{1169}' => 'ㅗ',
-        '\u{116A}' => 'ㅘ',
-        '\u{116B}' => 'ㅙ',
-        '\u{116C}' => 'ㅚ',
-        '\u{116D}' => 'ㅛ',
-        '\u{116E}' => 'ㅜ',
-        '\u{116F}' => 'ㅝ',
-        '\u{1170}' => 'ㅞ',
-        '\u{1171}' => 'ㅟ',
-        '\u{1172}' => 'ㅠ',
-        '\u{1173}' => 'ㅡ',
-        '\u{1174}' => 'ㅢ',
-        '\u{1175}' => 'ㅣ',
-        '\u{11A8}' => 'ㄱ',
-        '\u{11A9}' => 'ㄲ',
-        '\u{11AA}' => 'ㄳ',
-        '\u{11AB}' => 'ㄴ',
-        '\u{11AC}' => 'ㄵ',
-        '\u{11AD}' => 'ㄶ',
-        '\u{11AE}' => 'ㄷ',
-        '\u{11AF}' => 'ㄹ',
-        '\u{11B0}' => 'ㄺ',
-        '\u{11B1}' => 'ㄻ',
-        '\u{11B2}' => 'ㄼ',
-        '\u{11B3}' => 'ㄽ',
-        '\u{11B4}' => 'ㄾ',
-        '\u{11B5}' => 'ㄿ',
-        '\u{11B6}' => 'ㅀ',
-        '\u{11B7}' => 'ㅁ',
-        '\u{11B8}' => 'ㅂ',
-        '\u{11B9}' => 'ㅄ',
-        '\u{11BA}' => 'ㅅ',
-        '\u{11BB}' => 'ㅆ',
-        '\u{11BC}' => 'ㅇ',
-        '\u{11BD}' => 'ㅈ',
-        '\u{11BE}' => 'ㅊ',
-        '\u{11BF}' => 'ㅋ',
-        '\u{11C0}' => 'ㅌ',
-        '\u{11C1}' => 'ㅍ',
-        '\u{11C2}' => 'ㅎ',
-        _ => return None,
-    })
-}
-
-fn is_vowel_jamo(ch: char) -> bool {
-    matches!(
-        ch,
-        'ㅏ' | 'ㅐ' | 'ㅑ' | 'ㅒ' | 'ㅓ' | 'ㅔ' | 'ㅕ' | 'ㅖ' | 'ㅗ' | 'ㅘ' | 'ㅙ' | 'ㅚ'
-            | 'ㅛ' | 'ㅜ' | 'ㅝ' | 'ㅞ' | 'ㅟ' | 'ㅠ' | 'ㅡ' | 'ㅢ' | 'ㅣ'
-    )
-}
-
-fn is_leading_jamo(ch: char) -> bool {
-    matches!(
-        ch,
-        'ㄱ' | 'ㄲ' | 'ㄴ' | 'ㄷ' | 'ㄸ' | 'ㄹ' | 'ㅁ' | 'ㅂ' | 'ㅃ' | 'ㅅ' | 'ㅆ' | 'ㅇ'
-            | 'ㅈ' | 'ㅉ' | 'ㅊ' | 'ㅋ' | 'ㅌ' | 'ㅍ' | 'ㅎ'
-    )
-}
-
-fn leading_index(ch: char) -> Option<usize> {
-    Some(match ch {
-        'ㄱ' => 0,
-        'ㄲ' => 1,
-        'ㄴ' => 2,
-        'ㄷ' => 3,
-        'ㄸ' => 4,
-        'ㄹ' => 5,
-        'ㅁ' => 6,
-        'ㅂ' => 7,
-        'ㅃ' => 8,
-        'ㅅ' => 9,
-        'ㅆ' => 10,
-        'ㅇ' => 11,
-        'ㅈ' => 12,
-        'ㅉ' => 13,
-        'ㅊ' => 14,
-        'ㅋ' => 15,
-        'ㅌ' => 16,
-        'ㅍ' => 17,
-        'ㅎ' => 18,
-        _ => return None,
-    })
-}
-
-fn vowel_index(ch: char) -> Option<usize> {
-    Some(match ch {
-        'ㅏ' => 0,
-        'ㅐ' => 1,
-        'ㅑ' => 2,
-        'ㅒ' => 3,
-        'ㅓ' => 4,
-        'ㅔ' => 5,
-        'ㅕ' => 6,
-        'ㅖ' => 7,
-        'ㅗ' => 8,
-        'ㅘ' => 9,
-        'ㅙ' => 10,
-        'ㅚ' => 11,
-        'ㅛ' => 12,
-        'ㅜ' => 13,
-        'ㅝ' => 14,
-        'ㅞ' => 15,
-        'ㅟ' => 16,
-        'ㅠ' => 17,
-        'ㅡ' => 18,
-        'ㅢ' => 19,
-        'ㅣ' => 20,
-        _ => return None,
-    })
-}
-
-fn trailing_index(ch: char) -> Option<usize> {
-    Some(match ch {
-        'ㄱ' => 1,
-        'ㄲ' => 2,
-        'ㄳ' => 3,
-        'ㄴ' => 4,
-        'ㄵ' => 5,
-        'ㄶ' => 6,
-        'ㄷ' => 7,
-        'ㄹ' => 8,
-        'ㄺ' => 9,
-        'ㄻ' => 10,
-        'ㄼ' => 11,
-        'ㄽ' => 12,
-        'ㄾ' => 13,
-        'ㄿ' => 14,
-        'ㅀ' => 15,
-        'ㅁ' => 16,
-        'ㅂ' => 17,
-        'ㅄ' => 18,
-        'ㅅ' => 19,
-        'ㅆ' => 20,
-        'ㅇ' => 21,
-        'ㅈ' => 22,
-        'ㅊ' => 23,
-        'ㅋ' => 24,
-        'ㅌ' => 25,
-        'ㅍ' => 26,
-        'ㅎ' => 27,
-        _ => return None,
-    })
-}
-
-fn combine_vowel(first: char, second: char) -> Option<char> {
-    Some(match (first, second) {
-        ('ㅗ', 'ㅏ') => 'ㅘ',
-        ('ㅗ', 'ㅐ') => 'ㅙ',
-        ('ㅗ', 'ㅣ') => 'ㅚ',
-        ('ㅜ', 'ㅓ') => 'ㅝ',
-        ('ㅜ', 'ㅔ') => 'ㅞ',
-        ('ㅜ', 'ㅣ') => 'ㅟ',
-        ('ㅡ', 'ㅣ') => 'ㅢ',
-        _ => return None,
-    })
-}
-
-fn combine_trailing(first: char, second: char) -> Option<char> {
-    Some(match (first, second) {
-        ('ㄱ', 'ㅅ') => 'ㄳ',
-        ('ㄴ', 'ㅈ') => 'ㄵ',
-        ('ㄴ', 'ㅎ') => 'ㄶ',
-        ('ㄹ', 'ㄱ') => 'ㄺ',
-        ('ㄹ', 'ㅁ') => 'ㄻ',
-        ('ㄹ', 'ㅂ') => 'ㄼ',
-        ('ㄹ', 'ㅅ') => 'ㄽ',
-        ('ㄹ', 'ㅌ') => 'ㄾ',
-        ('ㄹ', 'ㅍ') => 'ㄿ',
-        ('ㄹ', 'ㅎ') => 'ㅀ',
-        ('ㅂ', 'ㅅ') => 'ㅄ',
-        _ => return None,
-    })
-}
-
-fn split_trailing_for_vowel(trailing: char) -> Option<(Option<char>, char)> {
-    Some(match trailing {
-        'ㄳ' => (Some('ㄱ'), 'ㅅ'),
-        'ㄵ' => (Some('ㄴ'), 'ㅈ'),
-        'ㄶ' => (Some('ㄴ'), 'ㅎ'),
-        'ㄺ' => (Some('ㄹ'), 'ㄱ'),
-        'ㄻ' => (Some('ㄹ'), 'ㅁ'),
-        'ㄼ' => (Some('ㄹ'), 'ㅂ'),
-        'ㄽ' => (Some('ㄹ'), 'ㅅ'),
-        'ㄾ' => (Some('ㄹ'), 'ㅌ'),
-        'ㄿ' => (Some('ㄹ'), 'ㅍ'),
-        'ㅀ' => (Some('ㄹ'), 'ㅎ'),
-        'ㅄ' => (Some('ㅂ'), 'ㅅ'),
-        other if trailing_index(other).is_some() => (None, other),
-        _ => return None,
-    })
 }
