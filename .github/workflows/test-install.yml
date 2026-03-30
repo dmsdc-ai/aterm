@@ -49,8 +49,9 @@ jobs:
           ATERM_PREFIX: ${{ runner.temp }}/aterm-prefix
         run: |
           set -euo pipefail
+          VERSION=$(node -p "require('./npm/aterm/package.json').version")
           mkdir -p "$ATERM_HOME" "$ATERM_PREFIX"
-          script -q /dev/null bash -lc "set -euo pipefail; HOME='$ATERM_HOME' npm install -g --prefix '$ATERM_PREFIX' '$GITHUB_WORKSPACE/npm/aterm-darwin-arm64/dmsdc-ai-aterm-darwin-arm64-0.1.4.tgz' '$GITHUB_WORKSPACE/npm/aterm/dmsdc-ai-aterm-0.1.4.tgz'"
+          script -q /dev/null bash -lc "set -euo pipefail; HOME='$ATERM_HOME' npm install -g --prefix '$ATERM_PREFIX' '$GITHUB_WORKSPACE/npm/aterm-darwin-arm64/dmsdc-ai-aterm-darwin-arm64-${VERSION}.tgz' '$GITHUB_WORKSPACE/npm/aterm/dmsdc-ai-aterm-${VERSION}.tgz'"
 
       - name: Verify user layout
         env:
@@ -73,6 +74,7 @@ jobs:
           ATERM_PREFIX: ${{ runner.temp }}/aterm-prefix
         run: |
           set -euo pipefail
+          EXPECTED=$(node -p "require('./npm/aterm/package.json').version")
           test -x "$ATERM_PREFIX/bin/aterm"
           version="$(HOME="$ATERM_HOME" "$ATERM_PREFIX/bin/aterm" --version)"
-          test "$version" = "0.1.4"
+          test "$version" = "$EXPECTED"
