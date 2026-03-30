@@ -14,6 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var processPollTimer: Timer?
     private var managedWorkspaces: [UUID: ManagedWorkspace] = [:]
     private var workspaceOrder: [UUID] = []
+    private var excludedChildPIDs: Set<Int32> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureTeleptyDaemon()
@@ -390,7 +391,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             do {
                 try process.run()
-                NSLog("[aterm] telepty daemon started (pid %d)", process.processIdentifier)
+                let daemonPID = process.processIdentifier
+                NSLog("[aterm] telepty daemon started (pid %d)", daemonPID)
+                DispatchQueue.main.async { [weak self] in
+                    self?.excludedChildPIDs.insert(daemonPID)
+                }
             } catch {
                 NSLog("[aterm] failed to start telepty daemon: %@", error.localizedDescription)
             }
@@ -618,6 +623,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let candidates = currentChildren
                 .subtracting(workspace.baselineChildPIDs)
                 .subtracting(assignedRootPIDs)
+                .subtracting(excludedChildPIDs)
             if let candidate = candidates.max() {
                 workspace.rootProcessID = candidate
                 assignedRootPIDs.insert(candidate)

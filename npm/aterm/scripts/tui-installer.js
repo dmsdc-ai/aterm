@@ -48,6 +48,9 @@ async function showInfoScreen(blessed, title, lines, footer) {
   screen.render();
   await waitForKeypress(screen);
   screen.destroy();
+  // Reset terminal modes that blessed may leave set (DECCKM, keypad)
+  // so that subsequent prompts receive normal arrow key sequences.
+  process.stdout.write('\x1b[?1l\x1b>');
 }
 
 function buildWorkspaceChoices(context) {
@@ -259,6 +262,7 @@ export async function showProgressScreen(runSteps) {
   await runSteps(report);
   await new Promise(resolve => setTimeout(resolve, 250));
   screen.destroy();
+  process.stdout.write('\x1b[?1l\x1b>');
 }
 
 export async function showDoneScreen(summaryLines) {

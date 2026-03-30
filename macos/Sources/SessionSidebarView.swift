@@ -32,14 +32,14 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
         case .zsh:
             return nil
         case .claude:
-            return "exec claude --dangerously-skip-permissions --continue"
+            return "claude --dangerously-skip-permissions --continue"
         case .codex:
-            return "exec codex resume --last --dangerously-bypass-approvals-and-sandbox"
+            return "codex resume --last --dangerously-bypass-approvals-and-sandbox"
         case .gemini:
-            return "exec gemini resume -y"
+            return "gemini resume -y"
         case .custom:
             let trimmed = customCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : "exec \(trimmed)"
+            return trimmed.isEmpty ? nil : trimmed
         }
     }
 
