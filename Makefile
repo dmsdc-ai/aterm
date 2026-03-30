@@ -1,4 +1,4 @@
-.PHONY: all clean run rust swift app
+.PHONY: all clean run run-dev rust swift app install dist uninstall
 
 # Paths
 ROOT := $(shell pwd)
@@ -7,6 +7,10 @@ MACOS_DIR := $(ROOT)/macos
 BUILD_DIR := $(ROOT)/build
 APP_DIR := $(BUILD_DIR)/aterm.app/Contents
 TARGET_DIR := $(ROOT)/target/release
+INSTALL_ROOT := $(HOME)/Applications
+INSTALL_APP := $(INSTALL_ROOT)/aterm.app
+DIST_ZIP := $(BUILD_DIR)/aterm.zip
+GOTOOLCHAIN := go1.20.14
 
 # Rust
 DYLIB := $(TARGET_DIR)/libaterm_core.dylib
@@ -19,7 +23,7 @@ all: app
 
 # Step 1: Build Rust cdylib
 rust:
-	cd $(CORE_DIR) && cargo build --release
+	cd $(CORE_DIR) && GOTOOLCHAIN=$(GOTOOLCHAIN) cargo build --release
 	@echo "[build] Rust cdylib built: $(DYLIB)"
 
 # Step 2: Compile Swift
@@ -80,6 +84,25 @@ run: app
 # Run without .app bundle (faster for dev)
 run-dev: swift
 	DYLD_LIBRARY_PATH=$(TARGET_DIR) $(BUILD_DIR)/aterm
+
+# Install app bundle for local use
+install: app
+	@mkdir -p $(INSTALL_ROOT)
+	rm -rf $(INSTALL_APP)
+	cp -R $(BUILD_DIR)/aterm.app $(INSTALL_APP)
+	codesign --force --deep --sign - $(INSTALL_APP)
+	@echo "[install] App installed: $(INSTALL_APP)"
+
+# Create zip archive for internal sharing
+dist: app
+	rm -f $(DIST_ZIP)
+	ditto -c -k --keepParent $(BUILD_DIR)/aterm.app $(DIST_ZIP)
+	@echo "[dist] Archive created: $(DIST_ZIP)"
+
+# Remove locally installed app bundle
+uninstall:
+	rm -rf $(INSTALL_APP)
+	@echo "[uninstall] Removed: $(INSTALL_APP)"
 
 # Clean
 clean:

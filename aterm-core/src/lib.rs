@@ -1,13 +1,14 @@
-pub mod renderer;
-pub mod terminal;
-pub mod pty;
-pub mod inject;
-pub mod session;
-pub mod telepty;
 pub mod cli_presets;
+pub mod inject;
+pub mod pty;
+pub mod renderer;
+pub mod session;
+pub mod tailscale;
+pub mod telepty;
+pub mod terminal;
 
 use std::ffi::{c_char, c_void, CStr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::pty::{PtyManager, PtyOutputSignal};
@@ -86,9 +87,7 @@ impl AtermCore {
             use raw_window_handle::{
                 AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle,
             };
-            let window_handle = AppKitWindowHandle::new(
-                std::ptr::NonNull::new(ns_view).unwrap(),
-            );
+            let window_handle = AppKitWindowHandle::new(std::ptr::NonNull::new(ns_view).unwrap());
             let display_handle = AppKitDisplayHandle::new();
             let raw_window = RawWindowHandle::AppKit(window_handle);
             let raw_display = RawDisplayHandle::AppKit(display_handle);
@@ -227,8 +226,12 @@ impl AtermCore {
     }
 
     fn sync_pty(&mut self) {
-        let Some(ref id) = self.workspace_id else { return };
-        let Some(ref mut terminal) = self.terminal else { return };
+        let Some(ref id) = self.workspace_id else {
+            return;
+        };
+        let Some(ref mut terminal) = self.terminal else {
+            return;
+        };
 
         match self.pty_manager.drain_term_bytes(id) {
             Ok(bytes) if !bytes.is_empty() => terminal.advance(&bytes),
@@ -257,11 +260,20 @@ impl AtermCore {
             }
         };
 
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let shared = terminal.terminal();
         if let Ok(term) = shared.lock() {
-            renderer.render(&term, &gpu.device, &gpu.queue, &view, gpu.config.width, gpu.config.height);
+            renderer.render(
+                &term,
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                gpu.config.width,
+                gpu.config.height,
+            );
         }
 
         output.present();
@@ -288,8 +300,8 @@ impl AtermCore {
     }
 
     fn selection_start(&mut self, col: usize, line: i32, side: u8) {
-        use alacritty_terminal::selection::{Selection, SelectionType};
         use alacritty_terminal::index::{Column, Line, Point};
+        use alacritty_terminal::selection::{Selection, SelectionType};
 
         if let Some(ref mut terminal) = self.terminal {
             let s = if side == 0 {
@@ -363,7 +375,9 @@ pub unsafe extern "C" fn aterm_core_init_gpu(
     height: u32,
     scale: f32,
 ) -> i32 {
-    if core.is_null() { return -1; }
+    if core.is_null() {
+        return -1;
+    }
     (*core).init_gpu(ns_view, width, height, scale)
 }
 
@@ -374,7 +388,9 @@ pub unsafe extern "C" fn aterm_core_spawn_shell(
     cols: u16,
     rows: u16,
 ) -> i32 {
-    if core.is_null() || cwd.is_null() { return -1; }
+    if core.is_null() || cwd.is_null() {
+        return -1;
+    }
     let cwd_str = CStr::from_ptr(cwd).to_string_lossy();
     (*core).spawn_shell(&cwd_str, cols, rows)
 }
@@ -385,7 +401,9 @@ pub unsafe extern "C" fn aterm_core_write_pty(
     text: *const c_char,
     len: usize,
 ) {
-    if core.is_null() || text.is_null() { return; }
+    if core.is_null() || text.is_null() {
+        return;
+    }
     let slice = std::slice::from_raw_parts(text as *const u8, len);
     if let Ok(s) = std::str::from_utf8(slice) {
         (*core).write_pty(s);
@@ -394,19 +412,25 @@ pub unsafe extern "C" fn aterm_core_write_pty(
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_named_key(core: *mut AtermCore, key_code: u32) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     (*core).named_key(key_code);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_render(core: *mut AtermCore) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     (*core).render();
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_resize(core: *mut AtermCore, width: u32, height: u32) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     (*core).resize(width, height);
 }
 
@@ -418,17 +442,25 @@ pub unsafe extern "C" fn aterm_core_grid_size(
     out_cols: *mut u16,
     out_rows: *mut u16,
 ) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     if let Some(ref renderer) = (*core).renderer {
         let (cols, rows) = renderer.grid_size(width, height);
-        if !out_cols.is_null() { *out_cols = cols; }
-        if !out_rows.is_null() { *out_rows = rows; }
+        if !out_cols.is_null() {
+            *out_cols = cols;
+        }
+        if !out_rows.is_null() {
+            *out_rows = rows;
+        }
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_take_dirty(core: *mut AtermCore) -> i32 {
-    if core.is_null() { return 0; }
+    if core.is_null() {
+        return 0;
+    }
     (*core).pty_signal.take_dirty() as i32
 }
 
@@ -438,55 +470,79 @@ pub unsafe extern "C" fn aterm_core_set_dirty_callback(
     callback: Option<unsafe extern "C" fn(*mut c_void)>,
     userdata: *mut c_void,
 ) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     let c = &mut *core;
     c.dirty_callback = callback;
     c.dirty_userdata = userdata;
 
     if let Some(cb) = callback {
         let ud = userdata as usize; // Convert to usize for Send
-        c.pty_signal.set_wake_callback(move || {
-            unsafe { cb(ud as *mut c_void); }
+        c.pty_signal.set_wake_callback(move || unsafe {
+            cb(ud as *mut c_void);
         });
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_sync_pty(core: *mut AtermCore) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     (*core).sync_pty();
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_scroll(core: *mut AtermCore, delta: i32) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     if let Some(ref mut terminal) = (*core).terminal {
         terminal.scroll(delta);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn aterm_core_selection_start(core: *mut AtermCore, col: u32, line: i32, side: u8) {
-    if core.is_null() { return; }
+pub unsafe extern "C" fn aterm_core_selection_start(
+    core: *mut AtermCore,
+    col: u32,
+    line: i32,
+    side: u8,
+) {
+    if core.is_null() {
+        return;
+    }
     (*core).selection_start(col as usize, line, side);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn aterm_core_selection_update(core: *mut AtermCore, col: u32, line: i32, side: u8) {
-    if core.is_null() { return; }
+pub unsafe extern "C" fn aterm_core_selection_update(
+    core: *mut AtermCore,
+    col: u32,
+    line: i32,
+    side: u8,
+) {
+    if core.is_null() {
+        return;
+    }
     (*core).selection_update(col as usize, line, side);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_selection_clear(core: *mut AtermCore) {
-    if core.is_null() { return; }
+    if core.is_null() {
+        return;
+    }
     (*core).selection_clear();
 }
 
 /// Returns selected text or NULL. Caller must free with aterm_core_free_string.
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_selection_text(core: *const AtermCore) -> *mut c_char {
-    if core.is_null() { return std::ptr::null_mut(); }
+    if core.is_null() {
+        return std::ptr::null_mut();
+    }
     match (*core).selection_text() {
         Some(text) => match std::ffi::CString::new(text) {
             Ok(cs) => cs.into_raw(),
@@ -514,5 +570,57 @@ pub unsafe extern "C" fn aterm_core_list_workspaces(core: *const AtermCore) -> *
 pub unsafe extern "C" fn aterm_core_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(std::ffi::CString::from_raw(ptr));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_tailscale_connect(
+    hostname: *const c_char,
+    control_url: *const c_char,
+    auth_key: *const c_char,
+) -> i32 {
+    let hostname = optional_c_string(hostname);
+    let control_url = optional_c_string(control_url);
+    let auth_key = optional_c_string(auth_key);
+
+    match tailscale::global_manager().connect(
+        hostname.as_deref(),
+        control_url.as_deref(),
+        auth_key.as_deref(),
+    ) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("[aterm-core] tailscale connect failed: {error}");
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn aterm_tailscale_shutdown() {
+    tailscale::global_manager().shutdown();
+}
+
+#[no_mangle]
+pub extern "C" fn aterm_tailscale_status_json() -> *mut c_char {
+    let status = tailscale::global_manager().status();
+    let json = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
+    match std::ffi::CString::new(json) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+fn optional_c_string(value: *const c_char) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    let text = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }

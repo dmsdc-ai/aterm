@@ -58,4 +58,9 @@ char* aterm_core_selection_text(const AtermCore* core);
 char* aterm_core_list_workspaces(const AtermCore* core);
 void aterm_core_free_string(char* ptr);
 
+// Tailscale
+int32_t aterm_tailscale_connect(const char* hostname, const char* control_url, const char* auth_key);
+void aterm_tailscale_shutdown(void);
+char* aterm_tailscale_status_json(void);
+
 #endif

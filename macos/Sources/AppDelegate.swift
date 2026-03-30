@@ -16,6 +16,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var workspaceOrder: [UUID] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        startTailscale()
+
         let rect = NSRect(x: 0, y: 0, width: 1280, height: 768)
         window = NSWindow(
             contentRect: rect,
@@ -96,6 +98,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         processPollTimer?.invalidate()
         processPollTimer = nil
+        aterm_tailscale_shutdown()
+    }
+
+    private func startTailscale() {
+        let env = ProcessInfo.processInfo.environment
+        let result = withOptionalCString(env["ATERM_TAILSCALE_HOSTNAME"]) { hostnamePtr in
+            withOptionalCString(env["ATERM_TAILSCALE_CONTROL_URL"]) { controlURLPtr in
+                withOptionalCString(env["ATERM_TAILSCALE_AUTHKEY"]) { authKeyPtr in
+                    aterm_tailscale_connect(hostnamePtr, controlURLPtr, authKeyPtr)
+                }
+            }
+        }
+
+        if result != 0 {
+            NSLog("[aterm] tailscale startup failed")
+            return
+        }
+
+        logTailscaleStatus(prefix: "startup")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.logTailscaleStatus(prefix: "startup+2s")
+        }
+    }
+
+    private func logTailscaleStatus(prefix: String) {
+        guard let jsonPtr = aterm_tailscale_status_json() else { return }
+        let json = String(cString: jsonPtr)
+        aterm_core_free_string(jsonPtr)
+        NSLog("[aterm] tailscale %@: %@", prefix, json)
     }
 
     private func beginWorkspaceCreation(_ request: WorkspaceCreationRequest) {
@@ -473,6 +504,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             return ""
         }
+    }
+}
+
+private func withOptionalCString<T>(_ value: String?, _ body: (UnsafePointer<CChar>?) -> T) -> T {
+    guard let value,
+          !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return body(nil)
+    }
+
+    return value.withCString { ptr in
+        body(ptr)
     }
 }
 

@@ -92,4 +92,32 @@ char *aterm_core_list_workspaces(const struct AtermCore *core);
 
 void aterm_core_free_string(char *ptr);
 
+int32_t aterm_tailscale_connect(const char *hostname,
+                                const char *control_url,
+                                const char *auth_key);
+
+void aterm_tailscale_shutdown(void);
+
+char *aterm_tailscale_status_json(void);
+
+extern int tailscale_new(void);
+
+extern int tailscale_start(int sd);
+
+extern int tailscale_up(int sd);
+
+extern int tailscale_close(int sd);
+
+extern int tailscale_set_dir(int sd, const char *dir);
+
+extern int tailscale_set_hostname(int sd, const char *hostname);
+
+extern int tailscale_set_authkey(int sd, const char *authkey);
+
+extern int tailscale_set_control_url(int sd, const char *control_url);
+
+extern int tailscale_set_logfd(int sd, int fd);
+
+extern int tailscale_errmsg(int sd, char *buf, uintptr_t buflen);
+
 #endif  /* ATERM_CORE_H */
