@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Clone winit (path dependency)
-        run: git clone --depth 1 https://x-access-token:${{ github.token }}@github.com/dmsdc-ai/winit.git ../winit
+        run: git clone --depth 1 https://github.com/rust-windowing/winit.git ../winit
 
       - uses: actions/setup-node@v4
         with:
