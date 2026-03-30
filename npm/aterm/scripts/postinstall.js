@@ -146,10 +146,28 @@ function installNativeBundle() {
 
 }
 
+function runDevkitBootstrap() {
+  try {
+    const devkitPath = require.resolve('@dmsdc-ai/aigentry-devkit');
+    const devkitRoot = path.dirname(devkitPath);
+    const bootstrapPath = path.join(devkitRoot, 'bootstrap.js');
+    if (fs.existsSync(bootstrapPath)) {
+      const { execFileSync } = require('node:child_process');
+      execFileSync(process.execPath, [bootstrapPath], {
+        stdio: 'inherit',
+        env: { ...process.env, AIGENTRY_HOME: resolveInstallHomeDir() },
+      });
+    }
+  } catch {
+    // devkit bootstrap is best-effort; don't block install
+  }
+}
+
 function main() {
   const plan = buildDefaultPlan();
   applyInstallPlan(plan);
   installNativeBundle();
+  runDevkitBootstrap();
 }
 
 main();
