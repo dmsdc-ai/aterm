@@ -83,9 +83,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         window.contentView = splitView
         window.makeKeyAndOrderFront(nil)
+
+        setupPreferencesMenu()
+
         let restoredCount = restoreWorkspaces()
         if restoredCount == 0 {
-            createDefaultWorkspace()
+            if needsOnboarding() {
+                showOnboarding()
+            } else {
+                createDefaultWorkspace()
+            }
         }
         startProcessPolling()
     }
@@ -259,6 +266,141 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             shouldSelect: true,
             isSystem: isCliWorkspace
         )
+    }
+
+    // MARK: - Onboarding & Preferences
+
+    private func detectClis() -> CliStatus {
+        guard let jsonPtr = aterm_core_detect_clis() else {
+            return CliStatus(claude: false, codex: false, gemini: false)
+        }
+        let json = String(cString: jsonPtr)
+        aterm_core_free_string(jsonPtr)
+        guard let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Bool] else {
+            return CliStatus(claude: false, codex: false, gemini: false)
+        }
+        return CliStatus(
+            claude: dict["claude"] ?? false,
+            codex: dict["codex"] ?? false,
+            gemini: dict["gemini"] ?? false
+        )
+    }
+
+    private func needsOnboarding() -> Bool {
+        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return true // No config = needs onboarding
+        }
+        if config["setupCompleted"] as? Bool != true { return true }
+        // Field-by-field check for existing users
+        let ai = config["ai"] as? [String: Any]
+        if ai?["defaultCLI"] == nil { return true }
+        return false
+    }
+
+    private func readConfig() -> [String: Any] {
+        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return config
+    }
+
+    private func saveOnboardingResult(_ result: OnboardingResult) {
+        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
+        var config = readConfig()
+        var ai = config["ai"] as? [String: Any] ?? [:]
+        ai["defaultCLI"] = result.defaultCLI
+        config["ai"] = ai
+        var shell = config["shell"] as? [String: Any] ?? [:]
+        shell["default"] = result.defaultShell
+        config["shell"] = shell
+        var tailscale = config["tailscale"] as? [String: Any] ?? [:]
+        tailscale["connect_on_launch"] = result.tailscaleEnabled
+        config["tailscale"] = tailscale
+        config["setupCompleted"] = true
+
+        let dir = (configPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: config, options: .prettyPrinted) {
+            try? data.write(to: URL(fileURLWithPath: configPath))
+        }
+    }
+
+    private func showOnboarding() {
+        let cliStatus = detectClis()
+        var showSheet = true
+
+        let onboardingView = OnboardingView(
+            isPresented: Binding(
+                get: { showSheet },
+                set: { [weak self] newValue in
+                    showSheet = newValue
+                    if !newValue {
+                        self?.window.endSheet(self?.window.attachedSheet ?? NSPanel())
+                    }
+                }
+            ),
+            cliStatus: cliStatus,
+            onComplete: { [weak self] result in
+                self?.saveOnboardingResult(result)
+                self?.createDefaultWorkspace()
+            }
+        )
+
+        let hostingView = NSHostingView(rootView: onboardingView)
+        let sheet = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        sheet.contentView = hostingView
+        sheet.title = "Welcome to aterm"
+        window.beginSheet(sheet)
+    }
+
+    @objc private func showPreferences() {
+        let cliStatus = detectClis()
+        let config = readConfig()
+
+        let prefsView = PreferencesView(
+            cliStatus: cliStatus,
+            currentConfig: config,
+            onSave: { [weak self] result in
+                self?.saveOnboardingResult(result)
+            }
+        )
+
+        let hostingView = NSHostingView(rootView: prefsView)
+        let prefsWindow = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 400),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        prefsWindow.contentView = hostingView
+        prefsWindow.title = "Preferences"
+        prefsWindow.center()
+        prefsWindow.makeKeyAndOrderFront(nil)
+    }
+
+    private func setupPreferencesMenu() {
+        if let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu {
+            let prefsItem = NSMenuItem(
+                title: "Preferences...",
+                action: #selector(showPreferences),
+                keyEquivalent: ","
+            )
+            prefsItem.target = self
+            // Insert after "About" (index 0) and separator (index 1)
+            let insertIndex = min(2, appMenu.items.count)
+            appMenu.insertItem(prefsItem, at: insertIndex)
+            appMenu.insertItem(NSMenuItem.separator(), at: insertIndex)
+        }
     }
 
     private func which(_ command: String) -> Bool {

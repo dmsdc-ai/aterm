@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aterm-linux-arm64",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "future linux-arm64 native bundle for @dmsdc-ai/aterm",
   "private": true,
   "os": [

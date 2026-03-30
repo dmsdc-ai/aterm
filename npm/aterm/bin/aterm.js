@@ -4,12 +4,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  detectAiCliStatus,
   ensureUserLayout,
-  getUserAtermConfigPath,
   resolveAigentryConfig,
-  resolveInstallHomeDir,
-  updateConfigFile,
 } from '../lib/aigentry.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,125 +18,12 @@ const packageJson = JSON.parse(
   fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'),
 );
 
-function printVersionAndExit() {
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
   console.log(packageJson.version);
   process.exit(0);
 }
 
-function readUserSetupState() {
-  const configPath = getUserAtermConfigPath();
-  if (!fs.existsSync(configPath)) {
-    return {
-      configPath,
-      setupCompleted: false,
-    };
-  }
-
-  try {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    return {
-      configPath,
-      setupCompleted: config.setupCompleted === true,
-    };
-  } catch (error) {
-    console.warn(`[aterm] invalid user config, rerunning setup: ${error.message}`);
-    return {
-      configPath,
-      setupCompleted: false,
-    };
-  }
-}
-
-async function maybeRunFirstRunWizard() {
-  ensureUserLayout({ version: packageJson.version });
-  const setupState = readUserSetupState();
-  if (setupState.setupCompleted) {
-    return;
-  }
-
-  let wizardModule;
-  try {
-    wizardModule = await import('../scripts/tui-installer.js');
-  } catch (error) {
-    console.warn(`[aterm] setup wizard unavailable, launching with defaults (${error.message})`);
-    return;
-  }
-
-  if (!wizardModule.shouldRunFirstRunWizard()) {
-    return;
-  }
-
-  const context = wizardModule.buildFirstRunWizardContext(packageJson.version, process.cwd());
-  const wizardResult = await wizardModule.runFirstRunWizard(context);
-  if (!wizardResult) {
-    process.exit(0);
-  }
-
-  await wizardModule.completeFirstRunWizard(context, wizardResult);
-}
-
-async function maybeRunConfigMigration() {
-  const configPath = getUserAtermConfigPath();
-  if (!fs.existsSync(configPath)) return;
-
-  let config;
-  try {
-    config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  } catch { return; }
-
-  if (!config.setupCompleted) return;
-
-  const isTTY = process.stdin.isTTY && process.stdout.isTTY;
-  const cliStatus = detectAiCliStatus(resolveInstallHomeDir());
-  const patch = {};
-  const questions = [];
-
-  // Check each field individually — users from any version get prompted only for THEIR missing fields
-  if (!config.ai?.defaultCLI) {
-    questions.push({
-      type: 'select',
-      name: 'defaultCLI',
-      message: 'Default AI CLI for orchestrator workspace',
-      choices: [
-        { title: 'claude', value: 'claude', disabled: !cliStatus.claude },
-        { title: 'codex', value: 'codex', disabled: !cliStatus.codex },
-        { title: 'gemini', value: 'gemini', disabled: !cliStatus.gemini },
-        { title: 'none (plain zsh)', value: 'none' },
-      ],
-      initial: cliStatus.claude ? 0 : cliStatus.codex ? 1 : cliStatus.gemini ? 2 : 3,
-    });
-  }
-
-  if (questions.length === 0) return;
-
-  if (isTTY) {
-    try {
-      const prompts = (await import('prompts')).default;
-      const responses = await prompts(questions);
-      if (responses.defaultCLI) {
-        patch.ai = { ...config.ai, defaultCLI: responses.defaultCLI };
-      }
-    } catch { /* fall through to auto-detect */ }
-  }
-
-  // Auto-fill any fields not answered via prompt
-  if (!patch.ai?.defaultCLI && !config.ai?.defaultCLI) {
-    const auto = cliStatus.claude ? 'claude' : cliStatus.codex ? 'codex' : cliStatus.gemini ? 'gemini' : 'none';
-    patch.ai = { ...config.ai, ...patch.ai, defaultCLI: auto };
-  }
-
-  if (Object.keys(patch).length > 0) {
-    updateConfigFile(configPath, patch);
-  }
-}
-
-if (process.argv.includes('--version') || process.argv.includes('-v')) {
-  printVersionAndExit();
-}
-
-await maybeRunFirstRunWizard();
-await maybeRunConfigMigration();
-const resolvedConfig = resolveAigentryConfig({ cwd: process.cwd() });
+ensureUserLayout({ version: packageJson.version });
 
 if (!fs.existsSync(executable)) {
   console.error('[aterm] native app bundle is not installed');
@@ -148,6 +31,7 @@ if (!fs.existsSync(executable)) {
   process.exit(1);
 }
 
+const resolvedConfig = resolveAigentryConfig({ cwd: process.cwd() });
 for (const warning of resolvedConfig.warnings) {
   console.warn(warning);
 }
