@@ -6,6 +6,7 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
     case claude
     case codex
     case gemini
+    case custom
 
     var id: String { rawValue }
 
@@ -21,10 +22,12 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
             return .cyan
         case .gemini:
             return .blue
+        case .custom:
+            return .gray
         }
     }
 
-    var bootstrapCommand: String? {
+    func bootstrapCommand(customCommand: String) -> String? {
         switch self {
         case .zsh:
             return nil
@@ -34,6 +37,20 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
             return "exec codex resume --last --dangerously-bypass-approvals-and-sandbox"
         case .gemini:
             return "exec gemini resume -y"
+        case .custom:
+            let trimmed = customCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : "exec \(trimmed)"
+        }
+    }
+
+    func displayTitle(customCommand: String) -> String {
+        switch self {
+        case .custom:
+            let trimmed = customCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return "custom" }
+            return trimmed.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? trimmed
+        default:
+            return title
         }
     }
 }
@@ -43,6 +60,7 @@ struct SidebarWorkspace: Identifiable, Equatable {
     var name: String
     var cwd: String
     var launchCommand: WorkspaceLaunchCommand
+    var customCommand: String
     var foregroundProcessName: String
     var status: String
     var createdAt: Date
@@ -53,6 +71,7 @@ struct WorkspaceDraft: Identifiable, Equatable {
     let cwd: String
     var name: String = ""
     var command: WorkspaceLaunchCommand = .zsh
+    var customCommand: String = ""
 
     var folderName: String {
         let trimmed = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -63,6 +82,7 @@ struct WorkspaceDraft: Identifiable, Equatable {
 
 struct WorkspaceCreationRequest {
     var preferredCommand: WorkspaceLaunchCommand = .zsh
+    var preferredCustomCommand: String = ""
     var initialDirectory: String?
 }
 
@@ -73,11 +93,27 @@ final class WorkspaceSidebarModel: ObservableObject {
     @Published var isCreateSheetPresented = false
 
     func presentCreationDrafts(for urls: [URL], preferredCommand: WorkspaceLaunchCommand) {
+        presentCreationDrafts(
+            for: urls,
+            preferredCommand: preferredCommand,
+            preferredCustomCommand: ""
+        )
+    }
+
+    func presentCreationDrafts(
+        for urls: [URL],
+        preferredCommand: WorkspaceLaunchCommand,
+        preferredCustomCommand: String
+    ) {
         let directories = urls.filter { $0.hasDirectoryPath || FileManager.default.directoryExists(at: $0) }
         guard !directories.isEmpty else { return }
 
         creationDrafts = directories.map {
-            WorkspaceDraft(cwd: $0.path, command: preferredCommand)
+            WorkspaceDraft(
+                cwd: $0.path,
+                command: preferredCommand,
+                customCommand: preferredCustomCommand
+            )
         }
         isCreateSheetPresented = true
     }
@@ -138,6 +174,7 @@ struct SessionSidebarView: View {
                                     onBeginWorkspaceCreation(
                                         WorkspaceCreationRequest(
                                             preferredCommand: workspace.launchCommand,
+                                            preferredCustomCommand: workspace.customCommand,
                                             initialDirectory: workspace.cwd
                                         )
                                     )
@@ -280,10 +317,16 @@ private struct WorkspaceCreateSheet: View {
                                 }
                                 .pickerStyle(.segmented)
 
-                                Text(draft.command.bootstrapCommand ?? "zsh")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(2)
+                                if draft.command == .custom {
+                                    TextField("e.g. opencode --full-auto", text: $draft.customCommand)
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.system(size: 12, design: .monospaced))
+                                } else {
+                                    Text(draft.command.bootstrapCommand(customCommand: draft.customCommand) ?? "zsh")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(2)
+                                }
                             }
                         }
                         .padding(12)
@@ -300,10 +343,20 @@ private struct WorkspaceCreateSheet: View {
                 Button("Cancel", action: onCancel)
                 Button("Create", action: onCreate)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(!canCreate)
             }
         }
         .padding(20)
         .frame(width: 460, height: min(CGFloat(220 + drafts.count * 110), CGFloat(560)))
+    }
+
+    private var canCreate: Bool {
+        drafts.allSatisfy { draft in
+            if draft.command == .custom {
+                return !draft.customCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            return true
+        }
     }
 }
 
@@ -366,12 +419,16 @@ struct WorkspaceRowView: View {
             }
 
             HStack(spacing: 6) {
-                Text(workspace.foregroundProcessName)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(workspace.launchCommand.accent.opacity(0.95))
                 Text(shortSidebarPath(workspace.cwd))
                     .font(.system(size: 10))
                     .foregroundColor(.gray)
+                    .lineLimit(1)
+                Text("·")
+                    .font(.system(size: 10))
+                    .foregroundColor(.gray.opacity(0.6))
+                Text(workspace.foregroundProcessName)
+                    .font(.system(size: 10))
+                    .foregroundColor(workspace.launchCommand.accent.opacity(0.85))
                     .lineLimit(1)
             }
 

@@ -168,8 +168,24 @@ class TerminalView: NSView, NSTextInputClient {
         guard let core = core else { return }
         NSLog("[TV] keyDown keyCode=%d chars=%@ inputContext=%@", event.keyCode, event.characters ?? "nil", String(describing: self.inputContext))
 
-        // Handle Ctrl+key combinations directly (bypass IME)
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        // Handle macOS terminal navigation shortcuts directly so they do not get
+        // swallowed by AppKit text navigation before reaching the PTY.
+        if flags.contains(.option) && !flags.contains(.command) {
+            switch event.keyCode {
+            case 123: // Option+Left
+                aterm_core_write_pty(core, "\u{1b}b", 2)
+                return
+            case 124: // Option+Right
+                aterm_core_write_pty(core, "\u{1b}f", 2)
+                return
+            default:
+                break
+            }
+        }
+
+        // Handle Ctrl+key combinations directly (bypass IME)
         if flags.contains(.control), let chars = event.charactersIgnoringModifiers {
             if let scalar = chars.unicodeScalars.first {
                 let code = scalar.value
@@ -417,6 +433,12 @@ class TerminalView: NSView, NSTextInputClient {
         case 51: // Cmd+Backspace → kill line (Ctrl+U)
             aterm_core_write_pty(core, "\u{15}", 1)
             return true
+        case 123: // Cmd+Left → line start
+            aterm_core_write_pty(core, "\u{01}", 1)
+            return true
+        case 124: // Cmd+Right → line end
+            aterm_core_write_pty(core, "\u{05}", 1)
+            return true
         default:
             return false
         }
@@ -454,6 +476,14 @@ class TerminalView: NSView, NSTextInputClient {
             aterm_core_named_key(core, UInt32(ATERM_KEY_ARROW_RIGHT))
         case #selector(moveLeft(_:)):
             aterm_core_named_key(core, UInt32(ATERM_KEY_ARROW_LEFT))
+        case #selector(moveWordLeft(_:)):
+            aterm_core_write_pty(core, "\u{1b}b", 2)
+        case #selector(moveWordRight(_:)):
+            aterm_core_write_pty(core, "\u{1b}f", 2)
+        case #selector(moveToBeginningOfLine(_:)):
+            aterm_core_write_pty(core, "\u{01}", 1)
+        case #selector(moveToEndOfLine(_:)):
+            aterm_core_write_pty(core, "\u{05}", 1)
         case #selector(moveToBeginningOfDocument(_:)):
             aterm_core_named_key(core, UInt32(ATERM_KEY_HOME))
         case #selector(moveToEndOfDocument(_:)):

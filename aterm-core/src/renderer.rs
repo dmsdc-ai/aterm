@@ -7,12 +7,14 @@ use glyphon::{
 use wgpu::util::DeviceExt;
 
 use alacritty_terminal::event::EventListener;
-use alacritty_terminal::term::{cell::Flags, Term, TermMode};
+use alacritty_terminal::term::{cell::Cell, cell::Flags, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 const DEFAULT_FG: GlyphonColor = GlyphonColor::rgb(0xe8, 0xe4, 0xe0);
+const DEFAULT_BG: GlyphonColor = GlyphonColor::rgb(0x00, 0x00, 0x00);
+const CURSOR_FG: GlyphonColor = GlyphonColor::rgb(0xff, 0xff, 0xff);
 
-// --- wgpu colored-rectangle pipeline for selection/cursor backgrounds ---
+// --- wgpu colored-rectangle pipeline for selection/background rendering ---
 
 const RECT_SHADER: &str = "
 struct VertexOutput {
@@ -110,34 +112,42 @@ impl RectRenderer {
         self.vertices.clear();
     }
 
-    /// Push a colored rect in pixel coordinates. Converts to clip space internally.
-    fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, vp_w: f32, vp_h: f32, color: [f32; 4]) {
+    fn push_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        vp_w: f32,
+        vp_h: f32,
+        color: [f32; 4],
+    ) {
         let x0 = x / vp_w * 2.0 - 1.0;
         let y0 = 1.0 - y / vp_h * 2.0;
         let x1 = (x + w) / vp_w * 2.0 - 1.0;
         let y1 = 1.0 - (y + h) / vp_h * 2.0;
-        let c = color;
         self.vertices.extend_from_slice(&[
-            RectVertex { position: [x0, y0], color: c },
-            RectVertex { position: [x1, y0], color: c },
-            RectVertex { position: [x0, y1], color: c },
-            RectVertex { position: [x1, y0], color: c },
-            RectVertex { position: [x1, y1], color: c },
-            RectVertex { position: [x0, y1], color: c },
+            RectVertex { position: [x0, y0], color },
+            RectVertex { position: [x1, y0], color },
+            RectVertex { position: [x0, y1], color },
+            RectVertex { position: [x1, y0], color },
+            RectVertex { position: [x1, y1], color },
+            RectVertex { position: [x0, y1], color },
         ]);
     }
 
-    /// Create a GPU buffer from collected vertices. Call BEFORE begin_render_pass.
     fn prepare(&self, device: &wgpu::Device) -> Option<wgpu::Buffer> {
         if self.vertices.is_empty() {
             return None;
         }
+
         let bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 self.vertices.as_ptr() as *const u8,
                 self.vertices.len() * std::mem::size_of::<RectVertex>(),
             )
         };
+
         Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("rect_vertices"),
             contents: bytes,
@@ -156,23 +166,33 @@ pub struct TerminalGridRenderer {
     viewport: Viewport,
     font_size: f32,
     line_height: f32,
-    scale_factor: f32,
-    lines: Vec<RenderLine>,
+    cells: Vec<RenderCell>,
+    cursor_buffer: Buffer,
+    cursor_text: String,
+    cursor_width_cells: u8,
     rect_renderer: RectRenderer,
-    scratch_spans: Vec<(String, GlyphonColor)>,
-    last_width: f32,
     last_font_size: f32,
-    last_alt_screen: bool,
+    last_line_height: f32,
 }
 
-struct RenderLine {
+struct RenderCell {
     buffer: Buffer,
-    spans: Vec<(String, GlyphonColor)>,
+    text: String,
+    fg: GlyphonColor,
+    width_cells: u8,
     has_non_ascii: bool,
+    active: bool,
 }
 
 impl TerminalGridRenderer {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, scale_factor: f32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        scale_factor: f32,
+    ) -> Self {
+        let font_size = 13.0 * scale_factor;
+        let line_height = 19.0 * scale_factor;
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
@@ -182,21 +202,30 @@ impl TerminalGridRenderer {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let rect_renderer = RectRenderer::new(device, format);
 
+        let mut cursor_buffer =
+            Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        cursor_buffer.set_size(
+            &mut font_system,
+            Some(font_size * 0.6),
+            Some(line_height),
+        );
+        cursor_buffer.set_monospace_width(&mut font_system, Some(font_size * 0.6));
+
         Self {
             font_system,
             swash_cache,
             atlas,
             text_renderer,
             viewport,
-            font_size: 13.0 * scale_factor,
-            line_height: 19.0 * scale_factor,
-            scale_factor,
-            lines: Vec::new(),
+            font_size,
+            line_height,
+            cells: Vec::new(),
+            cursor_buffer,
+            cursor_text: String::new(),
+            cursor_width_cells: 0,
             rect_renderer,
-            scratch_spans: Vec::with_capacity(256),
-            last_width: -1.0,
             last_font_size: -1.0,
-            last_alt_screen: false,
+            last_line_height: -1.0,
         }
     }
 
@@ -209,7 +238,6 @@ impl TerminalGridRenderer {
     }
 
     pub fn grid_size(&self, width: f32, height: f32) -> (u16, u16) {
-        // Subtract padding (4px left + 4px right, 4px top + 4px bottom)
         let usable_w = (width - 8.0).max(0.0);
         let usable_h = (height - 8.0).max(0.0);
         let cols = (usable_w / self.cell_width()).floor().max(2.0) as u16;
@@ -228,181 +256,158 @@ impl TerminalGridRenderer {
     ) {
         let render_start = std::time::Instant::now();
         self.viewport.update(queue, Resolution { width, height });
-        let rows = self.grid_size(width as f32, height as f32).1 as usize;
-        self.ensure_line_buffers(width as f32, rows);
 
-        // --- Screen mode change detection (Ghostty pattern) ---
-        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
-        if alt_screen != self.last_alt_screen {
-            for line in &mut self.lines {
-                line.spans.clear();
-            }
-            self.last_alt_screen = alt_screen;
+        let (cols_u16, rows_u16) = self.grid_size(width as f32, height as f32);
+        let cols = cols_u16 as usize;
+        let rows = rows_u16 as usize;
+        self.ensure_cell_buffers(cols, rows);
+
+        for cell in &mut self.cells {
+            cell.active = false;
         }
 
         let content = term.renderable_content();
         let selection = &content.selection;
-
         let cursor = &content.cursor;
         let cursor_visible = cursor.shape != CursorShape::Hidden;
         let cursor_line = cursor.point.line.0;
-        let cursor_col = cursor.point.column.0;
+        let cursor_col = cursor.point.column.0 as usize;
 
-        let cols_count = self.grid_size(width as f32, height as f32).0 as usize;
-        let mut line_selections: Vec<Vec<bool>> = Vec::new();
-
-        let mut current_text = String::new();
-        let mut current_color = DEFAULT_FG;
-        let mut current_line: Option<i32> = None;
-        let mut current_col: usize = 0;
-        let mut has_non_ascii = false;
-        let mut visible_non_ascii = false;
-        let mut line_index = 0usize;
-        let mut changed_lines = 0usize;
-
-        for indexed in content.display_iter {
-            let line = indexed.point.line.0;
-            let col = indexed.point.column.0;
-
-            if current_line != Some(line) {
-                if current_line.is_some() {
-                    changed_lines += self.finish_line(
-                        line_index,
-                        &mut current_text,
-                        current_color,
-                        has_non_ascii,
-                        width as f32,
-                    ) as usize;
-                    visible_non_ascii |= has_non_ascii;
-                    line_index += 1;
-                }
-                current_line = Some(line);
-                current_col = 0;
-                current_color = DEFAULT_FG;
-                has_non_ascii = false;
-                while line_selections.len() <= line_index {
-                    line_selections.push(vec![false; cols_count]);
-                }
-            }
-
-            while current_col < col {
-                current_text.push(' ');
-                current_col += 1;
-            }
-
-            let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-            {
-                // Do not synthesize a spacer glyph here. The wide character itself
-                // should occupy the visual width; pushing an extra space creates
-                // visible gaps for Korean text.
-                current_col += 1;
-                continue;
-            }
-
-            has_non_ascii |= !cell.c.is_ascii();
-
-            // Quick-fix cursor path: render a solid block glyph instead of relying
-            // on the background rect, which is currently unreliable.
-            let at_cursor = cursor_visible && line == cursor_line && col == cursor_col;
-
-            // Check if cell is selected
-            let is_selected = selection.as_ref().map_or(false, |sel| {
-                let point = alacritty_terminal::index::Point::new(
-                    alacritty_terminal::index::Line(line),
-                    alacritty_terminal::index::Column(col),
-                );
-                sel.contains(point)
-            });
-            if is_selected && line_index < line_selections.len() && col < cols_count {
-                line_selections[line_index][col] = true;
-            }
-
-            // Determine foreground color with priority: cursor > selection > inverse > normal
-            let fg = if at_cursor {
-                GlyphonColor::rgb(0xff, 0xff, 0xff)
-            } else if is_selected {
-                GlyphonColor::rgb(0xff, 0xff, 0xff)
-            } else if cell.flags.contains(Flags::INVERSE) {
-                GlyphonColor::rgb(0x13, 0x10, 0x10)
-            } else {
-                ansi_to_glyphon(&cell.fg)
-            };
-
-            if fg != current_color && !current_text.is_empty() {
-                self.scratch_spans
-                    .push((std::mem::take(&mut current_text), current_color));
-            }
-            current_color = fg;
-            let ch = if at_cursor {
-                '\u{2588}'
-            } else if cell.c == '\0' {
-                ' '
-            } else {
-                cell.c
-            };
-            current_text.push(ch);
-            current_col += 1;
-        }
-
-        if current_line.is_some() && line_index < self.lines.len() {
-            changed_lines += self.finish_line(
-                line_index,
-                &mut current_text,
-                current_color,
-                has_non_ascii,
-                width as f32,
-            ) as usize;
-            visible_non_ascii |= has_non_ascii;
-            line_index += 1;
-        }
-
-        for idx in line_index..self.lines.len() {
-            changed_lines += self.update_line(idx, false, width as f32) as usize;
-        }
-
-        // --- Build background rects (selection only) ---
         let cw = self.cell_width();
         let lh = self.line_height;
         let w_f = width as f32;
         let h_f = height as f32;
+
         self.rect_renderer.clear();
 
-        for (idx, line_sel) in line_selections.iter().enumerate() {
-            for (c, &selected) in line_sel.iter().enumerate() {
-                if selected {
-                    self.rect_renderer.push_rect(
-                        4.0 + c as f32 * cw,
-                        4.0 + idx as f32 * lh,
-                        cw, lh, w_f, h_f,
-                        [0.2, 0.4, 0.8, 0.7],
-                    );
+        let mut current_line: Option<i32> = None;
+        let mut row_index = 0usize;
+        let mut cursor_row: Option<usize> = None;
+        let mut cursor_width_cells = 1u8;
+        let mut visible_non_ascii = false;
+        let mut changed_cells = 0usize;
+        let mut active_cells = 0usize;
+
+        for indexed in content.display_iter {
+            let line = indexed.point.line.0;
+            let col = indexed.point.column.0 as usize;
+
+            if current_line != Some(line) {
+                if current_line.is_some() {
+                    row_index += 1;
                 }
+                current_line = Some(line);
             }
+
+            if row_index >= rows || col >= cols {
+                continue;
+            }
+
+            if cursor_visible && line == cursor_line {
+                cursor_row = Some(row_index);
+            }
+
+            let point = alacritty_terminal::index::Point::new(
+                alacritty_terminal::index::Line(line),
+                alacritty_terminal::index::Column(col),
+            );
+            let cell = indexed.cell;
+            let is_selected = selection.as_ref().map_or(false, |sel| sel.contains(point));
+
+            if let Some(bg) = cell_background_rgba(cell, is_selected) {
+                self.rect_renderer.push_rect(
+                    4.0 + col as f32 * cw,
+                    4.0 + row_index as f32 * lh,
+                    cw,
+                    lh,
+                    w_f,
+                    h_f,
+                    bg,
+                );
+            }
+
+            if cursor_visible && line == cursor_line && col == cursor_col {
+                cursor_width_cells = if cell.flags.contains(Flags::WIDE_CHAR) && col + 1 < cols {
+                    2
+                } else {
+                    1
+                };
+            }
+
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+
+            let text = cell_text(cell);
+            if text.is_empty() {
+                continue;
+            }
+
+            let fg = cell_foreground(cell, is_selected);
+            let width_cells = if cell.flags.contains(Flags::WIDE_CHAR) && col + 1 < cols {
+                2
+            } else {
+                1
+            };
+            visible_non_ascii |= !text.is_ascii();
+
+            let slot = row_index * cols + col;
+            if self.update_cell(slot, &text, fg, width_cells) {
+                changed_cells += 1;
+            }
+            active_cells += 1;
         }
 
         let rect_buffer = self.rect_renderer.prepare(device);
 
-        let shape_elapsed = render_start.elapsed();
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
 
-        // Build text areas — foreground only
-        let text_areas: Vec<TextArea<'_>> = self.lines.iter().enumerate().map(|(idx, line)| {
-            TextArea {
-                buffer: &line.buffer,
-                left: 4.0,
-                top: 4.0 + idx as f32 * self.line_height,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: width as i32,
-                    bottom: height as i32,
-                },
-                default_color: DEFAULT_FG,
-                custom_glyphs: &[],
+        if cursor_visible {
+            self.update_cursor_buffer(cursor_width_cells);
+        }
+
+        let mut text_areas = Vec::with_capacity(active_cells + usize::from(cursor_visible));
+        for row in 0..rows {
+            for col in 0..cols {
+                let cell = &self.cells[row * cols + col];
+                if !cell.active {
+                    continue;
+                }
+
+                text_areas.push(TextArea {
+                    buffer: &cell.buffer,
+                    left: 4.0 + col as f32 * cw,
+                    top: 4.0 + row as f32 * lh,
+                    scale: 1.0,
+                    bounds,
+                    default_color: DEFAULT_FG,
+                    custom_glyphs: &[],
+                });
             }
-        }).collect();
+        }
+
+        if cursor_visible {
+            if let Some(cursor_row) = cursor_row {
+                text_areas.push(TextArea {
+                    buffer: &self.cursor_buffer,
+                    left: 4.0 + cursor_col as f32 * cw,
+                    top: 4.0 + cursor_row as f32 * lh,
+                    scale: 1.0,
+                    bounds,
+                    default_color: CURSOR_FG,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
+        let shape_elapsed = render_start.elapsed();
 
         self.text_renderer
             .prepare(
@@ -428,9 +433,9 @@ impl TerminalGridRenderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.075,
-                            g: 0.063,
-                            b: 0.063,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -441,128 +446,206 @@ impl TerminalGridRenderer {
                 occlusion_query_set: None,
             });
 
-            // Background rects (selection) drawn FIRST
             if let Some(ref buf) = rect_buffer {
                 pass.set_pipeline(&self.rect_renderer.pipeline);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..self.rect_renderer.vertices.len() as u32, 0..1);
             }
 
-            // Text on top
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .unwrap();
         }
 
         queue.submit(std::iter::once(encoder.finish()));
+
         let total_elapsed = render_start.elapsed();
         if total_elapsed.as_millis() > 16 {
             eprintln!(
-                "[perf] render: lines_changed={} visible_non_ascii={} font={} shape={}ms total={}ms",
-                changed_lines,
+                "[perf] render: cells_changed={} visible_non_ascii={} active_cells={} shape={}ms total={}ms",
+                changed_cells,
                 visible_non_ascii,
-                self.font_size,
+                active_cells,
                 shape_elapsed.as_millis(),
                 total_elapsed.as_millis()
             );
         }
     }
 
-    fn ensure_line_buffers(&mut self, width: f32, rows: usize) {
+    fn ensure_cell_buffers(&mut self, cols: usize, rows: usize) {
+        let target = cols * rows;
         let cw = self.cell_width();
+        let metrics = Metrics::new(self.font_size, self.line_height);
 
-        while self.lines.len() < rows {
-            let mut buffer = Buffer::new(
-                &mut self.font_system,
-                Metrics::new(self.font_size, self.line_height),
-            );
-            buffer.set_size(&mut self.font_system, Some(width), Some(self.line_height));
+        while self.cells.len() < target {
+            let mut buffer = Buffer::new(&mut self.font_system, metrics);
+            buffer.set_size(&mut self.font_system, Some(cw), Some(self.line_height));
             buffer.set_monospace_width(&mut self.font_system, Some(cw));
-            self.lines.push(RenderLine {
+            self.cells.push(RenderCell {
                 buffer,
-                spans: Vec::new(),
+                text: String::new(),
+                fg: DEFAULT_FG,
+                width_cells: 1,
                 has_non_ascii: false,
+                active: false,
             });
         }
+        self.cells.truncate(target);
 
-        self.lines.truncate(rows);
-
-        if width != self.last_width || self.font_size != self.last_font_size {
-            for line in &mut self.lines {
-                line.buffer.set_metrics(
-                    &mut self.font_system,
-                    Metrics::new(self.font_size, self.line_height),
-                );
-                line.buffer
-                    .set_size(&mut self.font_system, Some(width), Some(self.line_height));
-                line.buffer
+        if self.font_size != self.last_font_size || self.line_height != self.last_line_height {
+            for cell in &mut self.cells {
+                cell.buffer.set_metrics(&mut self.font_system, metrics);
+                cell.buffer
+                    .set_size(&mut self.font_system, Some(cw), Some(self.line_height));
+                cell.buffer
                     .set_monospace_width(&mut self.font_system, Some(cw));
             }
-            self.last_width = width;
+
+            self.cursor_buffer.set_metrics(&mut self.font_system, metrics);
+            self.cursor_buffer
+                .set_size(&mut self.font_system, Some(cw), Some(self.line_height));
+            self.cursor_buffer
+                .set_monospace_width(&mut self.font_system, Some(cw));
+
             self.last_font_size = self.font_size;
+            self.last_line_height = self.line_height;
+            self.cursor_width_cells = 0;
         }
     }
 
-    fn finish_line(
+    fn update_cell(
         &mut self,
-        line_index: usize,
-        current_text: &mut String,
-        current_color: GlyphonColor,
-        has_non_ascii: bool,
-        width: f32,
+        slot: usize,
+        text: &str,
+        fg: GlyphonColor,
+        width_cells: u8,
     ) -> bool {
-        if !current_text.is_empty() {
-            self.scratch_spans
-                .push((std::mem::take(current_text), current_color));
-        }
-        let changed = self.update_line(line_index, has_non_ascii, width);
-        self.scratch_spans.clear();
-        changed
-    }
-
-    fn update_line(&mut self, line_index: usize, has_non_ascii: bool, width: f32) -> bool {
         let cw = self.cell_width();
-        let line = &mut self.lines[line_index];
-        if line.has_non_ascii == has_non_ascii && line.spans == self.scratch_spans {
+        let width = cw * width_cells as f32;
+        let metrics = Metrics::new(self.font_size, self.line_height);
+        let shaping = if text.is_ascii() {
+            Shaping::Basic
+        } else {
+            Shaping::Advanced
+        };
+        let cell = &mut self.cells[slot];
+        cell.active = true;
+
+        if cell.text == text && cell.fg == fg && cell.width_cells == width_cells {
             return false;
         }
 
-        line.has_non_ascii = has_non_ascii;
-        line.spans.clear();
-        line.spans.extend(self.scratch_spans.iter().cloned());
+        cell.buffer.set_metrics(&mut self.font_system, metrics);
+        cell.buffer
+            .set_size(&mut self.font_system, Some(width), Some(self.line_height));
+        cell.buffer
+            .set_monospace_width(&mut self.font_system, Some(cw));
+        cell.buffer.set_text(
+            &mut self.font_system,
+            text,
+            Attrs::new().family(Family::Monospace).color(fg),
+            shaping,
+        );
 
-        let rich: Vec<(&str, Attrs)> = line
-            .spans
-            .iter()
-            .map(|(text, color)| {
-                (
-                    text.as_str(),
-                    Attrs::new().family(Family::Monospace).color(*color),
-                )
-            })
-            .collect();
-        let shaping = if has_non_ascii { Shaping::Advanced } else { Shaping::Basic };
+        cell.text.clear();
+        cell.text.push_str(text);
+        cell.fg = fg;
+        cell.width_cells = width_cells;
+        cell.has_non_ascii = !text.is_ascii();
+        true
+    }
 
-        // Keep fixed cell advances for ASCII alignment. The quick wide-char fix
-        // avoids injecting synthetic spacer spaces, so Korean no longer picks
-        // up an extra visible gap per wide glyph.
-        line.buffer.set_monospace_width(&mut self.font_system, Some(cw));
+    fn update_cursor_buffer(&mut self, width_cells: u8) {
+        let width_cells = width_cells.max(1);
+        let cw = self.cell_width();
+        let width = cw * width_cells as f32;
+        let text = if width_cells == 2 { "██" } else { "█" };
 
-        line.buffer.set_metrics(
+        self.cursor_buffer.set_metrics(
             &mut self.font_system,
             Metrics::new(self.font_size, self.line_height),
         );
-        line.buffer
+        self.cursor_buffer
             .set_size(&mut self.font_system, Some(width), Some(self.line_height));
-        line.buffer.set_rich_text(
-            &mut self.font_system,
-            rich,
-            Attrs::new().family(Family::Monospace).color(DEFAULT_FG),
-            shaping,
-        );
-        line.buffer.shape_until_scroll(&mut self.font_system, false);
-        true
+        self.cursor_buffer
+            .set_monospace_width(&mut self.font_system, Some(cw));
+
+        if self.cursor_width_cells != width_cells || self.cursor_text != text {
+            self.cursor_buffer.set_text(
+                &mut self.font_system,
+                text,
+                Attrs::new()
+                    .family(Family::Monospace)
+                    .color(CURSOR_FG),
+                Shaping::Basic,
+            );
+            self.cursor_text.clear();
+            self.cursor_text.push_str(text);
+            self.cursor_width_cells = width_cells;
+        }
     }
+}
+
+fn cell_text(cell: &Cell) -> String {
+    if cell.flags.contains(Flags::HIDDEN) {
+        return String::new();
+    }
+
+    let mut text = String::new();
+    match cell.c {
+        '\0' | ' ' => {}
+        '\t' => text.push(' '),
+        c => text.push(c),
+    }
+
+    if let Some(zerowidth) = cell.zerowidth() {
+        if !zerowidth.is_empty() && text.is_empty() {
+            text.push(' ');
+        }
+        for c in zerowidth {
+            text.push(*c);
+        }
+    }
+
+    text
+}
+
+fn cell_foreground(cell: &Cell, is_selected: bool) -> GlyphonColor {
+    if is_selected {
+        return CURSOR_FG;
+    }
+
+    if cell.flags.contains(Flags::INVERSE) {
+        return ansi_to_glyphon(&cell.bg);
+    }
+
+    ansi_to_glyphon(&cell.fg)
+}
+
+fn cell_background_rgba(cell: &Cell, is_selected: bool) -> Option<[f32; 4]> {
+    if is_selected {
+        return Some([0.2, 0.4, 0.8, 0.7]);
+    }
+
+    if cell.flags.contains(Flags::INVERSE) {
+        return Some(color_to_rect_rgba(ansi_to_glyphon(&cell.fg)));
+    }
+
+    // Force a pure black terminal background for all normal cells. This avoids
+    // CLI-specific ANSI background fills (for example Gemini's gray panel) from
+    // overriding the app-level black canvas. Selection and inverse are handled
+    // above as explicit overlays.
+    let _ = cell;
+    None
+}
+
+fn color_to_rect_rgba(color: GlyphonColor) -> [f32; 4] {
+    [
+        color.r() as f32 / 255.0,
+        color.g() as f32 / 255.0,
+        color.b() as f32 / 255.0,
+        color.a() as f32 / 255.0,
+    ]
 }
 
 fn ansi_to_glyphon(color: &AnsiColor) -> GlyphonColor {
@@ -592,6 +675,7 @@ fn named_to_glyphon(named: NamedColor) -> GlyphonColor {
         NamedColor::BrightCyan => GlyphonColor::rgb(0x34, 0xe2, 0xe2),
         NamedColor::BrightWhite => GlyphonColor::rgb(0xee, 0xee, 0xec),
         NamedColor::Foreground => DEFAULT_FG,
+        NamedColor::Background => DEFAULT_BG,
         _ => DEFAULT_FG,
     }
 }

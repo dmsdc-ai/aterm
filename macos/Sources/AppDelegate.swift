@@ -80,6 +80,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         createWorkspace(
             name: "main",
             command: .zsh,
+            customCommand: "",
             cwd: NSHomeDirectory(),
             shouldSelect: true
         )
@@ -115,7 +116,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard response == .OK else { return }
             self?.workspaceSidebarModel.presentCreationDrafts(
                 for: panel.urls,
-                preferredCommand: request.preferredCommand
+                preferredCommand: request.preferredCommand,
+                preferredCustomCommand: request.preferredCustomCommand
             )
         }
     }
@@ -128,13 +130,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             createWorkspace(
                 name: draft.name.trimmingCharacters(in: .whitespacesAndNewlines),
                 command: draft.command,
+                customCommand: draft.customCommand,
                 cwd: draft.cwd,
                 shouldSelect: index == normalizedDrafts.count - 1
             )
         }
     }
 
-    private func createWorkspace(name: String, command: WorkspaceLaunchCommand, cwd: String, shouldSelect: Bool) {
+    private func createWorkspace(
+        name: String,
+        command: WorkspaceLaunchCommand,
+        customCommand: String,
+        cwd: String,
+        shouldSelect: Bool
+    ) {
         let workspaceID = UUID()
         let baselineChildPIDs = directChildProcessIDs(of: ProcessInfo.processInfo.processIdentifier)
         let terminalView = TerminalView(frame: terminalContainerView.bounds)
@@ -148,6 +157,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: uniqueWorkspaceName(for: name, cwd: cwd, excluding: nil),
             cwd: cwd,
             launchCommand: command,
+            customCommand: customCommand,
             terminalView: terminalView,
             createdAt: Date(),
             baselineChildPIDs: baselineChildPIDs
@@ -161,7 +171,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rebuildSidebarState()
         }
 
-        if let bootstrapCommand = command.bootstrapCommand {
+        if let bootstrapCommand = command.bootstrapCommand(customCommand: customCommand) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
                 self?.bootstrapWorkspace(id: workspaceID, command: bootstrapCommand)
             }
@@ -237,6 +247,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 name: workspace.name,
                 cwd: workspace.cwd,
                 launchCommand: workspace.launchCommand,
+                customCommand: workspace.customCommand,
                 foregroundProcessName: workspace.foregroundProcessName,
                 status: workspace.status,
                 createdAt: workspace.createdAt
@@ -277,20 +288,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard let rootPID = workspace.rootProcessID else {
                 workspace.status = "starting"
-                workspace.foregroundProcessName = workspace.launchCommand.title
+                workspace.foregroundProcessName = workspace.launchCommand.displayTitle(
+                    customCommand: workspace.customCommand
+                )
                 continue
             }
 
             if !currentChildren.contains(rootPID) && !processExists(rootPID) {
                 workspace.status = "dead"
-                workspace.foregroundProcessName = workspace.launchCommand.title
+                workspace.foregroundProcessName = workspace.launchCommand.displayTitle(
+                    customCommand: workspace.customCommand
+                )
                 continue
             }
 
             workspace.status = "running"
             workspace.foregroundProcessName = foregroundProcessName(forRootPID: rootPID)
                 ?? processName(for: rootPID)
-                ?? workspace.launchCommand.title
+                ?? workspace.launchCommand.displayTitle(customCommand: workspace.customCommand)
         }
 
         rebuildSidebarState()
@@ -465,6 +480,7 @@ private final class ManagedWorkspace {
     let id: UUID
     let cwd: String
     let launchCommand: WorkspaceLaunchCommand
+    let customCommand: String
     let terminalView: TerminalView
     let createdAt: Date
     let baselineChildPIDs: Set<Int32>
@@ -479,6 +495,7 @@ private final class ManagedWorkspace {
         name: String,
         cwd: String,
         launchCommand: WorkspaceLaunchCommand,
+        customCommand: String,
         terminalView: TerminalView,
         createdAt: Date,
         baselineChildPIDs: Set<Int32>
@@ -487,10 +504,11 @@ private final class ManagedWorkspace {
         self.name = name
         self.cwd = cwd
         self.launchCommand = launchCommand
+        self.customCommand = customCommand
         self.terminalView = terminalView
         self.createdAt = createdAt
         self.baselineChildPIDs = baselineChildPIDs
-        self.foregroundProcessName = launchCommand.title
+        self.foregroundProcessName = launchCommand.displayTitle(customCommand: customCommand)
         self.status = "starting"
     }
 }
