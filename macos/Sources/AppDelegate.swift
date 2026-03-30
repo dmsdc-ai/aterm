@@ -200,6 +200,102 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func whichPath(_ command: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [command]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let value = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        } catch {
+            return nil
+        }
+    }
+
+    private func resolveTeleptyFromShell(_ shellPath: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shellPath)
+        process.arguments = ["-lc", "command -v telepty 2>/dev/null || which telepty 2>/dev/null"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let value = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let value,
+                  !value.isEmpty,
+                  FileManager.default.isExecutableFile(atPath: value) else { return nil }
+            return value
+        } catch {
+            return nil
+        }
+    }
+
+    private func collectNodeManagerTeleptyPaths(homeDirectory: String) -> [String] {
+        var paths: [String] = []
+        let fileManager = FileManager.default
+
+        let nvmRoot = "\(homeDirectory)/.nvm/versions/node"
+        if let entries = try? fileManager.contentsOfDirectory(atPath: nvmRoot) {
+            for entry in entries.sorted(by: >) {
+                paths.append("\(nvmRoot)/\(entry)/bin/telepty")
+            }
+        }
+
+        let fnmRoot = "\(homeDirectory)/.fnm/node-versions"
+        if let entries = try? fileManager.contentsOfDirectory(atPath: fnmRoot) {
+            for entry in entries.sorted(by: >) {
+                paths.append("\(fnmRoot)/\(entry)/installation/bin/telepty")
+            }
+        }
+
+        return paths
+    }
+
+    private func findTeleptyBinary() -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        let homeDirectory = environment["HOME"] ?? NSHomeDirectory()
+
+        let shellCandidates = [
+            environment["SHELL"],
+            "/bin/zsh",
+            "/bin/bash",
+        ].compactMap { $0 }
+
+        for shellPath in shellCandidates {
+            if let resolved = resolveTeleptyFromShell(shellPath) {
+                return resolved
+            }
+        }
+
+        if let resolved = whichPath("telepty"),
+           FileManager.default.isExecutableFile(atPath: resolved) {
+            return resolved
+        }
+
+        let searchPaths = [
+            "\(homeDirectory)/.volta/bin/telepty",
+            "\(homeDirectory)/.local/bin/telepty",
+            "/opt/homebrew/bin/telepty",
+            "/usr/local/bin/telepty",
+        ] + collectNodeManagerTeleptyPaths(homeDirectory: homeDirectory)
+
+        return searchPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+
     private func ensureTeleptyDaemon() {
         DispatchQueue.global(qos: .utility).async {
             // Check if telepty daemon is already running
@@ -224,14 +320,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            // Find telepty binary
-            let searchPaths = [
-                ProcessInfo.processInfo.environment["HOME"].map { "\($0)/.nvm/versions/node/v20.20.0/bin/telepty" },
-                Optional("/usr/local/bin/telepty"),
-                Optional("/opt/homebrew/bin/telepty"),
-            ].compactMap { $0 }
-
-            guard let teleptyPath = searchPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            guard let teleptyPath = self.findTeleptyBinary() else {
                 NSLog("[aterm] telepty binary not found")
                 return
             }

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
@@ -20,6 +21,9 @@ const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'),
 );
+const TTY_REATTACH_FLAG = 'ATERM_POSTINSTALL_TTY_ATTACHED';
+
+console.log(`[aterm] postinstall start (${packageJson.version})`);
 
 const PLATFORM_PACKAGES = {
   darwin: {
@@ -29,6 +33,63 @@ const PLATFORM_PACKAGES = {
 
 function resolvePlatformPackage() {
   return PLATFORM_PACKAGES[process.platform]?.[process.arch] ?? null;
+}
+
+function canUseInteractiveInstaller() {
+  if (process.env.CI) {
+    return false;
+  }
+  if (process.env.npm_config_yes === 'true') {
+    return false;
+  }
+  return true;
+}
+
+function maybeReattachTTY() {
+  if (!canUseInteractiveInstaller()) {
+    return;
+  }
+  if (process.env[TTY_REATTACH_FLAG] === '1') {
+    return;
+  }
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    return;
+  }
+  if (process.platform === 'win32') {
+    return;
+  }
+
+  let ttyIn;
+  let ttyOut;
+  let ttyErr;
+
+  try {
+    ttyIn = fs.openSync('/dev/tty', 'r');
+    ttyOut = fs.openSync('/dev/tty', 'w');
+    ttyErr = fs.openSync('/dev/tty', 'w');
+  } catch {
+    return;
+  }
+
+  console.log('[aterm] reattaching postinstall to /dev/tty for interactive installer');
+  const result = spawnSync(process.execPath, [__filename], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      [TTY_REATTACH_FLAG]: '1',
+    },
+    stdio: [ttyIn, ttyOut, ttyErr],
+  });
+
+  fs.closeSync(ttyIn);
+  fs.closeSync(ttyOut);
+  fs.closeSync(ttyErr);
+
+  if (result.status !== 0) {
+    process.exit(result.status ?? 1);
+  }
+
+  process.exit(0);
 }
 
 async function collectInstallerPlan() {
@@ -167,6 +228,7 @@ function installNativeBundle() {
 }
 
 async function main() {
+  maybeReattachTTY();
   const plan = await collectInstallerPlan();
 
   let tuiModule = null;
