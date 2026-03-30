@@ -87,6 +87,7 @@ impl TerminalGridRenderer {
         self.ensure_line_buffers(width as f32, rows);
 
         let content = term.renderable_content();
+        let selection = &content.selection;
 
         // Cursor position for block cursor rendering.
         let cursor = &content.cursor;
@@ -153,7 +154,23 @@ impl TerminalGridRenderer {
                 continue;
             }
 
-            let fg = ansi_to_glyphon(&cell.fg);
+            // Check if cell is selected — swap fg/bg (highlight)
+            let is_selected = selection.as_ref().map_or(false, |sel| {
+                let point = alacritty_terminal::index::Point::new(
+                    alacritty_terminal::index::Line(line),
+                    alacritty_terminal::index::Column(col),
+                );
+                sel.contains(point)
+            });
+            let fg = if is_selected {
+                // Selected: white text on blue background (rendered via color swap)
+                GlyphonColor::rgb(0xff, 0xff, 0xff)
+            } else if cell.flags.contains(Flags::INVERSE) {
+                // INVERSE flag: use background color as foreground
+                GlyphonColor::rgb(0x13, 0x10, 0x10)
+            } else {
+                ansi_to_glyphon(&cell.fg)
+            };
             if fg != current_color && !current_text.is_empty() {
                 self.scratch_spans
                     .push((std::mem::take(&mut current_text), current_color));

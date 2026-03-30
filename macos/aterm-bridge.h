@@ -45,6 +45,15 @@ int32_t aterm_core_take_dirty(AtermCore* core);
 void aterm_core_set_dirty_callback(AtermCore* core, AtermDirtyCallback callback, void* userdata);
 void aterm_core_sync_pty(AtermCore* core);
 
+// Scroll
+void aterm_core_scroll(AtermCore* core, int32_t delta);
+
+// Selection
+void aterm_core_selection_start(AtermCore* core, uint32_t col, int32_t line, uint8_t side);
+void aterm_core_selection_update(AtermCore* core, uint32_t col, int32_t line, uint8_t side);
+void aterm_core_selection_clear(AtermCore* core);
+char* aterm_core_selection_text(const AtermCore* core);
+
 // Workspace list (JSON string, caller must free)
 char* aterm_core_list_workspaces(const AtermCore* core);
 void aterm_core_free_string(char* ptr);

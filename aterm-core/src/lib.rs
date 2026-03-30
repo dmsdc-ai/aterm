@@ -280,6 +280,59 @@ impl AtermCore {
             }
         }
     }
+
+    fn selection_start(&mut self, col: usize, line: i32, side: u8) {
+        use alacritty_terminal::selection::{Selection, SelectionType};
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        if let Some(ref mut terminal) = self.terminal {
+            let s = if side == 0 {
+                alacritty_terminal::index::Side::Left
+            } else {
+                alacritty_terminal::index::Side::Right
+            };
+            let point = Point::new(Line(line), Column(col));
+            let sel = Selection::new(SelectionType::Simple, point, s);
+            if let Ok(mut term) = terminal.terminal().lock() {
+                term.selection = Some(sel);
+            }
+        }
+    }
+
+    fn selection_update(&mut self, col: usize, line: i32, side: u8) {
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        if let Some(ref mut terminal) = self.terminal {
+            let s = if side == 0 {
+                alacritty_terminal::index::Side::Left
+            } else {
+                alacritty_terminal::index::Side::Right
+            };
+            let point = Point::new(Line(line), Column(col));
+            if let Ok(mut term) = terminal.terminal().lock() {
+                if let Some(ref mut sel) = term.selection {
+                    sel.update(point, s);
+                }
+            }
+        }
+    }
+
+    fn selection_clear(&mut self) {
+        if let Some(ref mut terminal) = self.terminal {
+            if let Ok(mut term) = terminal.terminal().lock() {
+                term.selection = None;
+            }
+        }
+    }
+
+    fn selection_text(&self) -> Option<String> {
+        if let Some(ref terminal) = self.terminal {
+            if let Ok(term) = terminal.terminal().lock() {
+                return term.selection_to_string();
+            }
+        }
+        None
+    }
 }
 
 // -- C-FFI Functions --
@@ -396,6 +449,45 @@ pub unsafe extern "C" fn aterm_core_set_dirty_callback(
 pub unsafe extern "C" fn aterm_core_sync_pty(core: *mut AtermCore) {
     if core.is_null() { return; }
     (*core).sync_pty();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_scroll(core: *mut AtermCore, delta: i32) {
+    if core.is_null() { return; }
+    if let Some(ref mut terminal) = (*core).terminal {
+        terminal.scroll(delta);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_selection_start(core: *mut AtermCore, col: u32, line: i32, side: u8) {
+    if core.is_null() { return; }
+    (*core).selection_start(col as usize, line, side);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_selection_update(core: *mut AtermCore, col: u32, line: i32, side: u8) {
+    if core.is_null() { return; }
+    (*core).selection_update(col as usize, line, side);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_selection_clear(core: *mut AtermCore) {
+    if core.is_null() { return; }
+    (*core).selection_clear();
+}
+
+/// Returns selected text or NULL. Caller must free with aterm_core_free_string.
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_selection_text(core: *const AtermCore) -> *mut c_char {
+    if core.is_null() { return std::ptr::null_mut(); }
+    match (*core).selection_text() {
+        Some(text) => match std::ffi::CString::new(text) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// Returns JSON string of internal workspaces. Caller must free with aterm_core_free_string.

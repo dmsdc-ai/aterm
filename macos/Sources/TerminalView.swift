@@ -300,6 +300,74 @@ class TerminalView: NSView, NSTextInputClient {
         return window.convertToScreen(winRect)
     }
 
+    // MARK: - Mouse Selection
+
+    /// Convert view pixel coordinates to terminal cell (col, line)
+    private func pixelToCell(_ point: NSPoint) -> (col: UInt32, line: Int32) {
+        guard let core = core else { return (0, 0) }
+        var cols: UInt16 = 0
+        var rows: UInt16 = 0
+        let backingSize = convertToBacking(bounds).size
+        aterm_core_grid_size(core, Float(backingSize.width), Float(backingSize.height), &cols, &rows)
+
+        let backingPoint = convertToBacking(point)
+        // Cell size in backing pixels
+        let cellW = backingSize.width / CGFloat(cols)
+        let cellH = backingSize.height / CGFloat(rows)
+
+        let col = UInt32(max(0, min(Int(backingPoint.x / cellW), Int(cols) - 1)))
+        // NSView Y is bottom-up, terminal Y is top-down
+        let flippedY = backingSize.height - backingPoint.y
+        let line = Int32(max(0, min(Int(flippedY / cellH), Int(rows) - 1)))
+
+        return (col, line)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let core = core else { return }
+        let loc = convert(event.locationInWindow, from: nil)
+        let cell = pixelToCell(loc)
+        let side: UInt8 = 0 // Left side
+
+        // Clear previous selection, start new
+        aterm_core_selection_clear(core)
+        aterm_core_selection_start(core, cell.col, cell.line, side)
+        aterm_core_render(core)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let core = core else { return }
+        let loc = convert(event.locationInWindow, from: nil)
+        let cell = pixelToCell(loc)
+        let side: UInt8 = 1 // Right side for drag
+
+        aterm_core_selection_update(core, cell.col, cell.line, side)
+        aterm_core_render(core)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        // Selection complete — keep it visible until next click or text input
+    }
+
+    // MARK: - Scroll
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let core = core else { return }
+        // Accumulate scroll delta — positive = scroll up (show history), negative = scroll down
+        let delta: Int32
+        if event.hasPreciseScrollingDeltas {
+            // Trackpad: smooth scrolling, accumulate fractional lines
+            delta = Int32(-event.scrollingDeltaY / 3.0)
+        } else {
+            // Mouse wheel: discrete steps
+            delta = Int32(-event.scrollingDeltaY)
+        }
+        if delta != 0 {
+            aterm_core_scroll(core, delta)
+            aterm_core_render(core)
+        }
+    }
+
     // MARK: - Special Keys (arrows, function keys)
 
     override func keyUp(with event: NSEvent) {
@@ -310,28 +378,39 @@ class TerminalView: NSView, NSTextInputClient {
         // Handle modifier key changes if needed
     }
 
-    // Capture Cmd+key and Ctrl+key that bypass keyDown
+    // Capture Cmd+key that bypass keyDown
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return false }
         guard let core = core else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command) else { return false }
 
-        // Cmd+C → send SIGINT (Ctrl+C) when no selection
-        if flags.contains(.command), event.keyCode == 8 { // Cmd+C
-            aterm_core_write_pty(core, "\u{03}", 1) // ETX
+        switch event.keyCode {
+        case 8: // Cmd+C → copy selection, or SIGINT if no selection
+            if let textPtr = aterm_core_selection_text(core) {
+                let text = String(cString: textPtr)
+                aterm_core_free_string(textPtr)
+                if !text.isEmpty {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                    aterm_core_selection_clear(core)
+                    aterm_core_render(core)
+                    return true
+                }
+            }
+            // No selection → send SIGINT
+            aterm_core_write_pty(core, "\u{03}", 1)
             return true
-        }
-
-        // Cmd+V → paste from clipboard
-        if flags.contains(.command), event.keyCode == 9 { // Cmd+V
+        case 9: // Cmd+V → paste from clipboard
             if let text = NSPasteboard.general.string(forType: .string) {
                 text.withCString { ptr in
                     aterm_core_write_pty(core, ptr, text.utf8.count)
                 }
             }
             return true
+        default:
+            return false
         }
-
-        return false
     }
 
     // doCommand handles special keys routed by interpretKeyEvents

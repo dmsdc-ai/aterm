@@ -70,6 +70,7 @@ app: swift
 	@echo '    <string>6.0</string>' >> $(APP_DIR)/Info.plist
 	@echo '</dict>' >> $(APP_DIR)/Info.plist
 	@echo '</plist>' >> $(APP_DIR)/Info.plist
+	codesign --force --deep --sign - $(BUILD_DIR)/aterm.app
 	@echo "[build] App bundle created: $(BUILD_DIR)/aterm.app"
 
 # Run
