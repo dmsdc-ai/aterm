@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
@@ -21,9 +20,6 @@ const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'),
 );
-const TTY_REATTACH_FLAG = 'ATERM_POSTINSTALL_TTY_ATTACHED';
-
-console.log(`[aterm] postinstall start (${packageJson.version})`);
 
 const PLATFORM_PACKAGES = {
   darwin: {
@@ -35,69 +31,12 @@ function resolvePlatformPackage() {
   return PLATFORM_PACKAGES[process.platform]?.[process.arch] ?? null;
 }
 
-function canUseInteractiveInstaller() {
-  if (process.env.CI) {
-    return false;
-  }
-  if (process.env.npm_config_yes === 'true') {
-    return false;
-  }
-  return true;
-}
-
-function maybeReattachTTY() {
-  if (!canUseInteractiveInstaller()) {
-    return;
-  }
-  if (process.env[TTY_REATTACH_FLAG] === '1') {
-    return;
-  }
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    return;
-  }
-  if (process.platform === 'win32') {
-    return;
-  }
-
-  let ttyIn;
-  let ttyOut;
-  let ttyErr;
-
-  try {
-    ttyIn = fs.openSync('/dev/tty', 'r');
-    ttyOut = fs.openSync('/dev/tty', 'w');
-    ttyErr = fs.openSync('/dev/tty', 'w');
-  } catch {
-    return;
-  }
-
-  console.log('[aterm] reattaching postinstall to /dev/tty for interactive installer');
-  const result = spawnSync(process.execPath, [__filename], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      [TTY_REATTACH_FLAG]: '1',
-    },
-    stdio: [ttyIn, ttyOut, ttyErr],
-  });
-
-  fs.closeSync(ttyIn);
-  fs.closeSync(ttyOut);
-  fs.closeSync(ttyErr);
-
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
-
-  process.exit(0);
-}
-
-async function collectInstallerPlan() {
+function buildDefaultPlan() {
   const mode = isGlobalInstall() ? 'global' : 'local';
   const installRoot = process.env.INIT_CWD ? path.resolve(process.env.INIT_CWD) : process.cwd();
   const projectRoot = mode === 'local' ? resolveProjectRoot(installRoot) : null;
 
-  const defaultPlan = {
+  return {
     installLevels: mode === 'global' ? ['system', 'user'] : ['project'],
     configPatch: {
       shell: { default: 'zsh' },
@@ -118,25 +57,6 @@ async function collectInstallerPlan() {
     },
     mode,
     projectRoot,
-  };
-
-  let tuiModule;
-  try {
-    tuiModule = await import('./tui-installer.js');
-  } catch (error) {
-    console.warn(`[aterm] installer TUI unavailable, falling back to defaults (${error.message})`);
-    return defaultPlan;
-  }
-
-  if (!tuiModule.shouldRunInstallerTui()) {
-    return defaultPlan;
-  }
-
-  const context = tuiModule.buildInstallerContext(mode, projectRoot);
-  const plan = await tuiModule.runInstallerTui(context);
-  return {
-    ...defaultPlan,
-    ...plan,
   };
 }
 
@@ -224,42 +144,12 @@ function installNativeBundle() {
   fs.mkdirSync(path.dirname(targetApp), { recursive: true });
   fs.cpSync(sourceApp, targetApp, { recursive: true });
 
-  console.log(`[aterm] installed native bundle from ${platformPackage}`);
 }
 
-async function main() {
-  maybeReattachTTY();
-  const plan = await collectInstallerPlan();
-
-  let tuiModule = null;
-  try {
-    tuiModule = await import('./tui-installer.js');
-  } catch {
-    tuiModule = null;
-  }
-
-  if (tuiModule?.shouldRunInstallerTui()) {
-    await tuiModule.showProgressScreen(async (progress) => {
-      applyInstallPlan(plan, progress);
-      progress('{bold}Staging native bundle{/bold}');
-      installNativeBundle();
-      progress('{green-fg}ok{/} native bundle ready');
-    });
-
-    await tuiModule.showDoneScreen([
-      'aterm setup is complete.',
-      '',
-      `Mode: ${plan.mode}`,
-      `Levels: ${plan.installLevels.join(', ')}`,
-      `Shell: ${plan.configPatch.shell?.default ?? 'zsh'}`,
-      `Workspace: ${plan.configPatch.workspace?.default ?? 'home'}`,
-      `Tailscale connect: ${plan.configPatch.tailscale?.connect_on_launch ? 'yes' : 'no'}`,
-    ]);
-    return;
-  }
-
+function main() {
+  const plan = buildDefaultPlan();
   applyInstallPlan(plan);
   installNativeBundle();
 }
 
-await main();
+main();

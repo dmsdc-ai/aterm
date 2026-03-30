@@ -1,0 +1,75 @@
+name: test-install
+
+on:
+  push:
+    paths:
+      - '.github/workflows/test-install.yml'
+      - 'npm/**'
+      - 'macos/**'
+      - 'aterm-core/**'
+      - 'Makefile'
+  pull_request:
+    paths:
+      - '.github/workflows/test-install.yml'
+      - 'npm/**'
+      - 'macos/**'
+      - 'aterm-core/**'
+      - 'Makefile'
+  workflow_dispatch:
+
+jobs:
+  install-check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.20.14'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Pack npm packages
+        run: |
+          cd npm/aterm-darwin-arm64
+          npm pack
+          cd ../aterm
+          npm pack
+
+      - name: Install with TTY emulation
+        env:
+          ATERM_HOME: ${{ runner.temp }}/aterm-home
+          ATERM_PREFIX: ${{ runner.temp }}/aterm-prefix
+        run: |
+          set -euo pipefail
+          mkdir -p "$ATERM_HOME" "$ATERM_PREFIX"
+          script -q /dev/null bash -lc "set -euo pipefail; HOME='$ATERM_HOME' npm install -g --prefix '$ATERM_PREFIX' '$GITHUB_WORKSPACE/npm/aterm-darwin-arm64/dmsdc-ai-aterm-darwin-arm64-0.1.4.tgz' '$GITHUB_WORKSPACE/npm/aterm/dmsdc-ai-aterm-0.1.4.tgz'"
+
+      - name: Verify user layout
+        env:
+          ATERM_HOME: ${{ runner.temp }}/aterm-home
+        run: |
+          set -euo pipefail
+          test -d "$ATERM_HOME/.aigentry/config"
+          test -d "$ATERM_HOME/.aigentry/data"
+          test -d "$ATERM_HOME/.aigentry/brain/local"
+          test -d "$ATERM_HOME/.aigentry/brain/profiles"
+          test -d "$ATERM_HOME/.aigentry/inbox"
+          test -d "$ATERM_HOME/.aigentry/telepty/shared"
+          test -d "$ATERM_HOME/.aigentry/cache/search"
+          test -d "$ATERM_HOME/.aigentry/logs"
+          test -f "$ATERM_HOME/.aigentry/config/aterm.json"
+
+      - name: Verify binary and version
+        env:
+          ATERM_HOME: ${{ runner.temp }}/aterm-home
+          ATERM_PREFIX: ${{ runner.temp }}/aterm-prefix
+        run: |
+          set -euo pipefail
+          test -x "$ATERM_PREFIX/bin/aterm"
+          version="$(HOME='$ATERM_HOME' '$ATERM_PREFIX/bin/aterm' --version)"
+          test "$version" = "0.1.4"

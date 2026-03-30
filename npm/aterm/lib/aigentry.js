@@ -246,6 +246,10 @@ export function getLegacyTeleptyShared(homeDir = os.homedir()) {
   return path.join(homeDir, '.telepty', 'shared');
 }
 
+export function getUserAtermConfigPath(homeDir = os.homedir()) {
+  return path.join(getUserAigentryRoot(homeDir), 'config', 'aterm.json');
+}
+
 export function resolveInstallHomeDir() {
   return resolveUserHomeFromSudoUser() ?? os.homedir();
 }

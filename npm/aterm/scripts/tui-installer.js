@@ -1,7 +1,11 @@
-import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { detectAiCliStatus, resolveInstallHomeDir } from '../lib/aigentry.js';
+import {
+  detectAiCliStatus,
+  resolveInstallHomeDir,
+  resolveProjectRoot,
+  updateConfigFile,
+} from '../lib/aigentry.js';
 
 const require = createRequire(import.meta.url);
 
@@ -56,7 +60,7 @@ function buildWorkspaceChoices(context) {
     });
   }
 
-  if (context.mode === 'local') {
+  if (context.projectRoot) {
     choices.push({
       title: 'current project',
       value: 'project',
@@ -101,7 +105,7 @@ function buildConfigPatch(context, answers) {
   };
 }
 
-export async function runInstallerTui(context) {
+export async function runFirstRunWizard(context) {
   const blessed = require('blessed');
   const prompts = (await import('prompts')).default;
 
@@ -111,10 +115,10 @@ export async function runInstallerTui(context) {
     [
       '{center}{bold}Aigentry Terminal Installer{/bold}{/center}',
       '',
-      'This installer will prepare the requested aigentry config level(s),',
-      'write default settings, and stage the native aterm bundle.',
+      'This wizard finishes your aterm setup before the native app launches.',
+      'It will save your preferred shell, workspace, and Tailscale defaults.',
       '',
-      `Detected install mode: ${context.mode}`,
+      `Package version: ${context.version}`,
     ],
     '{gray-fg}Press Enter to continue{/}',
   );
@@ -136,23 +140,14 @@ export async function runInstallerTui(context) {
 
   const workspaceChoices = buildWorkspaceChoices(context);
   const defaultResponses = {
-    installLevels: context.availableLevels.map(level => level.value),
     defaultShell: 'zsh',
     defaultWorkspace: workspaceChoices[0]?.value ?? 'home',
     tailscaleConnect: false,
   };
+  let cancelled = false;
 
   const responses = await prompts(
     [
-      {
-        type: 'multiselect',
-        name: 'installLevels',
-        message: 'Install level selection',
-        choices: context.availableLevels,
-        initial: 0,
-        instructions: false,
-        min: 1,
-      },
       {
         type: 'select',
         name: 'defaultShell',
@@ -181,9 +176,16 @@ export async function runInstallerTui(context) {
       },
     ],
     {
-      onCancel: () => true,
+      onCancel: () => {
+        cancelled = true;
+        return false;
+      },
     },
   );
+
+  if (cancelled) {
+    return null;
+  }
 
   const mergedAnswers = {
     ...defaultResponses,
@@ -191,13 +193,12 @@ export async function runInstallerTui(context) {
   };
 
   return {
-    installLevels: mergedAnswers.installLevels,
     configPatch: buildConfigPatch(context, mergedAnswers),
     summary: mergedAnswers,
   };
 }
 
-export function shouldRunInstallerTui() {
+export function shouldRunFirstRunWizard() {
   if (process.env.CI) {
     return false;
   }
@@ -207,38 +208,19 @@ export function shouldRunInstallerTui() {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
-export function buildInstallerContext(mode, projectRoot = null) {
+export function buildFirstRunWizardContext(version, cwd = process.cwd()) {
   const installHome = resolveInstallHomeDir();
+  const projectRoot = resolveProjectRoot(cwd);
   const orchestratorPath = path.join(installHome, 'projects', 'aigentry-orchestrator');
   const cliStatus = detectAiCliStatus(installHome);
-  const availableLevels = mode === 'global'
-    ? [
-        {
-          title: 'system',
-          value: 'system',
-          description: 'Create /etc/aigentry/config/aterm.json when writable',
-        },
-        {
-          title: 'user',
-          value: 'user',
-          description: `Create ${path.join(installHome, '.aigentry')}`,
-        },
-      ]
-    : [
-        {
-          title: 'project',
-          value: 'project',
-          description: `Create ${path.join(projectRoot ?? process.cwd(), '.aigentry')}`,
-        },
-      ];
 
   return {
-    mode,
+    version,
     projectRoot,
     cliStatus,
     orchestratorPath,
     orchestratorAvailable: require('node:fs').existsSync(orchestratorPath),
-    availableLevels,
+    userConfigPath: path.join(installHome, '.aigentry', 'config', 'aterm.json'),
   };
 }
 
@@ -287,4 +269,24 @@ export async function showDoneScreen(summaryLines) {
     summaryLines,
     '{green-fg}Run: aterm{/}',
   );
+}
+
+export async function completeFirstRunWizard(context, wizardResult) {
+  const blessed = require('blessed');
+  await showProgressScreen(async (progress) => {
+    progress('{bold}Saving setup{/bold}');
+    updateConfigFile(context.userConfigPath, {
+      ...wizardResult.configPatch,
+      setupCompleted: true,
+    });
+    progress(`{green-fg}ok{/} ${context.userConfigPath}`);
+  });
+
+  await showDoneScreen([
+    'aterm setup is complete.',
+    '',
+    `Shell: ${wizardResult.summary.defaultShell}`,
+    `Workspace: ${wizardResult.summary.defaultWorkspace}`,
+    `Tailscale connect: ${wizardResult.summary.tailscaleConnect ? 'yes' : 'no'}`,
+  ]);
 }

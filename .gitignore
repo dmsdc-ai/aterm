@@ -14,3 +14,6 @@ src-tauri/server-bundle.mjs
 target/
 build/
 .context-snapshot.md
+
+# npm pack artifacts
+*.tgz
