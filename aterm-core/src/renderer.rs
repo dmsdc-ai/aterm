@@ -151,15 +151,19 @@ impl TerminalGridRenderer {
 
             has_non_ascii |= !cell.c.is_ascii();
 
-            // Block cursor: render solid block at cursor position.
-            if cursor_visible && line == cursor_line && col == cursor_col {
-                let cursor_color = GlyphonColor::rgb(0xe8, 0xe4, 0xe0);
-                if cursor_color != current_color && !current_text.is_empty() {
+            // Cursor: render the actual character with inverted colors (Ghostty pattern).
+            // Background block is rendered via sel_bg_lines (cursor background layer).
+            let at_cursor = cursor_visible && line == cursor_line && col == cursor_col;
+            if at_cursor {
+                // Dark text on light cursor background — character remains visible
+                let cursor_fg = GlyphonColor::rgb(0x13, 0x10, 0x10); // dark bg color as fg
+                if cursor_fg != current_color && !current_text.is_empty() {
                     self.scratch_spans
                         .push((std::mem::take(&mut current_text), current_color));
                 }
-                current_color = cursor_color;
-                current_text.push('\u{2588}');
+                current_color = cursor_fg;
+                let ch = if cell.c == ' ' || cell.c == '\0' { ' ' } else { cell.c };
+                current_text.push(ch);
                 current_col += 1;
                 continue;
             }
@@ -217,15 +221,19 @@ impl TerminalGridRenderer {
         self.sel_bg_lines.truncate(self.lines.len());
 
         let sel_color = GlyphonColor::rgb(0x33, 0x66, 0xCC);
+        let cursor_bg_color = GlyphonColor::rgb(0xe8, 0xe4, 0xe0); // light cursor block
         let cw = self.cell_width();
         let metrics = Metrics::new(self.font_size, self.line_height);
         let w_f32 = width as f32;
         let lh = self.line_height;
 
-        for (idx, selected_cols) in line_selections.iter().enumerate() {
+        for idx in 0..self.lines.len() {
+            let selected_cols = if idx < line_selections.len() { &line_selections[idx] } else { &vec![] as &Vec<bool> };
             let has_selection = selected_cols.iter().any(|&s| s);
-            if has_selection {
-                // Ensure buffer exists
+            // Check if cursor is on this line
+            let cursor_on_line = cursor_visible && idx == cursor_line as usize && (cursor_line as usize) < rows;
+
+            if has_selection || cursor_on_line {
                 if self.sel_bg_lines[idx].is_none() {
                     let mut buf = Buffer::new(&mut self.font_system, metrics);
                     buf.set_size(&mut self.font_system, Some(w_f32), Some(lh));
@@ -233,10 +241,26 @@ impl TerminalGridRenderer {
                     self.sel_bg_lines[idx] = Some(buf);
                 }
 
-                // Build background string: full-block for selected cells, space for others
-                let bg_text: String = selected_cols
+                // Build background: selection blue for selected, cursor color for cursor, space for rest
+                let bg_spans: Vec<(String, GlyphonColor)> = (0..cols_count)
+                    .map(|c| {
+                        let is_sel = c < selected_cols.len() && selected_cols[c];
+                        let is_cur = cursor_on_line && c == cursor_col;
+                        if is_sel {
+                            ("\u{2588}".to_string(), sel_color)
+                        } else if is_cur {
+                            ("\u{2588}".to_string(), cursor_bg_color)
+                        } else {
+                            (" ".to_string(), GlyphonColor::rgba(0, 0, 0, 0))
+                        }
+                    })
+                    .collect();
+
+                let rich: Vec<(&str, Attrs)> = bg_spans
                     .iter()
-                    .map(|&sel| if sel { '\u{2588}' } else { ' ' })
+                    .map(|(text, color)| {
+                        (text.as_str(), Attrs::new().family(Family::Monospace).color(*color))
+                    })
                     .collect();
 
                 let bg_buf = self.sel_bg_lines[idx].as_mut().unwrap();
@@ -245,16 +269,12 @@ impl TerminalGridRenderer {
                 bg_buf.set_monospace_width(&mut self.font_system, Some(cw));
                 bg_buf.set_rich_text(
                     &mut self.font_system,
-                    vec![(
-                        bg_text.as_str(),
-                        Attrs::new().family(Family::Monospace).color(sel_color),
-                    )],
+                    rich,
                     Attrs::new().family(Family::Monospace).color(sel_color),
                     Shaping::Basic,
                 );
                 bg_buf.shape_until_scroll(&mut self.font_system, false);
             } else {
-                // No selection on this line — drop the background buffer
                 self.sel_bg_lines[idx] = None;
             }
         }
