@@ -97,7 +97,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         saveWorkspaces()
         processPollTimer?.invalidate()
         processPollTimer = nil
-        aterm_tailscale_shutdown()
+        let env = ProcessInfo.processInfo.environment
+        let tailscaleDisabledEnv = env["ATERM_TAILSCALE_ENABLED"].map { $0 == "0" || $0.lowercased() == "false" || $0.lowercased() == "no" } ?? false
+        let tailscaleDisabledDefaults = UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil && !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled")
+        if !tailscaleDisabledEnv && !tailscaleDisabledDefaults {
+            aterm_tailscale_shutdown()
+        }
     }
 
     // MARK: - Workspace Persistence
@@ -344,6 +349,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startTailscale() {
         let env = ProcessInfo.processInfo.environment
+
+        // Respect disabled setting: ATERM_TAILSCALE_ENABLED=0 or UserDefaults
+        if let envFlag = env["ATERM_TAILSCALE_ENABLED"], envFlag == "0" || envFlag.lowercased() == "false" || envFlag.lowercased() == "no" {
+            NSLog("[aterm] tailscale disabled via ATERM_TAILSCALE_ENABLED")
+            return
+        }
+        if !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled") && UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil {
+            NSLog("[aterm] tailscale disabled in settings")
+            return
+        }
+
         let result = withOptionalCString(env["ATERM_TAILSCALE_HOSTNAME"]) { hostnamePtr in
             withOptionalCString(env["ATERM_TAILSCALE_CONTROL_URL"]) { controlURLPtr in
                 withOptionalCString(env["ATERM_TAILSCALE_AUTHKEY"]) { authKeyPtr in
@@ -353,14 +369,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if result != 0 {
-            NSLog("[aterm] tailscale startup failed")
+            NSLog("[aterm] tailscale startup failed (no auth key or network issue) — skipping")
             return
         }
 
         logTailscaleStatus(prefix: "startup")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.logTailscaleStatus(prefix: "startup+2s")
-        }
     }
 
     private func logTailscaleStatus(prefix: String) {

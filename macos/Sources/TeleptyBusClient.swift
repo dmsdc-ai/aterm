@@ -116,10 +116,41 @@ class TeleptyBusClient: ObservableObject {
     private var reconnectTimer: Timer?
     private var corePtr: OpaquePointer?  // AtermCore*
 
+    // Exponential backoff state
+    private var failureCount: Int = 0
+    private var silentMode: Bool = false
+    private var lastSilentLog: Date = .distantPast
+    private static let maxBackoffInterval: TimeInterval = 60.0
+    private static let silentThreshold: Int = 5
+    private static let silentLogInterval: TimeInterval = 60.0
+
+    // Whether telepty binary is available at all
+    private var teleptyAvailable: Bool = false
+
     init(host: String = "127.0.0.1", port: Int = 3848) {
         self.busURL = URL(string: "ws://\(host):\(port)/api/bus")!
-        loadInitialSessions()
-        connect()
+        teleptyAvailable = Self.checkTeleptyExists()
+        if teleptyAvailable {
+            loadInitialSessions()
+            connect()
+        } else {
+            NSLog("[telepty-bus] telepty not installed — bus connection skipped")
+        }
+    }
+
+    private static func checkTeleptyExists() -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        proc.arguments = ["telepty"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 
     /// Set the aterm-core pointer for workspace polling
@@ -172,13 +203,18 @@ class TeleptyBusClient: ObservableObject {
     // MARK: - WebSocket connection
 
     func connect() {
+        guard teleptyAvailable else { return }
         let session = URLSession(configuration: .default)
         webSocketTask = session.webSocketTask(with: busURL)
         webSocketTask?.resume()
         connected = true
+        failureCount = 0
+        silentMode = false
         receiveMessage()
 
-        NSLog("[telepty-bus] connecting to %@", busURL.absoluteString)
+        if !silentMode {
+            NSLog("[telepty-bus] connecting to %@", busURL.absoluteString)
+        }
     }
 
     func disconnect() {
@@ -207,7 +243,9 @@ class TeleptyBusClient: ObservableObject {
                 self?.receiveMessage()
 
             case .failure(let error):
-                NSLog("[telepty-bus] WebSocket error: %@", error.localizedDescription)
+                if !(self?.silentMode ?? false) {
+                    NSLog("[telepty-bus] WebSocket error: %@", error.localizedDescription)
+                }
                 DispatchQueue.main.async {
                     self?.connected = false
                     self?.scheduleReconnect()
@@ -264,8 +302,26 @@ class TeleptyBusClient: ObservableObject {
     }
 
     private func scheduleReconnect() {
+        guard teleptyAvailable else { return }
+
         reconnectTimer?.invalidate()
-        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+        failureCount += 1
+
+        if failureCount >= Self.silentThreshold {
+            silentMode = true
+        }
+
+        if silentMode {
+            let now = Date()
+            if now.timeIntervalSince(lastSilentLog) >= Self.silentLogInterval {
+                NSLog("[telepty-bus] reconnect attempts: %d (silent mode, retrying every %.0fs)", failureCount, Self.maxBackoffInterval)
+                lastSilentLog = now
+            }
+        }
+
+        // Exponential backoff: 3s → 6s → 12s → 24s → 60s cap
+        let interval = min(3.0 * pow(2.0, Double(failureCount - 1)), Self.maxBackoffInterval)
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             self?.connect()
         }
     }

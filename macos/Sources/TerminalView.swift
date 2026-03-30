@@ -160,7 +160,9 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func keyDown(with event: NSEvent) {
         guard let core = core else { return }
+        #if DEBUG
         NSLog("[TV] keyDown keyCode=%d chars=%@ inputContext=%@", event.keyCode, event.characters ?? "nil", String(describing: self.inputContext))
+        #endif
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
@@ -201,12 +203,16 @@ class TerminalView: NSView, NSTextInputClient {
         keyTextAccumulator = []
         defer { keyTextAccumulator = nil }
 
+        #if DEBUG
         NSLog("[TV] calling interpretKeyEvents")
+        #endif
         self.interpretKeyEvents([event])
 
         // Process accumulated text from insertText calls
         if let acc = keyTextAccumulator, !acc.isEmpty {
+            #if DEBUG
             NSLog("[TV] accumulated %d text(s)", acc.count)
+            #endif
             for text in acc {
                 text.withCString { ptr in
                     aterm_core_write_pty(core, ptr, text.utf8.count)
@@ -216,13 +222,17 @@ class TerminalView: NSView, NSTextInputClient {
             // No text accumulated and no marked text — might be a key event
             // that interpretKeyEvents handled via doCommand (special keys).
             // doCommand already handled it, nothing to do here.
+            #if DEBUG
             NSLog("[TV] no text accumulated (handled by doCommand or IME)")
+            #endif
         }
     }
 
     // Called by NSTextInputClient when text is committed (Ghostty pattern)
     func insertText(_ string: Any, replacementRange: NSRange) {
+        #if DEBUG
         NSLog("[TV] insertText: %@, hasAccumulator=%@", String(describing: string), keyTextAccumulator != nil ? "true" : "false")
+        #endif
 
         // We must have an associated event
         guard NSApp.currentEvent != nil else { return }
@@ -255,7 +265,9 @@ class TerminalView: NSView, NSTextInputClient {
     // MARK: - NSTextInputClient (IME)
 
     func hasMarkedText() -> Bool {
+        #if DEBUG
         NSLog("[TV] hasMarkedText: %d", markedText.length)
+        #endif
         return markedText.length > 0
     }
 
@@ -265,12 +277,16 @@ class TerminalView: NSView, NSTextInputClient {
     }
 
     func selectedRange() -> NSRange {
+        #if DEBUG
         NSLog("[TV] selectedRange -> {0, 0}")
+        #endif
         return NSRange(location: 0, length: 0)
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        #if DEBUG
         NSLog("[TV] setMarkedText: %@ selectedRange=(%d,%d)", String(describing: string), selectedRange.location, selectedRange.length)
+        #endif
         switch string {
         case let v as NSAttributedString:
             markedText = NSMutableAttributedString(attributedString: v)
@@ -460,7 +476,9 @@ class TerminalView: NSView, NSTextInputClient {
 
     // doCommand handles special keys routed by interpretKeyEvents
     override func doCommand(by selector: Selector) {
+        #if DEBUG
         NSLog("[TV] doCommand: %@", NSStringFromSelector(selector))
+        #endif
         guard let core = core else { return }
 
         switch selector {
