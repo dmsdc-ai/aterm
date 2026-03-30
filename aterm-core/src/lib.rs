@@ -560,6 +560,22 @@ pub unsafe extern "C" fn aterm_core_selection_text(core: *const AtermCore) -> *m
     }
 }
 
+/// Check if the visible terminal screen contains a text pattern. Returns 1 if found, 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_screen_contains(
+    core: *const AtermCore,
+    pattern: *const c_char,
+) -> i32 {
+    if core.is_null() || pattern.is_null() {
+        return 0;
+    }
+    let pattern_str = CStr::from_ptr(pattern).to_string_lossy();
+    match &(*core).terminal {
+        Some(terminal) => terminal.screen_contains(&pattern_str) as i32,
+        None => 0,
+    }
+}
+
 /// Returns JSON string of internal workspaces. Caller must free with aterm_core_free_string.
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_list_workspaces(core: *const AtermCore) -> *mut c_char {

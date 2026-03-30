@@ -601,6 +601,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         text.withCString { ptr in
             aterm_core_write_pty(core, ptr, text.utf8.count)
         }
+
+        // Auto-accept trust prompt for CLI workspaces (claude/codex/gemini)
+        let isCli = command.contains("claude") || command.contains("codex") || command.contains("gemini")
+        if isCli {
+            watchForTrustPrompt(workspaceID: id)
+        }
+    }
+
+    /// Poll terminal screen for trust prompt; auto-accept with Enter when detected.
+    private func watchForTrustPrompt(workspaceID: UUID, attempts: Int = 0) {
+        guard attempts < 15 else { return } // Give up after 15 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self,
+                  let workspace = self.managedWorkspaces[workspaceID],
+                  let core = workspace.terminalView.corePointer else { return }
+
+            // Sync PTY so screen is up to date
+            aterm_core_sync_pty(core)
+
+            let hasTrust = "trust".withCString { pattern in
+                aterm_core_screen_contains(core, pattern) != 0
+            }
+
+            if hasTrust {
+                // Send Enter to accept the default (Yes) trust option
+                "\r".withCString { ptr in
+                    aterm_core_write_pty(core, ptr, 1)
+                }
+                NSLog("[aterm] auto-accepted workspace trust prompt for %@", workspace.name)
+            } else {
+                // Keep polling
+                self.watchForTrustPrompt(workspaceID: workspaceID, attempts: attempts + 1)
+            }
+        }
     }
 
     private func selectWorkspace(_ id: UUID) {

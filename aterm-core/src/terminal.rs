@@ -120,6 +120,27 @@ impl TerminalState {
         }
     }
 
+    /// Check if the visible screen contains a text pattern.
+    pub fn screen_contains(&self, pattern: &str) -> bool {
+        let term = match self.terminal.lock() {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        let grid = term.grid();
+        let cols = grid.columns();
+        let rows = grid.screen_lines();
+        for line_idx in 0..rows {
+            let row = &grid[alacritty_terminal::index::Line(line_idx as i32)];
+            let line_text: String = (0..cols)
+                .map(|col| row[alacritty_terminal::index::Column(col)].c)
+                .collect();
+            if line_text.contains(pattern) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn resize(&mut self, columns: usize, rows: usize) {
         let columns = columns.max(2);
         let rows = rows.max(1);

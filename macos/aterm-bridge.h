@@ -54,6 +54,9 @@ void aterm_core_selection_update(AtermCore* core, uint32_t col, int32_t line, ui
 void aterm_core_selection_clear(AtermCore* core);
 char* aterm_core_selection_text(const AtermCore* core);
 
+// Screen text search
+int32_t aterm_core_screen_contains(const AtermCore* core, const char* pattern);
+
 // Workspace list (JSON string, caller must free)
 char* aterm_core_list_workspaces(const AtermCore* core);
 char* aterm_core_detect_clis(void);
