@@ -103,6 +103,7 @@ function buildConfigPatch(context, answers) {
       connect_on_launch: answers.tailscaleConnect,
     },
     ai: {
+      defaultCLI: answers.defaultCLI,
       detected_clis: context.cliStatus,
     },
   };
@@ -145,6 +146,7 @@ export async function runFirstRunWizard(context) {
   const defaultResponses = {
     defaultShell: 'zsh',
     defaultWorkspace: workspaceChoices[0]?.value ?? 'home',
+    defaultCLI: context.cliStatus.claude ? 'claude' : context.cliStatus.codex ? 'codex' : context.cliStatus.gemini ? 'gemini' : 'none',
     tailscaleConnect: false,
   };
   let cancelled = false;
@@ -168,6 +170,18 @@ export async function runFirstRunWizard(context) {
         message: 'Default workspace / orchestrator target',
         choices: workspaceChoices,
         initial: 0,
+      },
+      {
+        type: 'select',
+        name: 'defaultCLI',
+        message: 'Default AI CLI for orchestrator workspace',
+        choices: [
+          { title: 'claude', value: 'claude', disabled: !context.cliStatus.claude },
+          { title: 'codex', value: 'codex', disabled: !context.cliStatus.codex },
+          { title: 'gemini', value: 'gemini', disabled: !context.cliStatus.gemini },
+          { title: 'none (plain zsh)', value: 'none' },
+        ],
+        initial: context.cliStatus.claude ? 0 : context.cliStatus.codex ? 1 : context.cliStatus.gemini ? 2 : 3,
       },
       {
         type: 'toggle',
@@ -290,6 +304,7 @@ export async function completeFirstRunWizard(context, wizardResult) {
     'aterm setup is complete.',
     '',
     `Shell: ${wizardResult.summary.defaultShell}`,
+    `AI CLI: ${wizardResult.summary.defaultCLI}`,
     `Workspace: ${wizardResult.summary.defaultWorkspace}`,
     `Tailscale connect: ${wizardResult.summary.tailscaleConnect ? 'yes' : 'no'}`,
   ]);

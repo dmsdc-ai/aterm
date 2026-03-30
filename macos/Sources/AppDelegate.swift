@@ -123,6 +123,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 "cwd": ws.cwd,
                 "resumeCommand": ws.launchCommand.bootstrapCommand(customCommand: ws.customCommand) ?? "",
                 "isActive": ws.status != "dead",
+                "isSystem": ws.isSystem,
             ] as [String: Any]
         }
         do {
@@ -182,12 +183,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let requestedCommand = WorkspaceLaunchCommand(rawValue: commandRaw) ?? .zsh
             let command = cliAvailable(for: requestedCommand) ? requestedCommand : .zsh
 
+            let system = entry["isSystem"] as? Bool ?? false
             createWorkspace(
                 name: name,
                 command: command,
                 customCommand: custom,
                 cwd: effectiveCwd,
-                shouldSelect: index == activeEntries.count - 1
+                shouldSelect: index == activeEntries.count - 1,
+                isSystem: system
             )
             count += 1
         }
@@ -213,32 +216,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func createDefaultWorkspace() {
-        let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
-        let hasClaude = FileManager.default.isExecutableFile(atPath: "/usr/local/bin/claude")
-            || FileManager.default.isExecutableFile(
-                atPath: (ProcessInfo.processInfo.environment["HOME"] ?? "") + "/.nvm/versions/node/v20.20.0/bin/claude"
-            )
-            || which("claude")
-
-        let orchestratorExists = FileManager.default.fileExists(atPath: orchestratorDir)
-
-        if hasClaude && orchestratorExists {
-            createWorkspace(
-                name: "orchestrator",
-                command: .claude,
-                customCommand: "",
-                cwd: orchestratorDir,
-                shouldSelect: true
-            )
-        } else {
-            createWorkspace(
-                name: hasClaude ? "orchestrator" : "main",
-                command: hasClaude ? .claude : .zsh,
-                customCommand: "",
-                cwd: orchestratorExists ? orchestratorDir : NSHomeDirectory(),
-                shouldSelect: true
-            )
+        // Read defaultCLI from aterm.json (set by TUI wizard)
+        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
+        var defaultCLI = "none"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+           let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let ai = config["ai"] as? [String: Any],
+           let cli = ai["defaultCLI"] as? String {
+            defaultCLI = cli
         }
+
+        // Map defaultCLI to WorkspaceLaunchCommand
+        let requestedCommand: WorkspaceLaunchCommand
+        switch defaultCLI {
+        case "claude": requestedCommand = .claude
+        case "codex": requestedCommand = .codex
+        case "gemini": requestedCommand = .gemini
+        default: requestedCommand = .zsh
+        }
+
+        // Verify CLI is installed, fallback to zsh if not
+        let command: WorkspaceLaunchCommand
+        if requestedCommand != .zsh && cliAvailable(for: requestedCommand) {
+            command = requestedCommand
+        } else if requestedCommand != .zsh {
+            NSLog("[aterm] %@ not found, starting with zsh", defaultCLI)
+            command = .zsh
+        } else {
+            command = .zsh
+        }
+
+        let isCliWorkspace = command != .zsh
+        let name = isCliWorkspace ? "orchestrator" : "main"
+        let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
+        let cwd = FileManager.default.fileExists(atPath: orchestratorDir) ? orchestratorDir : NSHomeDirectory()
+
+        createWorkspace(
+            name: name,
+            command: command,
+            customCommand: "",
+            cwd: cwd,
+            shouldSelect: true,
+            isSystem: isCliWorkspace
+        )
     }
 
     private func which(_ command: String) -> Bool {
@@ -549,7 +569,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         command: WorkspaceLaunchCommand,
         customCommand: String,
         cwd: String,
-        shouldSelect: Bool
+        shouldSelect: Bool,
+        isSystem: Bool = false
     ) {
         let workspaceID = UUID()
         let baselineChildPIDs = directChildProcessIDs(of: ProcessInfo.processInfo.processIdentifier)
@@ -567,10 +588,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             customCommand: customCommand,
             terminalView: terminalView,
             createdAt: Date(),
-            baselineChildPIDs: baselineChildPIDs
+            baselineChildPIDs: baselineChildPIDs,
+            isSystem: isSystem
         )
         managedWorkspaces[workspaceID] = workspace
-        workspaceOrder.append(workspaceID)
+        // System workspaces always first
+        if isSystem {
+            workspaceOrder.insert(workspaceID, at: 0)
+        } else {
+            workspaceOrder.append(workspaceID)
+        }
 
         if shouldSelect {
             selectWorkspace(workspaceID)
@@ -637,6 +664,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func restartSystemWorkspace(id: UUID) {
+        guard let workspace = managedWorkspaces[id],
+              workspace.isSystem,
+              workspace.status == "dead",
+              let core = workspace.terminalView.corePointer else { return }
+
+        NSLog("[aterm] auto-restarting system workspace: %@", workspace.name)
+        // Re-spawn shell
+        let cwd = workspace.cwd
+        var cols: UInt16 = 0
+        var rows: UInt16 = 0
+        let backingSize = workspace.terminalView.convertToBacking(workspace.terminalView.bounds).size
+        aterm_core_grid_size(core, Float(backingSize.width), Float(backingSize.height), &cols, &rows)
+        cwd.withCString { cwdPtr in
+            aterm_core_spawn_shell(core, cwdPtr, cols > 2 ? cols : 80, rows > 1 ? rows : 24)
+        }
+        workspace.status = "starting"
+
+        // Re-bootstrap CLI
+        if let bootstrapCmd = workspace.launchCommand.bootstrapCommand(customCommand: workspace.customCommand) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.bootstrapWorkspace(id: id, command: bootstrapCmd)
+            }
+        }
+    }
+
     private func selectWorkspace(_ id: UUID) {
         guard let workspace = managedWorkspaces[id] else { return }
 
@@ -663,7 +716,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func closeWorkspace(id: UUID) {
-        guard let workspace = managedWorkspaces.removeValue(forKey: id) else { return }
+        guard let workspace = managedWorkspaces[id] else { return }
+        if workspace.isSystem { return } // System workspaces cannot be closed
+        managedWorkspaces.removeValue(forKey: id)
 
         workspace.terminalView.removeFromSuperview()
         workspaceOrder.removeAll { $0 == id }
@@ -695,7 +750,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 customCommand: workspace.customCommand,
                 foregroundProcessName: workspace.foregroundProcessName,
                 status: workspace.status,
-                createdAt: workspace.createdAt
+                createdAt: workspace.createdAt,
+                isSystem: workspace.isSystem
             )
         }
     }
@@ -745,6 +801,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 workspace.foregroundProcessName = workspace.launchCommand.displayTitle(
                     customCommand: workspace.customCommand
                 )
+                // Auto-restart system workspaces after 2s
+                if workspace.isSystem {
+                    let wsID = id
+                    workspace.rootProcessID = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        self?.restartSystemWorkspace(id: wsID)
+                    }
+                }
                 continue
             }
 
@@ -946,6 +1010,7 @@ private final class ManagedWorkspace {
     var rootProcessID: Int32?
     var foregroundProcessName: String
     var status: String
+    var isSystem: Bool
 
     init(
         id: UUID,
@@ -955,7 +1020,8 @@ private final class ManagedWorkspace {
         customCommand: String,
         terminalView: TerminalView,
         createdAt: Date,
-        baselineChildPIDs: Set<Int32>
+        baselineChildPIDs: Set<Int32>,
+        isSystem: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -967,6 +1033,7 @@ private final class ManagedWorkspace {
         self.baselineChildPIDs = baselineChildPIDs
         self.foregroundProcessName = launchCommand.displayTitle(customCommand: customCommand)
         self.status = "starting"
+        self.isSystem = isSystem
     }
 }
 

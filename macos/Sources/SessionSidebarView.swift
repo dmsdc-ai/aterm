@@ -64,6 +64,7 @@ struct SidebarWorkspace: Identifiable, Equatable {
     var foregroundProcessName: String
     var status: String
     var createdAt: Date
+    var isSystem: Bool = false
 }
 
 struct WorkspaceDraft: Identifiable, Equatable {
@@ -449,9 +450,11 @@ struct WorkspaceRowView: View {
         .onTapGesture(perform: onSelect)
         .contextMenu {
             Button("New Session", action: onNew)
-            Button("Rename", action: onRename)
-            Divider()
-            Button("Close", role: .destructive, action: onClose)
+            if !workspace.isSystem {
+                Button("Rename", action: onRename)
+                Divider()
+                Button("Close", role: .destructive, action: onClose)
+            }
         }
     }
 
