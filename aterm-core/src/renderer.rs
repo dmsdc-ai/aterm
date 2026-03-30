@@ -4,12 +4,149 @@ use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution,
     Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use wgpu::util::DeviceExt;
 
 use alacritty_terminal::event::EventListener;
-use alacritty_terminal::term::{cell::Flags, Term};
+use alacritty_terminal::term::{cell::Flags, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 const DEFAULT_FG: GlyphonColor = GlyphonColor::rgb(0xe8, 0xe4, 0xe0);
+
+// --- wgpu colored-rectangle pipeline for selection/cursor backgrounds ---
+
+const RECT_SHADER: &str = "
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return in.color;
+}
+";
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct RectVertex {
+    position: [f32; 2],
+    color: [f32; 4],
+}
+
+struct RectRenderer {
+    pipeline: wgpu::RenderPipeline,
+    vertices: Vec<RectVertex>,
+}
+
+impl RectRenderer {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rect_shader"),
+            source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rect_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<RectVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 8,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                    ],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        Self { pipeline, vertices: Vec::new() }
+    }
+
+    fn clear(&mut self) {
+        self.vertices.clear();
+    }
+
+    /// Push a colored rect in pixel coordinates. Converts to clip space internally.
+    fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, vp_w: f32, vp_h: f32, color: [f32; 4]) {
+        let x0 = x / vp_w * 2.0 - 1.0;
+        let y0 = 1.0 - y / vp_h * 2.0;
+        let x1 = (x + w) / vp_w * 2.0 - 1.0;
+        let y1 = 1.0 - (y + h) / vp_h * 2.0;
+        let c = color;
+        self.vertices.extend_from_slice(&[
+            RectVertex { position: [x0, y0], color: c },
+            RectVertex { position: [x1, y0], color: c },
+            RectVertex { position: [x0, y1], color: c },
+            RectVertex { position: [x1, y0], color: c },
+            RectVertex { position: [x1, y1], color: c },
+            RectVertex { position: [x0, y1], color: c },
+        ]);
+    }
+
+    /// Create a GPU buffer from collected vertices. Call BEFORE begin_render_pass.
+    fn prepare(&self, device: &wgpu::Device) -> Option<wgpu::Buffer> {
+        if self.vertices.is_empty() {
+            return None;
+        }
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                self.vertices.as_ptr() as *const u8,
+                self.vertices.len() * std::mem::size_of::<RectVertex>(),
+            )
+        };
+        Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rect_vertices"),
+            contents: bytes,
+            usage: wgpu::BufferUsages::VERTEX,
+        }))
+    }
+}
+
+// --- Terminal grid renderer ---
 
 pub struct TerminalGridRenderer {
     font_system: FontSystem,
@@ -21,10 +158,11 @@ pub struct TerminalGridRenderer {
     line_height: f32,
     scale_factor: f32,
     lines: Vec<RenderLine>,
-    sel_bg_lines: Vec<Option<Buffer>>,
+    rect_renderer: RectRenderer,
     scratch_spans: Vec<(String, GlyphonColor)>,
     last_width: f32,
     last_font_size: f32,
+    last_alt_screen: bool,
 }
 
 struct RenderLine {
@@ -42,6 +180,7 @@ impl TerminalGridRenderer {
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
+        let rect_renderer = RectRenderer::new(device, format);
 
         Self {
             font_system,
@@ -53,10 +192,11 @@ impl TerminalGridRenderer {
             line_height: 19.0 * scale_factor,
             scale_factor,
             lines: Vec::new(),
-            sel_bg_lines: Vec::new(),
+            rect_renderer,
             scratch_spans: Vec::with_capacity(256),
             last_width: -1.0,
             last_font_size: -1.0,
+            last_alt_screen: false,
         }
     }
 
@@ -91,16 +231,23 @@ impl TerminalGridRenderer {
         let rows = self.grid_size(width as f32, height as f32).1 as usize;
         self.ensure_line_buffers(width as f32, rows);
 
+        // --- Screen mode change detection (Ghostty pattern) ---
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        if alt_screen != self.last_alt_screen {
+            for line in &mut self.lines {
+                line.spans.clear();
+            }
+            self.last_alt_screen = alt_screen;
+        }
+
         let content = term.renderable_content();
         let selection = &content.selection;
 
-        // Cursor position for block cursor rendering.
         let cursor = &content.cursor;
         let cursor_visible = cursor.shape != CursorShape::Hidden;
         let cursor_line = cursor.point.line.0;
         let cursor_col = cursor.point.column.0;
 
-        // Track selected cells for background highlight
         let cols_count = self.grid_size(width as f32, height as f32).0 as usize;
         let mut line_selections: Vec<Vec<bool>> = Vec::new();
 
@@ -133,7 +280,6 @@ impl TerminalGridRenderer {
                 current_col = 0;
                 current_color = DEFAULT_FG;
                 has_non_ascii = false;
-                // Ensure line_selections has an entry for this line
                 while line_selections.len() <= line_index {
                     line_selections.push(vec![false; cols_count]);
                 }
@@ -148,27 +294,17 @@ impl TerminalGridRenderer {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
                 || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             {
+                current_text.push(' '); // Spacer occupies cell_width; wide char glyph overflows into it
                 current_col += 1;
                 continue;
             }
 
             has_non_ascii |= !cell.c.is_ascii();
 
-            // Cursor: bright white block at cursor position — always visible.
+            // --- Cursor: render actual character with inverted color ---
             let at_cursor = cursor_visible && line == cursor_line && col == cursor_col;
-            if at_cursor {
-                let cursor_color = GlyphonColor::rgb(0xff, 0xff, 0xff);
-                if cursor_color != current_color && !current_text.is_empty() {
-                    self.scratch_spans
-                        .push((std::mem::take(&mut current_text), current_color));
-                }
-                current_color = cursor_color;
-                current_text.push('\u{2588}');
-                current_col += 1;
-                continue;
-            }
 
-            // Check if cell is selected — swap fg/bg (highlight)
+            // Check if cell is selected
             let is_selected = selection.as_ref().map_or(false, |sel| {
                 let point = alacritty_terminal::index::Point::new(
                     alacritty_terminal::index::Line(line),
@@ -179,21 +315,23 @@ impl TerminalGridRenderer {
             if is_selected && line_index < line_selections.len() && col < cols_count {
                 line_selections[line_index][col] = true;
             }
-            let fg = if is_selected {
-                // Selected: white text on blue background (rendered via color swap)
+
+            // Determine foreground color with priority: cursor > selection > inverse > normal
+            let fg = if at_cursor {
+                GlyphonColor::rgb(0x13, 0x10, 0x10) // dark text on white cursor bg
+            } else if is_selected {
                 GlyphonColor::rgb(0xff, 0xff, 0xff)
             } else if cell.flags.contains(Flags::INVERSE) {
-                // INVERSE flag: use background color as foreground
                 GlyphonColor::rgb(0x13, 0x10, 0x10)
             } else {
                 ansi_to_glyphon(&cell.fg)
             };
+
             if fg != current_color && !current_text.is_empty() {
                 self.scratch_spans
                     .push((std::mem::take(&mut current_text), current_color));
             }
             current_color = fg;
-            // Treat null bytes as spaces to avoid rendering artifacts
             let ch = if cell.c == '\0' { ' ' } else { cell.c };
             current_text.push(ch);
             current_col += 1;
@@ -215,104 +353,42 @@ impl TerminalGridRenderer {
             changed_lines += self.update_line(idx, false, width as f32) as usize;
         }
 
-        // --- Selection background buffers ---
-        // Ensure sel_bg_lines has correct capacity
-        while self.sel_bg_lines.len() < self.lines.len() {
-            self.sel_bg_lines.push(None);
-        }
-        self.sel_bg_lines.truncate(self.lines.len());
-
-        let sel_color = GlyphonColor::rgb(0x33, 0x66, 0xCC);
-        let cursor_bg_color = GlyphonColor::rgb(0xff, 0xff, 0xff); // bright white cursor block
+        // --- Build background rects (selection + cursor) ---
         let cw = self.cell_width();
-        let metrics = Metrics::new(self.font_size, self.line_height);
-        let w_f32 = width as f32;
         let lh = self.line_height;
+        let w_f = width as f32;
+        let h_f = height as f32;
+        self.rect_renderer.clear();
 
-        for idx in 0..self.lines.len() {
-            let selected_cols = if idx < line_selections.len() { &line_selections[idx] } else { &vec![] as &Vec<bool> };
-            let has_selection = selected_cols.iter().any(|&s| s);
-            // Check if cursor is on this line
-            let cursor_on_line = cursor_visible && idx == cursor_line as usize && (cursor_line as usize) < rows;
-
-            if has_selection || cursor_on_line {
-                if self.sel_bg_lines[idx].is_none() {
-                    let mut buf = Buffer::new(&mut self.font_system, metrics);
-                    buf.set_size(&mut self.font_system, Some(w_f32), Some(lh));
-                    buf.set_monospace_width(&mut self.font_system, Some(cw));
-                    self.sel_bg_lines[idx] = Some(buf);
+        for (idx, line_sel) in line_selections.iter().enumerate() {
+            for (c, &selected) in line_sel.iter().enumerate() {
+                if selected {
+                    self.rect_renderer.push_rect(
+                        4.0 + c as f32 * cw,
+                        4.0 + idx as f32 * lh,
+                        cw, lh, w_f, h_f,
+                        [0.2, 0.4, 0.8, 0.7],
+                    );
                 }
-
-                // Build background: selection blue for selected, cursor color for cursor, space for rest
-                let bg_spans: Vec<(String, GlyphonColor)> = (0..cols_count)
-                    .map(|c| {
-                        let is_sel = c < selected_cols.len() && selected_cols[c];
-                        let is_cur = cursor_on_line && c == cursor_col;
-                        if is_sel {
-                            ("\u{2588}".to_string(), sel_color)
-                        } else if is_cur {
-                            ("\u{2588}".to_string(), cursor_bg_color)
-                        } else {
-                            (" ".to_string(), GlyphonColor::rgba(0, 0, 0, 0))
-                        }
-                    })
-                    .collect();
-
-                let rich: Vec<(&str, Attrs)> = bg_spans
-                    .iter()
-                    .map(|(text, color)| {
-                        (text.as_str(), Attrs::new().family(Family::Monospace).color(*color))
-                    })
-                    .collect();
-
-                let bg_buf = self.sel_bg_lines[idx].as_mut().unwrap();
-                bg_buf.set_metrics(&mut self.font_system, metrics);
-                bg_buf.set_size(&mut self.font_system, Some(w_f32), Some(lh));
-                bg_buf.set_monospace_width(&mut self.font_system, Some(cw));
-                bg_buf.set_rich_text(
-                    &mut self.font_system,
-                    rich,
-                    Attrs::new().family(Family::Monospace).color(sel_color),
-                    Shaping::Basic,
-                );
-                bg_buf.shape_until_scroll(&mut self.font_system, false);
-            } else {
-                self.sel_bg_lines[idx] = None;
             }
         }
-        // Clear background buffers for lines beyond line_selections
-        for idx in line_selections.len()..self.sel_bg_lines.len() {
-            self.sel_bg_lines[idx] = None;
+
+        if cursor_visible && (cursor_line as usize) < rows {
+            self.rect_renderer.push_rect(
+                4.0 + cursor_col as f32 * cw,
+                4.0 + cursor_line as f32 * lh,
+                cw, lh, w_f, h_f,
+                [1.0, 1.0, 1.0, 1.0],
+            );
         }
+
+        let rect_buffer = self.rect_renderer.prepare(device);
 
         let shape_elapsed = render_start.elapsed();
 
-        // Build text_areas: background layer (selection) FIRST, then foreground (text)
-        let mut text_areas: Vec<TextArea<'_>> = Vec::new();
-
-        // Background layer (selection highlights)
-        for (idx, bg) in self.sel_bg_lines.iter().enumerate() {
-            if let Some(ref buffer) = bg {
-                text_areas.push(TextArea {
-                    buffer,
-                    left: 4.0,
-                    top: 4.0 + idx as f32 * self.line_height,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: width as i32,
-                        bottom: height as i32,
-                    },
-                    default_color: sel_color,
-                    custom_glyphs: &[],
-                });
-            }
-        }
-
-        // Foreground layer (text)
-        for (idx, line) in self.lines.iter().enumerate() {
-            text_areas.push(TextArea {
+        // Build text areas — foreground only
+        let text_areas: Vec<TextArea<'_>> = self.lines.iter().enumerate().map(|(idx, line)| {
+            TextArea {
                 buffer: &line.buffer,
                 left: 4.0,
                 top: 4.0 + idx as f32 * self.line_height,
@@ -325,8 +401,8 @@ impl TerminalGridRenderer {
                 },
                 default_color: DEFAULT_FG,
                 custom_glyphs: &[],
-            });
-        }
+            }
+        }).collect();
 
         self.text_renderer
             .prepare(
@@ -340,7 +416,6 @@ impl TerminalGridRenderer {
             )
             .unwrap();
 
-        // Single render pass: clear background + render text
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("terminal_render"),
         });
@@ -366,6 +441,14 @@ impl TerminalGridRenderer {
                 occlusion_query_set: None,
             });
 
+            // Background rects (selection + cursor) drawn FIRST
+            if let Some(ref buf) = rect_buffer {
+                pass.set_pipeline(&self.rect_renderer.pipeline);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..self.rect_renderer.vertices.len() as u32, 0..1);
+            }
+
+            // Text on top
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .unwrap();
@@ -438,6 +521,7 @@ impl TerminalGridRenderer {
     }
 
     fn update_line(&mut self, line_index: usize, has_non_ascii: bool, width: f32) -> bool {
+        let cw = self.cell_width();
         let line = &mut self.lines[line_index];
         if line.has_non_ascii == has_non_ascii && line.spans == self.scratch_spans {
             return false;
@@ -458,6 +542,11 @@ impl TerminalGridRenderer {
             })
             .collect();
         let shaping = if has_non_ascii { Shaping::Advanced } else { Shaping::Basic };
+
+        // Force all chars to cell_width advance. Wide CJK chars occupy 2 cells
+        // because a space is pushed for WIDE_CHAR_SPACER (cell_width + cell_width).
+        // The CJK glyph overflows visually into the spacer cell naturally.
+        line.buffer.set_monospace_width(&mut self.font_system, Some(cw));
 
         line.buffer.set_metrics(
             &mut self.font_system,

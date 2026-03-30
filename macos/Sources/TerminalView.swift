@@ -423,7 +423,13 @@ class TerminalView: NSView, NSTextInputClient {
 
         switch selector {
         case #selector(insertNewline(_:)):
-            aterm_core_named_key(core, UInt32(ATERM_KEY_ENTER))
+            // If inside interpretKeyEvents (IME may have just committed text),
+            // defer Enter so committed text is sent to PTY first.
+            if keyTextAccumulator != nil {
+                keyTextAccumulator!.append("\r")
+            } else {
+                aterm_core_named_key(core, UInt32(ATERM_KEY_ENTER))
+            }
         case #selector(deleteBackward(_:)):
             aterm_core_named_key(core, UInt32(ATERM_KEY_BACKSPACE))
         case #selector(deleteWordBackward(_:)): // Option+Backspace → ESC DEL (word delete)

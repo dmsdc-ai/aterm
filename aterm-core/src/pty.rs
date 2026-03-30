@@ -670,6 +670,14 @@ fn reader_loop(
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                // Feed RAW bytes to VTE parser immediately — no UTF-8 filtering.
+                // Prevents escape sequence loss when non-UTF-8 bytes are present.
+                if let Ok(mut tb) = term_bytes.lock() {
+                    tb.extend_from_slice(&buf[..n]);
+                }
+                signal.mark_dirty();
+
+                // UTF-8 safe path for display buffer + codex resume monitoring
                 combined.clear();
                 combined.extend_from_slice(&leftover);
                 combined.extend_from_slice(&buf[..n]);
@@ -677,6 +685,10 @@ fn reader_loop(
                 let (valid, remainder) = split_at_utf8_boundary(&combined);
                 let data = std::str::from_utf8(valid).unwrap_or("").to_string();
                 leftover = remainder.to_vec();
+                // Safety: prevent leftover from growing unbounded with stuck invalid bytes
+                if leftover.len() > 4 && std::str::from_utf8(&leftover).is_err() {
+                    leftover.clear();
+                }
 
                 if data.is_empty() {
                     continue;
@@ -685,10 +697,6 @@ fn reader_loop(
                 if let Ok(mut b) = buffer.lock() {
                     b.push(data.clone());
                 }
-                if let Ok(mut tb) = term_bytes.lock() {
-                    tb.extend_from_slice(data.as_bytes());
-                }
-                signal.mark_dirty();
 
                 if codex_resume_monitor {
                     let normalized = normalize_terminal_text(&data);
