@@ -193,7 +193,9 @@ impl TerminalGridRenderer {
                     .push((std::mem::take(&mut current_text), current_color));
             }
             current_color = fg;
-            current_text.push(cell.c);
+            // Treat null bytes as spaces to avoid rendering artifacts
+            let ch = if cell.c == '\0' { ' ' } else { cell.c };
+            current_text.push(ch);
             current_col += 1;
         }
 
