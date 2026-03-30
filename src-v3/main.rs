@@ -20,7 +20,6 @@ use crate::terminal::TerminalState;
 
 /// 60fps is sufficient for a terminal.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const IME_REARM_DELAY: Duration = Duration::from_millis(30);
 
 struct GpuState {
     surface: wgpu::Surface<'static>,
@@ -51,8 +50,6 @@ struct App {
     #[cfg(target_os = "macos")]
     ime_marked: Option<String>,
     ime_composing: bool,
-    ime_recently_disabled: bool,
-    ime_rearm_at: Option<Instant>,
 }
 
 impl App {
@@ -78,8 +75,6 @@ impl App {
             #[cfg(target_os = "macos")]
             ime_marked: None,
             ime_composing: false,
-            ime_recently_disabled: false,
-            ime_rearm_at: None,
         }
     }
 
@@ -286,20 +281,6 @@ impl App {
         }
     }
 
-    fn process_ime_recovery(&mut self) {
-        let now = Instant::now();
-
-        if let Some(rearm_at) = self.ime_rearm_at {
-            if now >= rearm_at && self.window_focused {
-                self.ime_rearm_at = None;
-                self.ime_recently_disabled = false;
-                self.set_winit_ime_allowed(false);
-                self.set_winit_ime_allowed(true);
-                eprintln!("[ime/recovery] rearmed after Disabled→Enabled");
-            }
-        }
-    }
-
     fn clear_ime_preedit_state(&mut self) {
         self.ime_composing = false;
         #[cfg(target_os = "macos")]
@@ -401,7 +382,6 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.process_ime_recovery();
         // Native IME disabled — no sync needed.
         // self.sync_native_ime();
         // Poll PTY dirty flag every tick (EventLoopProxy unreliable on macOS).
@@ -490,8 +470,6 @@ impl ApplicationHandler for App {
                 if focused {
                     self.set_winit_ime_allowed(true);
                 } else {
-                    self.ime_recently_disabled = false;
-                    self.ime_rearm_at = None;
                     self.clear_ime_preedit_state();
                 }
             }
@@ -503,7 +481,6 @@ impl ApplicationHandler for App {
                     if let Some(ref text) = key_event.text {
                         let s = text.as_str();
                         if !s.is_empty() && !self.ime_composing {
-                            self.ime_recently_disabled = false;
                             self.write_to_pty(s);
                         }
                     }
@@ -513,10 +490,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::Ime(Ime::Enabled) => {
                 eprintln!("[ime] Enabled");
-                if self.ime_recently_disabled {
-                    self.ime_rearm_at = Some(Instant::now() + IME_REARM_DELAY);
-                    eprintln!("[ime/recovery] scheduled after Disabled→Enabled");
-                }
             }
 
             WindowEvent::Ime(Ime::Preedit(ref text, _cursor)) => {
@@ -532,7 +505,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::Ime(Ime::Commit(ref text)) => {
                 self.clear_ime_preedit_state();
-                self.ime_recently_disabled = false;
                 self.write_to_pty(text);
                 eprintln!("[ime] Commit: {:?}", text);
                 self.mark_dirty();
@@ -540,8 +512,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::Ime(Ime::Disabled) => {
                 self.clear_ime_preedit_state();
-                self.ime_recently_disabled = self.window_focused;
-                self.ime_rearm_at = None;
                 eprintln!("[ime] Disabled");
             }
 

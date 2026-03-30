@@ -12,3 +12,5 @@ src-tauri/server-bundle.mjs
 # Build metadata
 .build-number
 target/
+build/
+.context-snapshot.md
