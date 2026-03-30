@@ -74,5 +74,5 @@ jobs:
         run: |
           set -euo pipefail
           test -x "$ATERM_PREFIX/bin/aterm"
-          version="$(HOME='$ATERM_HOME' '$ATERM_PREFIX/bin/aterm' --version)"
+          version="$(HOME="$ATERM_HOME" "$ATERM_PREFIX/bin/aterm" --version)"
           test "$version" = "0.1.4"
