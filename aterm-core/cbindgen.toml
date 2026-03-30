@@ -1,0 +1,10 @@
+language = "C"
+include_guard = "ATERM_CORE_H"
+no_includes = true
+sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
+
+[export]
+prefix = "aterm_"
+
+[export.rename]
+"AtermCore" = "AtermCore"

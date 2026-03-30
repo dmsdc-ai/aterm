@@ -7,38 +7,70 @@ aterm v3 is a GPU-accelerated terminal emulator. Pure Rust, no framework.
 ## Architecture
 
 ```
-winit (event loop + window)
-  ├── wgpu (GPU rendering)
+aterm-core (Rust cdylib, 공유 코어)
+  ├── wgpu (GPU rendering — Metal/Vulkan/DX12)
   │     └── glyphon (text shaping/rasterizing)
   ├── portable-pty (PTY process management)
   ├── alacritty_terminal (VTE parser + Term state)
-  └── macOS NSTextInputClient (native IME)
+  └── C-FFI 인터페이스 (cbindgen → aterm_core.h)
+
+macOS Shell (Swift/AppKit — 네이티브 쉘)
+  ├── NSView + CAMetalLayer (wgpu Metal 백엔드)
+  ├── NSTextInputClient (한글 IME — Ghostty 패턴)
+  ├── NSSplitView (세션보드 사이드바 + 터미널)
+  ├── SwiftUI SessionSidebarView (telepty bus WebSocket 실시간 세션 상태)
+  └── CVDisplayLink (vsync 렌더링)
+
+Legacy (src-v3/ — winit 기반, 유지 중)
+  └── winit = { path = "../winit" } (로컬 패치)
 ```
+
+5-platform: macOS/Linux/Windows (데스크탑 풀 터미널) + Android/iOS (tailscale mesh로 원격 PTY 접속)
+macOS는 winit 제거, Swift/AppKit 네이티브 쉘로 전환 완료. IME는 NSTextInputClient로 OS 네이티브 처리 (winit IME 한글 조합 불가 7회+ 실패 확인).
 
 ## Directory Structure
 
 ```
-src-v3/
-  main.rs              — winit ApplicationHandler, event loop, input, draw
-  renderer.rs          — wgpu + glyphon terminal grid renderer
-  terminal/mod.rs      — TerminalState: VTE parsing, Term management
-  core/
-    pty.rs             — PtyManager, OutputBuffer, reader_loop, PtyOutputSignal
-    inject.rs          — InjectQueue, injector polling loop
-    session.rs         — Session persistence
-    telepty.rs         — telepty CLI integration
-    cli_presets.rs     — claude/codex/gemini CLI presets
-  ime/
-    macos.rs           — Native macOS NSTextInputClient
-Cargo.toml
+aterm-core/                # Rust 코어 (cdylib + C-FFI)
+  Cargo.toml
+  cbindgen.toml
+  build.rs                 — cbindgen 자동 헤더 생성
+  src/
+    lib.rs                 — AtermCore struct + #[no_mangle] extern "C" fn FFI
+    renderer.rs            — wgpu + glyphon terminal grid renderer
+    terminal.rs            — TerminalState: incremental VTE parsing
+    pty.rs                 — PtyManager, PtyOutputSignal
+    inject.rs              — InjectQueue, injector polling loop
+    session.rs             — Session persistence
+    telepty.rs             — telepty CLI integration
+    cli_presets.rs         — claude/codex/gemini CLI presets
+
+macos/                     # Swift 쉘 (macOS 네이티브)
+  aterm-bridge.h           — C-FFI bridging header
+  Sources/
+    main.swift             — NSApplication entry point
+    AppDelegate.swift      — NSWindow + NSSplitView 레이아웃
+    TerminalView.swift     — NSView + CAMetalLayer + NSTextInputClient
+    SessionSidebarView.swift — SwiftUI 세션보드 사이드바
+    TeleptyBusClient.swift — telepty bus WebSocket 클라이언트
+
+src-v3/                    # Legacy (winit 기반, 점진적 제거 예정)
+  main.rs                  — winit ApplicationHandler
+  renderer.rs, terminal/, core/, ime/
+
+Makefile                   — make run (Rust build → Swift compile → .app bundle)
 ```
 
 ## Build / Run
 
 ```bash
-cargo run --release --bin aterm-v3    # MUST use --release (debug is 10-50x slower)
-cargo test --bin aterm-v3
-cargo check --bin aterm-v3
+# macOS 네이티브 앱 (권장)
+make run                   # Rust cdylib + Swift → .app 번들 실행
+make run-dev               # 개발용 (번들 생략, 빠름)
+make clean                 # 빌드 아티팩트 정리
+
+# Legacy winit 바이너리
+cargo run --release --bin aterm-v3
 ```
 
 ## Performance Constraints (MANDATORY)
@@ -47,65 +79,47 @@ cargo check --bin aterm-v3
 
 | Pattern | Reason |
 |---------|--------|
-| Full VTE replay per frame | O(total_output) x fps = catastrophic. Gets worse as buffer grows |
-| New Term allocation per frame | 10,000-line scrollback Term + parser init cost |
-| New glyphon Buffer per frame | Full grid re-layout + re-shaping unnecessary |
-| Snapshot string comparison for change detection | 256KB byte compare is wrong approach |
+| Full VTE replay per frame | O(total_output) x fps = catastrophic |
+| New Term/Buffer allocation per frame | heap alloc cost |
+| Shaping::Basic with CJK content | font fallback disabled → Korean tofu |
+| Shaping::Advanced with ASCII-only | 130ms/frame, use Basic for ASCII |
 | Debug build | 10-50x slower than release |
 
 ### Required Patterns
 
-1. **Incremental VTE parsing** — persistent Term across frames, only parse NEW bytes via `parser.advance()`
-2. **Change-based rendering** — cache glyphon Buffer, update only changed cells
-3. **Input-first event loop** — consume ALL pending input events before draw()
-4. **60fps (16ms) is sufficient** for a terminal. No need for 120fps.
-5. **Shaping::Advanced required** — Shaping::Basic disables font fallback entirely, breaking CJK rendering (Korean shows as tofu). Always use Shaping::Advanced for glyphon.
+1. **Incremental VTE parsing** — persistent Term, only parse NEW bytes via `parser.advance()`
+2. **Per-line Buffer caching** — reuse glyphon Buffer per line, re-shape only changed lines
+3. **Adaptive shaping** — ASCII-only lines → Shaping::Basic, non-ASCII → Shaping::Advanced
+4. **Input-first event loop** — consume ALL input events before draw()
+5. **IME via winit Preedit/Commit** — ime_composing flag guards KeyboardInput.text
+6. **set_monospace_width(cell_width)** — forces fallback fonts (Korean) to fixed-width cells
 
-### Reference: alacritty
-
-alacritty uses the same `alacritty_terminal` crate correctly:
-1. Persistent `Term` — one instance for app lifetime
-2. PTY reader → new bytes → `term.lock()` → `parser.advance(term, new_bytes)` → unlock
-3. Renderer reads `term.renderable_content()` only
-4. No full replay, no snapshot comparison
-
-## Current Data Flow (fixed 2026-03-29)
+## Current Data Flow
 
 ```
-reader_loop → drain_term_bytes() byte queue → signal.mark_dirty() (OnceLock lock-free)
-→ main: drain new bytes only → term.lock() → parser.advance(term, new_bytes) → unlock
-→ render: term.renderable_content() → persistent Buffer reuse + Shaping::Advanced + single render pass
+reader_loop → drain_term_bytes() → signal.mark_dirty() (OnceLock)
+→ main: drain new bytes → term.lock() → parser.advance(term, new_bytes)
+→ render: per-line Buffer reuse + adaptive shaping + single render pass
 ```
 
 ## Known Issues (2026-03-29)
 
 | Priority | Issue | Status | Detail |
 |----------|-------|--------|--------|
-| P1 | Korean jamo separation | OPEN | 한영 전환 후 자모 분리 지속 (예: '안녕' → 'ㅇㅏㄴㄴㅕㅇ'). main.rs에 native_ime_active 가드 추가했으나 동작하지 않음. ime/macos.rs NSTextInputClient 근본 재검토 필요 |
-| P1 | Typing delay persists | OPEN | 증분 VTE 파싱 적용했으나 여전히 실시간 느낌 아님. 추가 병목 조사 필요 |
-| P2 | Font size still small | OPEN | 14→16px 변경했으나 사용자 체감 여전히 작음. 18-20px 또는 설정 가능하게 |
-| P3 | CJK proportional fallback font | OPEN | Korean falls back to proportional font, cell width mismatch possible |
-| P3 | Cursor blink animation | OPEN | Static block cursor, no blinking |
-| P3 | Underline/beam cursor shapes | OPEN | Only block cursor supported |
-
-## Remaining P3 Items (optional)
-
-| File | Item | Impact |
-|------|------|--------|
-| `core/inject.rs` | 500ms polling → condvar/notify | inject only, not typing |
-| `ime/macos.rs` | key_down Mutex x4 → RefCell | minimal |
-| `main.rs` | PowerPreference::LowPower → None | trivial |
+| P1 | First consonant lost after input switch | OPEN | 한영 전환 후 첫 자음 유실 (예: '안녕' → 'ㅏㄴㄴㅕㅇ'). winit Disabled→Enabled 시퀀스가 첫 키 소비 가능성. main.rs에 Ime::Disabled/Enabled 핸들러 추가 필요 |
+| P1 | Render regression 113ms | OPEN | full rebuild 후 per-line buffer 최적화 동작 확인 필요. 목표 18ms |
+| P3 | CJK cell width mismatch | OPEN | proportional fallback font, set_monospace_width로 보정 중 |
+| P3 | Cursor blink/shapes | OPEN | Static block only |
 
 ## Dependencies
 
-| Crate | Version | Role |
-|-------|---------|------|
-| alacritty_terminal | 0.26.0-rc1 | VTE parser + Term state |
-| winit | 0.30 | Event loop + window |
-| wgpu | 23 | GPU rendering |
-| glyphon | 0.7 | Text shaping/rasterizing |
-| portable-pty | 0.9 | PTY process management |
-| tokio | 1 | Async runtime (sync features only) |
+| Crate | Source | Role |
+|-------|--------|------|
+| alacritty_terminal | 0.26.0-rc1 (crates.io) | VTE parser + Term state |
+| winit | **path = ../winit** (local patch) | Event loop + IME |
+| wgpu | 23 (crates.io) | GPU rendering |
+| glyphon | 0.7 (crates.io) | Text shaping |
+| portable-pty | 0.9 (crates.io) | PTY management |
 
 ## Work Principles
 
@@ -119,4 +133,3 @@ reader_loop → drain_term_bytes() byte queue → signal.mark_dirty() (OnceLock 
 - Orchestrator: `aigentry-orchestrator-claude`
 - Logger: `aigentry-logger-claude`
 - Tester: `aigentry-tester-claude`
-- Design: `aigentry-design-claude`
