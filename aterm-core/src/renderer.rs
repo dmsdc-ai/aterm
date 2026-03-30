@@ -21,6 +21,7 @@ pub struct TerminalGridRenderer {
     line_height: f32,
     scale_factor: f32,
     lines: Vec<RenderLine>,
+    sel_bg_lines: Vec<Option<Buffer>>,
     scratch_spans: Vec<(String, GlyphonColor)>,
     last_width: f32,
     last_font_size: f32,
@@ -52,6 +53,7 @@ impl TerminalGridRenderer {
             line_height: 19.0 * scale_factor,
             scale_factor,
             lines: Vec::new(),
+            sel_bg_lines: Vec::new(),
             scratch_spans: Vec::with_capacity(256),
             last_width: -1.0,
             last_font_size: -1.0,
@@ -95,6 +97,10 @@ impl TerminalGridRenderer {
         let cursor_line = cursor.point.line.0;
         let cursor_col = cursor.point.column.0;
 
+        // Track selected cells for background highlight
+        let cols_count = self.grid_size(width as f32, height as f32).0 as usize;
+        let mut line_selections: Vec<Vec<bool>> = Vec::new();
+
         let mut current_text = String::new();
         let mut current_color = DEFAULT_FG;
         let mut current_line: Option<i32> = None;
@@ -124,6 +130,10 @@ impl TerminalGridRenderer {
                 current_col = 0;
                 current_color = DEFAULT_FG;
                 has_non_ascii = false;
+                // Ensure line_selections has an entry for this line
+                while line_selections.len() <= line_index {
+                    line_selections.push(vec![false; cols_count]);
+                }
             }
 
             while current_col < col {
@@ -162,6 +172,9 @@ impl TerminalGridRenderer {
                 );
                 sel.contains(point)
             });
+            if is_selected && line_index < line_selections.len() && col < cols_count {
+                line_selections[line_index][col] = true;
+            }
             let fg = if is_selected {
                 // Selected: white text on blue background (rendered via color swap)
                 GlyphonColor::rgb(0xff, 0xff, 0xff)
@@ -196,13 +209,88 @@ impl TerminalGridRenderer {
             changed_lines += self.update_line(idx, false, width as f32) as usize;
         }
 
+        // --- Selection background buffers ---
+        // Ensure sel_bg_lines has correct capacity
+        while self.sel_bg_lines.len() < self.lines.len() {
+            self.sel_bg_lines.push(None);
+        }
+        self.sel_bg_lines.truncate(self.lines.len());
+
+        let sel_color = GlyphonColor::rgb(0x33, 0x66, 0xCC);
+        let cw = self.cell_width();
+        let metrics = Metrics::new(self.font_size, self.line_height);
+        let w_f32 = width as f32;
+        let lh = self.line_height;
+
+        for (idx, selected_cols) in line_selections.iter().enumerate() {
+            let has_selection = selected_cols.iter().any(|&s| s);
+            if has_selection {
+                // Ensure buffer exists
+                if self.sel_bg_lines[idx].is_none() {
+                    let mut buf = Buffer::new(&mut self.font_system, metrics);
+                    buf.set_size(&mut self.font_system, Some(w_f32), Some(lh));
+                    buf.set_monospace_width(&mut self.font_system, Some(cw));
+                    self.sel_bg_lines[idx] = Some(buf);
+                }
+
+                // Build background string: full-block for selected cells, space for others
+                let bg_text: String = selected_cols
+                    .iter()
+                    .map(|&sel| if sel { '\u{2588}' } else { ' ' })
+                    .collect();
+
+                let bg_buf = self.sel_bg_lines[idx].as_mut().unwrap();
+                bg_buf.set_metrics(&mut self.font_system, metrics);
+                bg_buf.set_size(&mut self.font_system, Some(w_f32), Some(lh));
+                bg_buf.set_monospace_width(&mut self.font_system, Some(cw));
+                bg_buf.set_rich_text(
+                    &mut self.font_system,
+                    vec![(
+                        bg_text.as_str(),
+                        Attrs::new().family(Family::Monospace).color(sel_color),
+                    )],
+                    Attrs::new().family(Family::Monospace).color(sel_color),
+                    Shaping::Basic,
+                );
+                bg_buf.shape_until_scroll(&mut self.font_system, false);
+            } else {
+                // No selection on this line — drop the background buffer
+                self.sel_bg_lines[idx] = None;
+            }
+        }
+        // Clear background buffers for lines beyond line_selections
+        for idx in line_selections.len()..self.sel_bg_lines.len() {
+            self.sel_bg_lines[idx] = None;
+        }
+
         let shape_elapsed = render_start.elapsed();
 
-        let text_areas: Vec<TextArea<'_>> = self
-            .lines
-            .iter()
-            .enumerate()
-            .map(|(idx, line)| TextArea {
+        // Build text_areas: background layer (selection) FIRST, then foreground (text)
+        let mut text_areas: Vec<TextArea<'_>> = Vec::new();
+
+        // Background layer (selection highlights)
+        for (idx, bg) in self.sel_bg_lines.iter().enumerate() {
+            if let Some(ref buffer) = bg {
+                text_areas.push(TextArea {
+                    buffer,
+                    left: 4.0,
+                    top: 4.0 + idx as f32 * self.line_height,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: width as i32,
+                        bottom: height as i32,
+                    },
+                    default_color: sel_color,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
+        // Foreground layer (text)
+        for (idx, line) in self.lines.iter().enumerate() {
+            text_areas.push(TextArea {
                 buffer: &line.buffer,
                 left: 4.0,
                 top: 4.0 + idx as f32 * self.line_height,
@@ -215,8 +303,8 @@ impl TerminalGridRenderer {
                 },
                 default_color: DEFAULT_FG,
                 custom_glyphs: &[],
-            })
-            .collect();
+            });
+        }
 
         self.text_renderer
             .prepare(

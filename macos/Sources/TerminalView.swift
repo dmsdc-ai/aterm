@@ -408,6 +408,9 @@ class TerminalView: NSView, NSTextInputClient {
                 }
             }
             return true
+        case 51: // Cmd+Backspace → kill line (Ctrl+U)
+            aterm_core_write_pty(core, "\u{15}", 1)
+            return true
         default:
             return false
         }
@@ -423,6 +426,8 @@ class TerminalView: NSView, NSTextInputClient {
             aterm_core_named_key(core, UInt32(ATERM_KEY_ENTER))
         case #selector(deleteBackward(_:)):
             aterm_core_named_key(core, UInt32(ATERM_KEY_BACKSPACE))
+        case #selector(deleteWordBackward(_:)): // Option+Backspace → ESC DEL (word delete)
+            aterm_core_write_pty(core, "\u{1b}\u{7f}", 2)
         case #selector(deleteForward(_:)):
             aterm_core_named_key(core, UInt32(ATERM_KEY_DELETE))
         case #selector(insertTab(_:)):
