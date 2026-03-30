@@ -999,15 +999,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     customCommand: workspace.customCommand
                 )
                 // Auto-restart system workspaces with backoff protection
-                if workspace.isSystem && workspace.restartCount < 3 {
+                if workspace.isSystem {
                     let uptime = workspace.lastLaunchTime.map { Date().timeIntervalSince($0) } ?? 0
                     if uptime < 10 {
-                        // CLI exited within 10s of launch — config/auth issue, not crash
                         workspace.restartCount += 1
                         NSLog("[aterm] system workspace '%@' exited too quickly (%.1fs), attempt %d/3", workspace.name, uptime, workspace.restartCount)
                         if workspace.restartCount >= 3 {
-                            workspace.status = "failed"
-                            NSLog("[aterm] system workspace '%@' failed to start after 3 attempts — stopping auto-restart", workspace.name)
+                            // CLI failed 3x — fall back to plain shell, never show 'failed'
+                            NSLog("[aterm] CLI failed to start, falling back to shell for '%@'", workspace.name)
+                            workspace.status = "running"
+                            workspace.foregroundProcessName = "zsh (CLI unavailable)"
+                            workspace.rootProcessID = nil
+                            // Shell is already running — just stop trying CLI bootstrap
                         } else {
                             workspace.status = "restarting"
                             workspace.rootProcessID = nil
@@ -1026,8 +1029,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             self?.restartSystemWorkspace(id: wsID)
                         }
                     }
-                } else if workspace.isSystem {
-                    workspace.status = "failed"
                 } else {
                     workspace.status = "dead"
                 }
