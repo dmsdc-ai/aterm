@@ -108,19 +108,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Workspace Persistence
 
     private static let workspacesFileURL: URL = {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return support.appendingPathComponent("aterm/sessions.json")
+        let home = NSHomeDirectory()
+        return URL(fileURLWithPath: "\(home)/.aigentry/config/sessions.json")
     }()
 
     private func saveWorkspaces() {
-        let entries: [[String: String]] = workspaceOrder.compactMap { id in
+        let entries: [[String: Any]] = workspaceOrder.compactMap { id in
             guard let ws = managedWorkspaces[id] else { return nil }
             return [
                 "name": ws.name,
                 "command": ws.launchCommand.rawValue,
                 "customCommand": ws.customCommand,
                 "cwd": ws.cwd,
-            ]
+                "resumeCommand": ws.launchCommand.bootstrapCommand(customCommand: ws.customCommand) ?? "",
+                "isActive": ws.status != "dead",
+            ] as [String: Any]
         }
         do {
             let dir = Self.workspacesFileURL.deletingLastPathComponent()
@@ -132,26 +134,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func isSetupCompleted() -> Bool {
+        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return config["setupCompleted"] as? Bool ?? false
+    }
+
     @discardableResult
     private func restoreWorkspaces() -> Int {
-        guard let data = try? Data(contentsOf: Self.workspacesFileURL),
-              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else {
+        guard isSetupCompleted() else {
+            NSLog("[aterm] first-run wizard not completed — skipping restore")
             return 0
         }
+
+        guard let data = try? Data(contentsOf: Self.workspacesFileURL),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return 0
+        }
+
+        // Also migrate from old location if needed
+        let oldURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("aterm/sessions.json")
+        if entries.isEmpty, let oldData = try? Data(contentsOf: oldURL),
+           let oldEntries = try? JSONSerialization.jsonObject(with: oldData) as? [[String: Any]], !oldEntries.isEmpty {
+            return restoreEntries(oldEntries)
+        }
+
+        return restoreEntries(entries)
+    }
+
+    private func restoreEntries(_ entries: [[String: Any]]) -> Int {
         var count = 0
-        for (index, entry) in entries.enumerated() {
-            guard let name = entry["name"],
-                  let commandRaw = entry["command"],
-                  let command = WorkspaceLaunchCommand(rawValue: commandRaw),
-                  let cwd = entry["cwd"] else { continue }
-            let custom = entry["customCommand"] ?? ""
-            guard FileManager.default.fileExists(atPath: cwd) else { continue }
+        let activeEntries = entries.filter { ($0["isActive"] as? Bool) != false }
+        for (index, entry) in activeEntries.enumerated() {
+            guard let name = entry["name"] as? String,
+                  let commandRaw = entry["command"] as? String,
+                  let cwd = entry["cwd"] as? String else { continue }
+
+            let custom = entry["customCommand"] as? String ?? ""
+            let effectiveCwd = FileManager.default.fileExists(atPath: cwd) ? cwd : NSHomeDirectory()
+
+            // CLI binary fallback: if CLI not installed, fall back to zsh
+            let requestedCommand = WorkspaceLaunchCommand(rawValue: commandRaw) ?? .zsh
+            let command = cliAvailable(for: requestedCommand) ? requestedCommand : .zsh
+
             createWorkspace(
                 name: name,
                 command: command,
                 customCommand: custom,
-                cwd: cwd,
-                shouldSelect: index == entries.count - 1
+                cwd: effectiveCwd,
+                shouldSelect: index == activeEntries.count - 1
             )
             count += 1
         }
@@ -159,6 +194,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("[aterm] restored %d workspaces", count)
         }
         return count
+    }
+
+    private func cliAvailable(for command: WorkspaceLaunchCommand) -> Bool {
+        switch command {
+        case .zsh:
+            return true
+        case .claude:
+            return which("claude")
+        case .codex:
+            return which("codex")
+        case .gemini:
+            return which("gemini")
+        case .custom:
+            return true
+        }
     }
 
     private func createDefaultWorkspace() {

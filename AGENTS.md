@@ -29,9 +29,29 @@ Makefile            — make run (.app bundle)
 ## Build
 
 ```bash
-make run             # .app bundle (필수 — IME + codesign)
+# 항상 레포 루트에서 실행 (/Users/duckyoungkim/projects/aigentry-aterm)
+make app             # 빌드만 (build/aterm.app)
+make run             # 빌드 + 실행 (.app bundle 필수 — IME + codesign)
+make rust            # Rust cdylib만 빌드
+make swift           # Swift만 빌드 (rust 선행 필요)
+make install         # ~/Applications/aterm.app 설치
+make dist            # build/aterm.zip 배포 아카이브
 make clean           # 빌드 정리
 ```
+
+## npm 배포
+
+```bash
+cd npm/aterm-darwin-arm64 && npm publish --access public
+cd npm/aterm && npm publish --access public
+# 버전: npm/aterm/package.json + npm/aterm-darwin-arm64/package.json 동시 범프
+```
+
+## CI/CD
+
+- `.github/workflows/test-install.yml` — push/PR 시 자동 실행
+- macOS 14 ARM 러너, winit은 git clone (v0.30.13 tag)
+- 버전은 package.json에서 동적 읽기
 
 ## Work Principles
 
