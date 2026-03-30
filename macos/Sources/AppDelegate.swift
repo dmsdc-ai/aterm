@@ -69,8 +69,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         splitView.addSubview(terminalContainerView)
 
         // Set sidebar constraints
-        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
-        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
+        // Keep the sidebar near its initial width and let the terminal absorb
+        // horizontal growth/shrink so PTY columns track the visible content.
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         sidebarHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
         sidebarHost.widthAnchor.constraint(lessThanOrEqualToConstant: 400).isActive = true
         splitView.setPosition(240, ofDividerAt: 0)

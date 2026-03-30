@@ -483,6 +483,11 @@ impl PtyManager {
         Ok(std::mem::take(&mut *queue))
     }
 
+    /// Get a clone of the workspace's PTY writer for terminal write-back (DA responses, etc.).
+    pub fn workspace_writer(&self, id: &str) -> Option<Arc<Mutex<Box<dyn Write + Send>>>> {
+        self.workspaces.get(id).map(|ws| ws.writer.clone())
+    }
+
     fn workspace(&self, id: &str) -> Result<&Workspace, String> {
         self.workspaces
             .get(id)
@@ -512,6 +517,9 @@ fn spawn_workspace_process(
     }
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "aterm");
+    cmd.env("TERM_PROGRAM_VERSION", "3.0");
     if let Some(path_env) = augmented_path_env() {
         cmd.env("PATH", path_env);
     }

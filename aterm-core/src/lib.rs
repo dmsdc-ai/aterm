@@ -182,6 +182,12 @@ impl AtermCore {
         ) {
             Ok(id) => {
                 eprintln!("[aterm-core] shell spawned: {id}");
+                // Connect PTY writer to terminal so DA responses flow back
+                if let Some(ref terminal) = self.terminal {
+                    if let Some(writer) = self.pty_manager.workspace_writer(&id) {
+                        terminal.set_pty_writer(writer);
+                    }
+                }
                 self.workspace_id = Some(id);
                 0
             }

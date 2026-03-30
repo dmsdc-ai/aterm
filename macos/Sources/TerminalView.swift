@@ -9,6 +9,7 @@ class TerminalView: NSView, NSTextInputClient {
     private var markedText = NSMutableAttributedString()
     private var inputContext_: NSTextInputContext?
     private var hasInitializedCore = false
+    private var shellSpawned = false
 
     // Ghostty pattern: set to non-nil during keyDown to accumulate insertText contents
     private var keyTextAccumulator: [String]?
@@ -64,18 +65,6 @@ class TerminalView: NSView, NSTextInputClient {
             return
         }
 
-        // Get grid size and spawn shell
-        var cols: UInt16 = 0
-        var rows: UInt16 = 0
-        aterm_core_grid_size(core, Float(size.width), Float(size.height), &cols, &rows)
-
-        let cwd = initialWorkingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? NSHomeDirectory()
-            : initialWorkingDirectory
-        _ = cwd.withCString { cwd in
-            aterm_core_spawn_shell(core, cwd, cols, rows)
-        }
-
         // Set dirty callback — wakes the display link
         let ud = Unmanaged.passUnretained(self).toOpaque()
         aterm_core_set_dirty_callback(core, { userdata in
@@ -90,6 +79,10 @@ class TerminalView: NSView, NSTextInputClient {
         startDisplayLink()
 
         window.makeFirstResponder(self)
+
+        DispatchQueue.main.async { [weak self] in
+            self?.spawnShellIfNeeded()
+        }
     }
 
     deinit {
@@ -159,6 +152,7 @@ class TerminalView: NSView, NSTextInputClient {
 
         (layer as? CAMetalLayer)?.drawableSize = backingSize
         aterm_core_resize(core, w, h)
+        spawnShellIfNeeded()
         aterm_core_render(core)
     }
 
@@ -398,6 +392,26 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func flagsChanged(with event: NSEvent) {
         // Handle modifier key changes if needed
+    }
+
+    private func spawnShellIfNeeded() {
+        guard !shellSpawned, let core = core else { return }
+
+        let backingSize = convertToBacking(bounds).size
+        guard backingSize.width > 0, backingSize.height > 0 else { return }
+
+        var cols: UInt16 = 0
+        var rows: UInt16 = 0
+        aterm_core_grid_size(core, Float(backingSize.width), Float(backingSize.height), &cols, &rows)
+        guard cols > 2, rows > 1 else { return }
+
+        let cwd = initialWorkingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? NSHomeDirectory()
+            : initialWorkingDirectory
+        _ = cwd.withCString { cwd in
+            aterm_core_spawn_shell(core, cwd, cols, rows)
+        }
+        shellSpawned = true
     }
 
     // Capture Cmd+key that bypass keyDown

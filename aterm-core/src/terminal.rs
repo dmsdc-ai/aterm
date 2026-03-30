@@ -1,17 +1,57 @@
 use alacritty_terminal::{
-    event::VoidListener,
+    event::{Event, EventListener},
     grid::{Dimensions, Scroll},
     term::{Config, Term},
     vte::ansi,
 };
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-pub type SharedTerminal = Arc<Mutex<Term<VoidListener>>>;
+pub type PtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+pub type SharedPtyWriter = Arc<Mutex<Option<PtyWriter>>>;
+pub type SharedTerminal = Arc<Mutex<Term<AtermEventListener>>>;
 
 const SCROLLBACK_LINES: usize = 10000;
 
+/// Routes terminal write-back events (DA responses, etc.) to the PTY master.
+/// Without this, apps like Codex CLI never receive Device Attributes responses
+/// and fall back to dumb terminal mode, leaking escape sequence fragments.
+#[derive(Clone)]
+pub struct AtermEventListener {
+    writer: SharedPtyWriter,
+}
+
+impl AtermEventListener {
+    pub fn new() -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl EventListener for AtermEventListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::PtyWrite(text) => {
+                if let Ok(guard) = self.writer.lock() {
+                    if let Some(ref writer) = *guard {
+                        if let Ok(mut w) = writer.lock() {
+                            let _ = w.write_all(text.as_bytes());
+                            let _ = w.flush();
+                        }
+                    }
+                }
+            }
+            // Other events (Title, Bell, Clipboard, etc.) are not critical for
+            // fixing the rendering residue. Can be handled later as needed.
+            _ => {}
+        }
+    }
+}
+
 pub struct TerminalState {
     terminal: SharedTerminal,
+    pty_writer: SharedPtyWriter,
     parser: ansi::Processor,
     columns: usize,
     rows: usize,
@@ -23,16 +63,27 @@ impl TerminalState {
         let columns = columns.max(2);
         let rows = rows.max(1);
 
+        let listener = AtermEventListener::new();
+        let pty_writer = listener.writer.clone();
+
         Self {
             terminal: Arc::new(Mutex::new(Term::new(
                 Config::default(),
                 &TerminalDimensions { columns, rows },
-                VoidListener,
+                listener,
             ))),
+            pty_writer,
             parser: ansi::Processor::new(),
             columns,
             rows,
             scroll_offset: 0,
+        }
+    }
+
+    /// Connect the PTY writer so DA responses flow back to the child process.
+    pub fn set_pty_writer(&self, writer: PtyWriter) {
+        if let Ok(mut slot) = self.pty_writer.lock() {
+            *slot = Some(writer);
         }
     }
 
