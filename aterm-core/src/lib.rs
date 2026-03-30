@@ -8,6 +8,7 @@ pub mod telepty;
 pub mod terminal;
 
 use std::ffi::{c_char, c_void, CStr};
+use std::process::Command as ProcessCommand;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -39,6 +40,13 @@ struct GpuState {
 
 /// Callback type for dirty notifications
 type DirtyCallback = unsafe extern "C" fn(*mut c_void);
+
+#[derive(serde::Serialize)]
+struct CliDetectionStatus {
+    claude: bool,
+    codex: bool,
+    gemini: bool,
+}
 
 pub struct AtermCore {
     gpu: Option<GpuState>,
@@ -611,6 +619,20 @@ pub extern "C" fn aterm_tailscale_status_json() -> *mut c_char {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn aterm_core_detect_clis() -> *mut c_char {
+    let detection = CliDetectionStatus {
+        claude: detect_cli_installed("claude", ".claude"),
+        codex: detect_cli_installed("codex", ".codex"),
+        gemini: detect_cli_installed("gemini", ".gemini"),
+    };
+    let json = serde_json::to_string(&detection).unwrap_or_else(|_| "{}".to_string());
+    match std::ffi::CString::new(json) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 fn optional_c_string(value: *const c_char) -> Option<String> {
     if value.is_null() {
         return None;
@@ -623,4 +645,27 @@ fn optional_c_string(value: *const c_char) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn detect_cli_installed(command: &str, config_dir_name: &str) -> bool {
+    command_available(command) && config_dir_exists(config_dir_name)
+}
+
+fn command_available(command: &str) -> bool {
+    let mut process = ProcessCommand::new("/bin/sh");
+    process.args(["-lc", &format!("command -v -- {command} >/dev/null 2>&1")]);
+    if let Some(path_env) = crate::pty::augmented_path_env() {
+        process.env("PATH", path_env);
+    }
+
+    process
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn config_dir_exists(config_dir_name: &str) -> bool {
+    dirs::home_dir()
+        .map(|home| home.join(config_dir_name).is_dir())
+        .unwrap_or(false)
 }

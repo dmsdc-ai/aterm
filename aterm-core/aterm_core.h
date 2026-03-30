@@ -100,6 +100,8 @@ void aterm_tailscale_shutdown(void);
 
 char *aterm_tailscale_status_json(void);
 
+char *aterm_core_detect_clis(void);
+
 extern int tailscale_new(void);
 
 extern int tailscale_start(int sd);

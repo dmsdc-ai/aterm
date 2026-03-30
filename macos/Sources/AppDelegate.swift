@@ -16,6 +16,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var workspaceOrder: [UUID] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ensureTeleptyDaemon()
         startTailscale()
 
         let rect = NSRect(x: 0, y: 0, width: 1280, height: 768)
@@ -81,13 +82,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         window.contentView = splitView
         window.makeKeyAndOrderFront(nil)
-        createWorkspace(
-            name: "main",
-            command: .zsh,
-            customCommand: "",
-            cwd: NSHomeDirectory(),
-            shouldSelect: true
-        )
+        let restoredCount = restoreWorkspaces()
+        if restoredCount == 0 {
+            createDefaultWorkspace()
+        }
         startProcessPolling()
     }
 
@@ -96,9 +94,163 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        saveWorkspaces()
         processPollTimer?.invalidate()
         processPollTimer = nil
         aterm_tailscale_shutdown()
+    }
+
+    // MARK: - Workspace Persistence
+
+    private static let workspacesFileURL: URL = {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return support.appendingPathComponent("aterm/sessions.json")
+    }()
+
+    private func saveWorkspaces() {
+        let entries: [[String: String]] = workspaceOrder.compactMap { id in
+            guard let ws = managedWorkspaces[id] else { return nil }
+            return [
+                "name": ws.name,
+                "command": ws.launchCommand.rawValue,
+                "customCommand": ws.customCommand,
+                "cwd": ws.cwd,
+            ]
+        }
+        do {
+            let dir = Self.workspacesFileURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: entries, options: .prettyPrinted)
+            try data.write(to: Self.workspacesFileURL)
+        } catch {
+            NSLog("[aterm] save workspaces failed: %@", error.localizedDescription)
+        }
+    }
+
+    @discardableResult
+    private func restoreWorkspaces() -> Int {
+        guard let data = try? Data(contentsOf: Self.workspacesFileURL),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else {
+            return 0
+        }
+        var count = 0
+        for (index, entry) in entries.enumerated() {
+            guard let name = entry["name"],
+                  let commandRaw = entry["command"],
+                  let command = WorkspaceLaunchCommand(rawValue: commandRaw),
+                  let cwd = entry["cwd"] else { continue }
+            let custom = entry["customCommand"] ?? ""
+            guard FileManager.default.fileExists(atPath: cwd) else { continue }
+            createWorkspace(
+                name: name,
+                command: command,
+                customCommand: custom,
+                cwd: cwd,
+                shouldSelect: index == entries.count - 1
+            )
+            count += 1
+        }
+        if count > 0 {
+            NSLog("[aterm] restored %d workspaces", count)
+        }
+        return count
+    }
+
+    private func createDefaultWorkspace() {
+        let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
+        let hasClaude = FileManager.default.isExecutableFile(atPath: "/usr/local/bin/claude")
+            || FileManager.default.isExecutableFile(
+                atPath: (ProcessInfo.processInfo.environment["HOME"] ?? "") + "/.nvm/versions/node/v20.20.0/bin/claude"
+            )
+            || which("claude")
+
+        let orchestratorExists = FileManager.default.fileExists(atPath: orchestratorDir)
+
+        if hasClaude && orchestratorExists {
+            createWorkspace(
+                name: "orchestrator",
+                command: .claude,
+                customCommand: "",
+                cwd: orchestratorDir,
+                shouldSelect: true
+            )
+        } else {
+            createWorkspace(
+                name: hasClaude ? "orchestrator" : "main",
+                command: hasClaude ? .claude : .zsh,
+                customCommand: "",
+                cwd: orchestratorExists ? orchestratorDir : NSHomeDirectory(),
+                shouldSelect: true
+            )
+        }
+    }
+
+    private func which(_ command: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [command]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private func ensureTeleptyDaemon() {
+        DispatchQueue.global(qos: .utility).async {
+            // Check if telepty daemon is already running
+            guard let url = URL(string: "http://127.0.0.1:3848/api/sessions") else { return }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 2.0
+
+            let semaphore = DispatchSemaphore(value: 0)
+            var isRunning = false
+
+            URLSession.shared.dataTask(with: request) { _, response, _ in
+                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                    isRunning = true
+                }
+                semaphore.signal()
+            }.resume()
+
+            semaphore.wait()
+
+            if isRunning {
+                NSLog("[aterm] telepty daemon already running")
+                return
+            }
+
+            // Find telepty binary
+            let searchPaths = [
+                ProcessInfo.processInfo.environment["HOME"].map { "\($0)/.nvm/versions/node/v20.20.0/bin/telepty" },
+                Optional("/usr/local/bin/telepty"),
+                Optional("/opt/homebrew/bin/telepty"),
+            ].compactMap { $0 }
+
+            guard let teleptyPath = searchPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+                NSLog("[aterm] telepty binary not found")
+                return
+            }
+
+            NSLog("[aterm] starting telepty daemon from %@", teleptyPath)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: teleptyPath)
+            process.arguments = ["daemon"]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.environment = ProcessInfo.processInfo.environment
+
+            do {
+                try process.run()
+                NSLog("[aterm] telepty daemon started (pid %d)", process.processIdentifier)
+            } catch {
+                NSLog("[aterm] failed to start telepty daemon: %@", error.localizedDescription)
+            }
+        }
     }
 
     private func startTailscale() {
@@ -213,6 +365,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.refreshWorkspaceProcesses()
         }
+
+        saveWorkspaces()
     }
 
     private func bootstrapWorkspace(id: UUID, command: String) {
@@ -270,6 +424,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             rebuildSidebarState()
         }
+
+        saveWorkspaces()
     }
 
     private func rebuildSidebarState() {

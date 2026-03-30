@@ -56,6 +56,7 @@ char* aterm_core_selection_text(const AtermCore* core);
 
 // Workspace list (JSON string, caller must free)
 char* aterm_core_list_workspaces(const AtermCore* core);
+char* aterm_core_detect_clis(void);
 void aterm_core_free_string(char* ptr);
 
 // Tailscale
