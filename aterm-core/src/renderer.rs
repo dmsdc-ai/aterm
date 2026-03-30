@@ -13,6 +13,33 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor}
 const DEFAULT_FG: GlyphonColor = GlyphonColor::rgb(0xe8, 0xe4, 0xe0);
 const DEFAULT_BG: GlyphonColor = GlyphonColor::rgb(0x00, 0x00, 0x00);
 const CURSOR_FG: GlyphonColor = GlyphonColor::rgb(0xff, 0xff, 0xff);
+const NERD_FONT_FAMILY_PREFERENCES: &[&str] = &[
+    "JetBrainsMono Nerd Font Mono",
+    "JetBrainsMono Nerd Font",
+    "MesloLGS NF",
+    "MesloLGS Nerd Font Mono",
+    "MesloLGS Nerd Font",
+    "Hack Nerd Font Mono",
+    "Hack Nerd Font",
+    "FiraCode Nerd Font Mono",
+    "FiraCode Nerd Font",
+    "SauceCodePro Nerd Font Mono",
+    "SauceCodePro Nerd Font",
+    "CaskaydiaMono Nerd Font Mono",
+    "CaskaydiaMono Nerd Font",
+    "Symbols Nerd Font Mono",
+    "Symbols Nerd Font",
+];
+#[cfg(target_os = "macos")]
+const SYSTEM_MONOSPACE_FAMILY_PREFERENCES: &[&str] =
+    &["SF Mono", "Menlo", "Monaco", "Courier New"];
+#[cfg(not(target_os = "macos"))]
+const SYSTEM_MONOSPACE_FAMILY_PREFERENCES: &[&str] = &[
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Liberation Mono",
+    "Courier New",
+];
 
 // --- wgpu colored-rectangle pipeline for selection/background rendering ---
 
@@ -194,6 +221,7 @@ impl TerminalGridRenderer {
         let font_size = 13.0 * scale_factor;
         let line_height = 19.0 * scale_factor;
         let mut font_system = FontSystem::new();
+        configure_terminal_font_system(&mut font_system);
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
@@ -713,4 +741,76 @@ fn indexed_to_glyphon(idx: u8) -> GlyphonColor {
 
     let v = (idx - 232) * 10 + 8;
     GlyphonColor::rgb(v, v, v)
+}
+
+fn configure_terminal_font_system(font_system: &mut FontSystem) {
+    if let Some(family) = detect_nerd_font_family(font_system) {
+        font_system.db_mut().set_monospace_family(family.clone());
+        eprintln!("[aterm-core] renderer using Nerd Font monospace family: {family}");
+        return;
+    }
+
+    if let Some(family) = detect_system_monospace_family(font_system) {
+        font_system.db_mut().set_monospace_family(family);
+    }
+}
+
+fn detect_nerd_font_family(font_system: &FontSystem) -> Option<String> {
+    for preferred in NERD_FONT_FAMILY_PREFERENCES {
+        if font_family_exists(font_system, preferred) {
+            return Some((*preferred).to_string());
+        }
+    }
+
+    let mut fallback_candidates: Vec<String> = font_system
+        .db()
+        .faces()
+        .filter(|face| face.monospaced)
+        .flat_map(|face| face.families.iter().map(|(family, _)| family.clone()))
+        .filter(|family| is_nerd_font_family_name(family))
+        .collect();
+
+    fallback_candidates.sort_by(|left, right| nerd_font_sort_key(left).cmp(&nerd_font_sort_key(right)));
+    fallback_candidates.dedup();
+    fallback_candidates.into_iter().next()
+}
+
+fn font_family_exists(font_system: &FontSystem, family: &str) -> bool {
+    font_system.db().faces().any(|face| {
+        face.monospaced
+            && face
+                .families
+                .iter()
+                .any(|(candidate, _)| candidate.eq_ignore_ascii_case(family))
+    })
+}
+
+fn detect_system_monospace_family(font_system: &FontSystem) -> Option<String> {
+    for preferred in SYSTEM_MONOSPACE_FAMILY_PREFERENCES {
+        if font_family_exists(font_system, preferred) {
+            return Some((*preferred).to_string());
+        }
+    }
+
+    font_system
+        .db()
+        .faces()
+        .find(|face| face.monospaced)
+        .and_then(|face| face.families.first().map(|(family, _)| family.clone()))
+}
+
+fn is_nerd_font_family_name(family: &str) -> bool {
+    let name = family.to_ascii_lowercase();
+    name.contains("nerd font") || name.ends_with(" nf") || name.contains(" nf ")
+}
+
+fn nerd_font_sort_key(family: &str) -> (bool, bool, bool, usize, String) {
+    let name = family.to_ascii_lowercase();
+    (
+        !name.contains("mono"),
+        !name.contains("jetbrains"),
+        !name.contains("meslo"),
+        family.len(),
+        name,
+    )
 }
