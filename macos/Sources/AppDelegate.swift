@@ -761,21 +761,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func bootstrapWorkspace(id: UUID, command: String) {
-        guard let workspace = managedWorkspaces[id],
-              let core = workspace.terminalView.corePointer else {
+        guard let workspace = managedWorkspaces[id] else { return }
+        workspace.lastLaunchTime = Date()
+        waitForShellPrompt(workspaceID: id, command: command)
+    }
+
+    /// Wait for shell prompt before sending bootstrap command.
+    private static let shellPromptPatterns = ["$ ", "% ", "# ", "❯ "]
+
+    private func waitForShellPrompt(workspaceID: UUID, command: String, attempts: Int = 0) {
+        guard attempts < 10 else {
+            NSLog("[aterm] shell prompt not detected after 5s — skipping bootstrap for workspace")
             return
         }
-        workspace.lastLaunchTime = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self,
+                  let workspace = self.managedWorkspaces[workspaceID],
+                  let core = workspace.terminalView.corePointer else { return }
 
-        let text = command + "\n"
-        text.withCString { ptr in
-            aterm_core_write_pty(core, ptr, text.utf8.count)
-        }
+            aterm_core_sync_pty(core)
 
-        // Auto-accept trust prompt for CLI workspaces (claude/codex/gemini)
-        let isCli = command.contains("claude") || command.contains("codex") || command.contains("gemini")
-        if isCli {
-            watchForTrustPrompt(workspaceID: id)
+            var promptFound = false
+            for pattern in Self.shellPromptPatterns {
+                let found = pattern.withCString { ptr in
+                    aterm_core_screen_contains(core, ptr) != 0
+                }
+                if found {
+                    promptFound = true
+                    break
+                }
+            }
+
+            if promptFound {
+                // Shell is ready — send bootstrap command
+                let text = command + "\n"
+                text.withCString { ptr in
+                    aterm_core_write_pty(core, ptr, text.utf8.count)
+                }
+                NSLog("[aterm] bootstrap sent to '%@' (attempt %d)", workspace.name, attempts)
+
+                // Watch for trust prompt after CLI starts
+                let isCli = command.contains("claude") || command.contains("codex") || command.contains("gemini")
+                if isCli {
+                    self.watchForTrustPrompt(workspaceID: workspaceID)
+                }
+            } else {
+                self.waitForShellPrompt(workspaceID: workspaceID, command: command, attempts: attempts + 1)
+            }
         }
     }
 
