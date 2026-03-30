@@ -4,9 +4,11 @@ import QuartzCore
 class TerminalView: NSView, NSTextInputClient {
     private(set) var core: OpaquePointer?  // AtermCore*
     var corePointer: OpaquePointer? { core }
+    var initialWorkingDirectory: String = NSHomeDirectory()
     private var displayLink: CVDisplayLink?
     private var markedText = NSMutableAttributedString()
     private var inputContext_: NSTextInputContext?
+    private var hasInitializedCore = false
 
     // Ghostty pattern: set to non-nil during keyDown to accumulate insertText contents
     private var keyTextAccumulator: [String]?
@@ -45,7 +47,9 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        guard !hasInitializedCore else { return }
         guard let window = self.window, let core = core else { return }
+        hasInitializedCore = true
 
         // Init GPU with this view's pointer
         let viewPtr = Unmanaged.passUnretained(self).toOpaque()
@@ -65,8 +69,10 @@ class TerminalView: NSView, NSTextInputClient {
         var rows: UInt16 = 0
         aterm_core_grid_size(core, Float(size.width), Float(size.height), &cols, &rows)
 
-        let home = NSHomeDirectory()
-        _ = home.withCString { cwd in
+        let cwd = initialWorkingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? NSHomeDirectory()
+            : initialWorkingDirectory
+        _ = cwd.withCString { cwd in
             aterm_core_spawn_shell(core, cwd, cols, rows)
         }
 

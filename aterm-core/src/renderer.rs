@@ -294,14 +294,17 @@ impl TerminalGridRenderer {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
                 || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             {
-                current_text.push(' '); // Spacer occupies cell_width; wide char glyph overflows into it
+                // Do not synthesize a spacer glyph here. The wide character itself
+                // should occupy the visual width; pushing an extra space creates
+                // visible gaps for Korean text.
                 current_col += 1;
                 continue;
             }
 
             has_non_ascii |= !cell.c.is_ascii();
 
-            // --- Cursor: render actual character with inverted color ---
+            // Quick-fix cursor path: render a solid block glyph instead of relying
+            // on the background rect, which is currently unreliable.
             let at_cursor = cursor_visible && line == cursor_line && col == cursor_col;
 
             // Check if cell is selected
@@ -318,7 +321,7 @@ impl TerminalGridRenderer {
 
             // Determine foreground color with priority: cursor > selection > inverse > normal
             let fg = if at_cursor {
-                GlyphonColor::rgb(0x13, 0x10, 0x10) // dark text on white cursor bg
+                GlyphonColor::rgb(0xff, 0xff, 0xff)
             } else if is_selected {
                 GlyphonColor::rgb(0xff, 0xff, 0xff)
             } else if cell.flags.contains(Flags::INVERSE) {
@@ -332,7 +335,13 @@ impl TerminalGridRenderer {
                     .push((std::mem::take(&mut current_text), current_color));
             }
             current_color = fg;
-            let ch = if cell.c == '\0' { ' ' } else { cell.c };
+            let ch = if at_cursor {
+                '\u{2588}'
+            } else if cell.c == '\0' {
+                ' '
+            } else {
+                cell.c
+            };
             current_text.push(ch);
             current_col += 1;
         }
@@ -353,7 +362,7 @@ impl TerminalGridRenderer {
             changed_lines += self.update_line(idx, false, width as f32) as usize;
         }
 
-        // --- Build background rects (selection + cursor) ---
+        // --- Build background rects (selection only) ---
         let cw = self.cell_width();
         let lh = self.line_height;
         let w_f = width as f32;
@@ -371,15 +380,6 @@ impl TerminalGridRenderer {
                     );
                 }
             }
-        }
-
-        if cursor_visible && (cursor_line as usize) < rows {
-            self.rect_renderer.push_rect(
-                4.0 + cursor_col as f32 * cw,
-                4.0 + cursor_line as f32 * lh,
-                cw, lh, w_f, h_f,
-                [1.0, 1.0, 1.0, 1.0],
-            );
         }
 
         let rect_buffer = self.rect_renderer.prepare(device);
@@ -441,7 +441,7 @@ impl TerminalGridRenderer {
                 occlusion_query_set: None,
             });
 
-            // Background rects (selection + cursor) drawn FIRST
+            // Background rects (selection) drawn FIRST
             if let Some(ref buf) = rect_buffer {
                 pass.set_pipeline(&self.rect_renderer.pipeline);
                 pass.set_vertex_buffer(0, buf.slice(..));
@@ -543,9 +543,9 @@ impl TerminalGridRenderer {
             .collect();
         let shaping = if has_non_ascii { Shaping::Advanced } else { Shaping::Basic };
 
-        // Force all chars to cell_width advance. Wide CJK chars occupy 2 cells
-        // because a space is pushed for WIDE_CHAR_SPACER (cell_width + cell_width).
-        // The CJK glyph overflows visually into the spacer cell naturally.
+        // Keep fixed cell advances for ASCII alignment. The quick wide-char fix
+        // avoids injecting synthetic spacer spaces, so Korean no longer picks
+        // up an extra visible gap per wide glyph.
         line.buffer.set_monospace_width(&mut self.font_system, Some(cw));
 
         line.buffer.set_metrics(
