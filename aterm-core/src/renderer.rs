@@ -69,8 +69,11 @@ impl TerminalGridRenderer {
     }
 
     pub fn grid_size(&self, width: f32, height: f32) -> (u16, u16) {
-        let cols = (width / self.cell_width()).floor().max(2.0) as u16;
-        let rows = (height / self.cell_height()).floor().max(1.0) as u16;
+        // Subtract padding (4px left + 4px right, 4px top + 4px bottom)
+        let usable_w = (width - 8.0).max(0.0);
+        let usable_h = (height - 8.0).max(0.0);
+        let cols = (usable_w / self.cell_width()).floor().max(2.0) as u16;
+        let rows = (usable_h / self.cell_height()).floor().max(1.0) as u16;
         (cols, rows)
     }
 
@@ -151,19 +154,16 @@ impl TerminalGridRenderer {
 
             has_non_ascii |= !cell.c.is_ascii();
 
-            // Cursor: render the actual character with inverted colors (Ghostty pattern).
-            // Background block is rendered via sel_bg_lines (cursor background layer).
+            // Cursor: bright white block at cursor position — always visible.
             let at_cursor = cursor_visible && line == cursor_line && col == cursor_col;
             if at_cursor {
-                // Dark text on light cursor background — character remains visible
-                let cursor_fg = GlyphonColor::rgb(0x13, 0x10, 0x10); // dark bg color as fg
-                if cursor_fg != current_color && !current_text.is_empty() {
+                let cursor_color = GlyphonColor::rgb(0xff, 0xff, 0xff);
+                if cursor_color != current_color && !current_text.is_empty() {
                     self.scratch_spans
                         .push((std::mem::take(&mut current_text), current_color));
                 }
-                current_color = cursor_fg;
-                let ch = if cell.c == ' ' || cell.c == '\0' { ' ' } else { cell.c };
-                current_text.push(ch);
+                current_color = cursor_color;
+                current_text.push('\u{2588}');
                 current_col += 1;
                 continue;
             }
@@ -221,7 +221,7 @@ impl TerminalGridRenderer {
         self.sel_bg_lines.truncate(self.lines.len());
 
         let sel_color = GlyphonColor::rgb(0x33, 0x66, 0xCC);
-        let cursor_bg_color = GlyphonColor::rgb(0xe8, 0xe4, 0xe0); // light cursor block
+        let cursor_bg_color = GlyphonColor::rgb(0xff, 0xff, 0xff); // bright white cursor block
         let cw = self.cell_width();
         let metrics = Metrics::new(self.font_size, self.line_height);
         let w_f32 = width as f32;
