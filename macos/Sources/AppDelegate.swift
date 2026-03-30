@@ -765,6 +765,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               let core = workspace.terminalView.corePointer else {
             return
         }
+        workspace.lastLaunchTime = Date()
 
         let text = command + "\n"
         text.withCString { ptr in
@@ -779,8 +780,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Poll terminal screen for trust prompt; auto-accept with Enter when detected.
+    private static let trustPatterns = ["trust", "Trust", "Do you trust"]
+
     private func watchForTrustPrompt(workspaceID: UUID, attempts: Int = 0) {
-        guard attempts < 15 else { return } // Give up after 15 seconds
+        guard attempts < 15 else {
+            NSLog("[aterm] trust prompt watch timed out for workspace (15 attempts)")
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self,
                   let workspace = self.managedWorkspaces[workspaceID],
@@ -789,18 +795,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Sync PTY so screen is up to date
             aterm_core_sync_pty(core)
 
-            let hasTrust = "trust".withCString { pattern in
-                aterm_core_screen_contains(core, pattern) != 0
+            var detected = false
+            for pattern in Self.trustPatterns {
+                let found = pattern.withCString { ptr in
+                    aterm_core_screen_contains(core, ptr) != 0
+                }
+                if found {
+                    detected = true
+                    NSLog("[aterm] trust prompt detected (pattern: '%@', attempt: %d)", pattern, attempts)
+                    break
+                }
             }
 
-            if hasTrust {
+            if detected {
                 // Send Enter to accept the default (Yes) trust option
                 "\r".withCString { ptr in
                     aterm_core_write_pty(core, ptr, 1)
                 }
                 NSLog("[aterm] auto-accepted workspace trust prompt for %@", workspace.name)
             } else {
-                // Keep polling
                 self.watchForTrustPrompt(workspaceID: workspaceID, attempts: attempts + 1)
             }
         }
@@ -809,10 +822,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func restartSystemWorkspace(id: UUID) {
         guard let workspace = managedWorkspaces[id],
               workspace.isSystem,
-              workspace.status == "dead",
+              workspace.status == "restarting",
               let core = workspace.terminalView.corePointer else { return }
 
-        NSLog("[aterm] auto-restarting system workspace: %@", workspace.name)
+        NSLog("[aterm] auto-restarting system workspace: %@ (attempt %d)", workspace.name, workspace.restartCount)
+        workspace.lastLaunchTime = Date()
         // Re-spawn shell
         let cwd = workspace.cwd
         var cols: UInt16 = 0
@@ -939,19 +953,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             if !currentChildren.contains(rootPID) && !processExists(rootPID) {
-                workspace.status = "dead"
                 workspace.foregroundProcessName = workspace.launchCommand.displayTitle(
                     customCommand: workspace.customCommand
                 )
-                // Auto-restart system workspaces after 2s
-                if workspace.isSystem {
-                    let wsID = id
-                    workspace.rootProcessID = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        self?.restartSystemWorkspace(id: wsID)
+                // Auto-restart system workspaces with backoff protection
+                if workspace.isSystem && workspace.restartCount < 3 {
+                    let uptime = workspace.lastLaunchTime.map { Date().timeIntervalSince($0) } ?? 0
+                    if uptime < 10 {
+                        // CLI exited within 10s of launch — config/auth issue, not crash
+                        workspace.restartCount += 1
+                        NSLog("[aterm] system workspace '%@' exited too quickly (%.1fs), attempt %d/3", workspace.name, uptime, workspace.restartCount)
+                        if workspace.restartCount >= 3 {
+                            workspace.status = "failed"
+                            NSLog("[aterm] system workspace '%@' failed to start after 3 attempts — stopping auto-restart", workspace.name)
+                        } else {
+                            workspace.status = "restarting"
+                            workspace.rootProcessID = nil
+                            let wsID = id
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                                self?.restartSystemWorkspace(id: wsID)
+                            }
+                        }
+                    } else {
+                        // Was running long enough — genuine crash, restart immediately
+                        workspace.status = "restarting"
+                        workspace.rootProcessID = nil
+                        workspace.restartCount = 0
+                        let wsID = id
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                            self?.restartSystemWorkspace(id: wsID)
+                        }
                     }
+                } else if workspace.isSystem {
+                    workspace.status = "failed"
+                } else {
+                    workspace.status = "dead"
                 }
                 continue
+            }
+
+            // Reset restart counter after 30s of successful running
+            if workspace.isSystem && workspace.restartCount > 0 {
+                let uptime = workspace.lastLaunchTime.map { Date().timeIntervalSince($0) } ?? 0
+                if uptime > 30 {
+                    workspace.restartCount = 0
+                }
             }
 
             workspace.status = "running"
@@ -1153,6 +1199,8 @@ private final class ManagedWorkspace {
     var foregroundProcessName: String
     var status: String
     var isSystem: Bool
+    var restartCount: Int = 0
+    var lastLaunchTime: Date?
 
     init(
         id: UUID,

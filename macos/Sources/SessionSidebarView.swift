@@ -464,6 +464,10 @@ struct WorkspaceRowView: View {
             return .green
         case "dead":
             return .red
+        case "failed":
+            return .orange
+        case "restarting":
+            return .yellow
         default:
             return .yellow
         }
