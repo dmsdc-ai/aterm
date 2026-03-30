@@ -1,0 +1,23 @@
+{
+  "name": "@dmsdc-ai/aterm-darwin-arm64",
+  "version": "0.1.2",
+  "description": "darwin-arm64 native bundle for @dmsdc-ai/aterm",
+  "type": "module",
+  "files": [
+    "dist/aterm.app",
+    "package.json"
+  ],
+  "scripts": {
+    "prepack": "node ../prepare-platform-package.mjs aterm-darwin-arm64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "public"
+  }
+}

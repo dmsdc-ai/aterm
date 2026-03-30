@@ -1,0 +1,13 @@
+{
+  "name": "@dmsdc-ai/aterm-darwin-x64",
+  "version": "0.1.2",
+  "description": "future darwin-x64 native bundle for @dmsdc-ai/aterm",
+  "private": true,
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "license": "UNLICENSED"
+}
