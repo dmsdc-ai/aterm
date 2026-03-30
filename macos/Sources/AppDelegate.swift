@@ -321,10 +321,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return paths
     }
 
-    private func findTeleptyBinary() -> String? {
+    /// Returns (path, isJS) — if isJS, run via "node <path> daemon" instead of "<path> daemon"
+    private func findTeleptyBinary() -> (path: String, isJS: Bool)? {
         let environment = ProcessInfo.processInfo.environment
         let homeDirectory = environment["HOME"] ?? NSHomeDirectory()
+        let fm = FileManager.default
 
+        // 1. Shell-based resolution (picks up PATH from login shell)
         let shellCandidates = [
             environment["SHELL"],
             "/bin/zsh",
@@ -333,23 +336,80 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         for shellPath in shellCandidates {
             if let resolved = resolveTeleptyFromShell(shellPath) {
-                return resolved
+                return (resolved, false)
             }
         }
 
+        // 2. which
         if let resolved = whichPath("telepty"),
-           FileManager.default.isExecutableFile(atPath: resolved) {
-            return resolved
+           fm.isExecutableFile(atPath: resolved) {
+            return (resolved, false)
         }
 
-        let searchPaths = [
+        // 3. Direct binary paths
+        let directPaths = [
             "\(homeDirectory)/.volta/bin/telepty",
             "\(homeDirectory)/.local/bin/telepty",
             "/opt/homebrew/bin/telepty",
             "/usr/local/bin/telepty",
         ] + collectNodeManagerTeleptyPaths(homeDirectory: homeDirectory)
 
-        return searchPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+        if let found = directPaths.first(where: { fm.isExecutableFile(atPath: $0) }) {
+            return (found, false)
+        }
+
+        // 4. npm global node_modules cli.js paths (telepty is a dep of aterm, not top-level)
+        let npmCliPaths = collectNpmTeleptyCliPaths(homeDirectory: homeDirectory)
+        if let found = npmCliPaths.first(where: { fm.fileExists(atPath: $0) }) {
+            return (found, true)
+        }
+
+        return nil
+    }
+
+    private func collectNpmTeleptyCliPaths(homeDirectory: String) -> [String] {
+        let fm = FileManager.default
+        let teleptyPkg = "@dmsdc-ai/aigentry-telepty/cli.js"
+        let atermPkg = "@dmsdc-ai/aterm/node_modules/\(teleptyPkg)"
+        var paths: [String] = []
+
+        // Common npm global prefixes
+        let globalPrefixes = [
+            "/usr/local/lib/node_modules",
+            "/opt/homebrew/lib/node_modules",
+            "\(homeDirectory)/.npm-global/lib/node_modules",
+        ]
+        for prefix in globalPrefixes {
+            // Hoisted (top-level dep)
+            paths.append("\(prefix)/\(teleptyPkg)")
+            // Nested inside aterm
+            paths.append("\(prefix)/\(atermPkg)")
+        }
+
+        // nvm paths
+        let nvmRoot = "\(homeDirectory)/.nvm/versions/node"
+        if let entries = try? fm.contentsOfDirectory(atPath: nvmRoot) {
+            for entry in entries.sorted(by: >) {
+                let lib = "\(nvmRoot)/\(entry)/lib/node_modules"
+                paths.append("\(lib)/\(teleptyPkg)")
+                paths.append("\(lib)/\(atermPkg)")
+            }
+        }
+
+        // fnm paths
+        let fnmRoot = "\(homeDirectory)/.fnm/node-versions"
+        if let entries = try? fm.contentsOfDirectory(atPath: fnmRoot) {
+            for entry in entries.sorted(by: >) {
+                let lib = "\(fnmRoot)/\(entry)/installation/lib/node_modules"
+                paths.append("\(lib)/\(teleptyPkg)")
+                paths.append("\(lib)/\(atermPkg)")
+            }
+        }
+
+        // volta
+        paths.append("\(homeDirectory)/.volta/tools/image/packages/@dmsdc-ai/aigentry-telepty/lib/node_modules/\(teleptyPkg)")
+
+        return paths
     }
 
     private func ensureTeleptyDaemon() {
@@ -376,15 +436,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            guard let teleptyPath = self.findTeleptyBinary() else {
+            guard let telepty = self.findTeleptyBinary() else {
                 NSLog("[aterm] telepty binary not found")
                 return
             }
 
-            NSLog("[aterm] starting telepty daemon from %@", teleptyPath)
+            NSLog("[aterm] starting telepty daemon from %@ (js=%d)", telepty.path, telepty.isJS ? 1 : 0)
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: teleptyPath)
-            process.arguments = ["daemon"]
+            if telepty.isJS {
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                process.arguments = ["node", telepty.path, "daemon"]
+            } else {
+                process.executableURL = URL(fileURLWithPath: telepty.path)
+                process.arguments = ["daemon"]
+            }
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             process.environment = ProcessInfo.processInfo.environment
