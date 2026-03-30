@@ -792,9 +792,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Pre-trust workspace for Claude Code by creating the project directory.
+    private func ensureClaudeProjectTrust(cwd: String) {
+        let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+        let claudeProjectDir = NSHomeDirectory() + "/.claude/projects/" + encoded
+        try? FileManager.default.createDirectory(atPath: claudeProjectDir, withIntermediateDirectories: true)
+    }
+
     private func sendBootstrapCommand(workspaceID: UUID, command: String) {
         guard let workspace = managedWorkspaces[workspaceID],
               let core = workspace.terminalView.corePointer else { return }
+
+        // Pre-trust workspace for Claude Code
+        if command.contains("claude") {
+            ensureClaudeProjectTrust(cwd: workspace.cwd)
+        }
 
         let text = command + "\n"
         text.withCString { ptr in
