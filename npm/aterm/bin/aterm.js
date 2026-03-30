@@ -4,9 +4,12 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
+  detectAiCliStatus,
   ensureUserLayout,
   getUserAtermConfigPath,
   resolveAigentryConfig,
+  resolveInstallHomeDir,
+  updateConfigFile,
 } from '../lib/aigentry.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -76,11 +79,67 @@ async function maybeRunFirstRunWizard() {
   await wizardModule.completeFirstRunWizard(context, wizardResult);
 }
 
+async function maybeRunConfigMigration() {
+  const configPath = getUserAtermConfigPath();
+  if (!fs.existsSync(configPath)) return;
+
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  } catch { return; }
+
+  if (!config.setupCompleted) return;
+
+  const isTTY = process.stdin.isTTY && process.stdout.isTTY;
+  const cliStatus = detectAiCliStatus(resolveInstallHomeDir());
+  const patch = {};
+  const questions = [];
+
+  // Check each field individually — users from any version get prompted only for THEIR missing fields
+  if (!config.ai?.defaultCLI) {
+    questions.push({
+      type: 'select',
+      name: 'defaultCLI',
+      message: 'Default AI CLI for orchestrator workspace',
+      choices: [
+        { title: 'claude', value: 'claude', disabled: !cliStatus.claude },
+        { title: 'codex', value: 'codex', disabled: !cliStatus.codex },
+        { title: 'gemini', value: 'gemini', disabled: !cliStatus.gemini },
+        { title: 'none (plain zsh)', value: 'none' },
+      ],
+      initial: cliStatus.claude ? 0 : cliStatus.codex ? 1 : cliStatus.gemini ? 2 : 3,
+    });
+  }
+
+  if (questions.length === 0) return;
+
+  if (isTTY) {
+    try {
+      const prompts = (await import('prompts')).default;
+      const responses = await prompts(questions);
+      if (responses.defaultCLI) {
+        patch.ai = { ...config.ai, defaultCLI: responses.defaultCLI };
+      }
+    } catch { /* fall through to auto-detect */ }
+  }
+
+  // Auto-fill any fields not answered via prompt
+  if (!patch.ai?.defaultCLI && !config.ai?.defaultCLI) {
+    const auto = cliStatus.claude ? 'claude' : cliStatus.codex ? 'codex' : cliStatus.gemini ? 'gemini' : 'none';
+    patch.ai = { ...config.ai, ...patch.ai, defaultCLI: auto };
+  }
+
+  if (Object.keys(patch).length > 0) {
+    updateConfigFile(configPath, patch);
+  }
+}
+
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
   printVersionAndExit();
 }
 
 await maybeRunFirstRunWizard();
+await maybeRunConfigMigration();
 const resolvedConfig = resolveAigentryConfig({ cwd: process.cwd() });
 
 if (!fs.existsSync(executable)) {
