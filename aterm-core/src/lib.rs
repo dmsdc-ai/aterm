@@ -178,11 +178,22 @@ impl AtermCore {
     }
 
     fn spawn_shell(&mut self, name: &str, cwd: &str, command: Option<&str>, cols: u16, rows: u16) -> i32 {
+        let (cmd, args) = match command {
+            Some(s) => {
+                let parts: Vec<&str> = s.split_whitespace().collect();
+                if parts.is_empty() {
+                    (None, None)
+                } else {
+                    (Some(parts[0].to_string()), Some(parts[1..].iter().map(|s| s.to_string()).collect()))
+                }
+            }
+            None => (None, None),
+        };
         match self.pty_manager.create(
             name.to_string(),
             cwd.to_string(),
-            command.map(|s| s.to_string()),
-            None,
+            cmd,
+            args,
             Some(cols),
             Some(rows),
             false,
