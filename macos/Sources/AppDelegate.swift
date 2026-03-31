@@ -633,13 +633,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func startTailscale() {
         let env = ProcessInfo.processInfo.environment
 
-        // Respect disabled setting: ATERM_TAILSCALE_ENABLED=0 or UserDefaults
+        // Respect disabled setting: env var, UserDefaults, or aterm.json
         if let envFlag = env["ATERM_TAILSCALE_ENABLED"], envFlag == "0" || envFlag.lowercased() == "false" || envFlag.lowercased() == "no" {
             NSLog("[aterm] tailscale disabled via ATERM_TAILSCALE_ENABLED")
             return
         }
         if !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled") && UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil {
             NSLog("[aterm] tailscale disabled in settings")
+            return
+        }
+        // Check aterm.json config (set by onboarding)
+        let config = readConfig()
+        let tailscale = config["tailscale"] as? [String: Any]
+        let connectOnLaunch = tailscale?["connect_on_launch"] as? Bool ?? false
+        if !connectOnLaunch {
+            NSLog("[aterm] tailscale disabled in aterm.json (connect_on_launch=false)")
             return
         }
 
@@ -734,6 +742,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             baselineChildPIDs: baselineChildPIDs,
             isSystem: isSystem
         )
+        workspace.lastLaunchTime = Date()
         managedWorkspaces[workspaceID] = workspace
         // System workspaces always first
         if isSystem {
@@ -782,8 +791,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Check if the shell process (rootPID) is alive
             if let rootPID = workspace.rootProcessID, self.processExists(rootPID) {
-                // Shell process is running — send bootstrap after brief init delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                // Shell process is running — wait for shell init before sending command
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                     self?.sendBootstrapCommand(workspaceID: workspaceID, command: command)
                 }
             } else {
@@ -809,11 +818,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ensureClaudeProjectTrust(cwd: workspace.cwd)
         }
 
+        NSLog("[aterm] sending bootstrap to '%@': %@", workspace.name, command)
         let text = command + "\n"
         text.withCString { ptr in
             aterm_core_write_pty(core, ptr, text.utf8.count)
         }
-        NSLog("[aterm] bootstrap sent to '%@'", workspace.name)
 
         // Watch for trust prompt after CLI starts
         let isCli = command.contains("claude") || command.contains("codex") || command.contains("gemini")
