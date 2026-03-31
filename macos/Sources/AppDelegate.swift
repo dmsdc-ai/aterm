@@ -253,8 +253,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             command = .zsh
         }
 
-        let isCliWorkspace = command != .zsh
-        let name = isCliWorkspace ? "orchestrator" : "main"
+        // Name is 'orchestrator' if user selected a CLI (even if binary not found)
+        let userSelectedCli = defaultCLI != "none"
+        let name = userSelectedCli ? "orchestrator" : "main"
         let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
         let cwd = FileManager.default.fileExists(atPath: orchestratorDir) ? orchestratorDir : NSHomeDirectory()
 
@@ -264,7 +265,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             customCommand: "",
             cwd: cwd,
             shouldSelect: true,
-            isSystem: isCliWorkspace
+            isSystem: userSelectedCli
         )
     }
 
@@ -865,27 +866,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let workspace = managedWorkspaces[id],
               workspace.isSystem,
               workspace.status == "restarting",
-              let core = workspace.terminalView.corePointer else { return }
+              !workspace.cliGaveUp else { return }
 
-        NSLog("[aterm] auto-restarting system workspace: %@ (attempt %d)", workspace.name, workspace.restartCount)
-        workspace.lastLaunchTime = Date()
-        // Re-spawn shell
-        let cwd = workspace.cwd
-        var cols: UInt16 = 0
-        var rows: UInt16 = 0
-        let backingSize = workspace.terminalView.convertToBacking(workspace.terminalView.bounds).size
-        aterm_core_grid_size(core, Float(backingSize.width), Float(backingSize.height), &cols, &rows)
-        cwd.withCString { cwdPtr in
-            aterm_core_spawn_shell(core, cwdPtr, cols > 2 ? cols : 80, rows > 1 ? rows : 24)
+        NSLog("[aterm] re-sending CLI bootstrap to '%@' (attempt %d)", workspace.name, workspace.restartCount)
+
+        // Shell (zsh) is already running — just send the CLI command to it
+        if let bootstrapCmd = workspace.launchCommand.bootstrapCommand(customCommand: workspace.customCommand) {
+            bootstrapWorkspace(id: id, command: bootstrapCmd)
         }
         workspace.status = "starting"
-
-        // Re-bootstrap CLI
-        if let bootstrapCmd = workspace.launchCommand.bootstrapCommand(customCommand: workspace.customCommand) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.bootstrapWorkspace(id: id, command: bootstrapCmd)
-            }
-        }
     }
 
     private func selectWorkspace(_ id: UUID) {
@@ -999,18 +988,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     customCommand: workspace.customCommand
                 )
                 // Auto-restart system workspaces with backoff protection
-                if workspace.isSystem {
+                if workspace.isSystem && !workspace.cliGaveUp {
                     let uptime = workspace.lastLaunchTime.map { Date().timeIntervalSince($0) } ?? 0
                     if uptime < 10 {
                         workspace.restartCount += 1
                         NSLog("[aterm] system workspace '%@' exited too quickly (%.1fs), attempt %d/3", workspace.name, uptime, workspace.restartCount)
                         if workspace.restartCount >= 3 {
-                            // CLI failed 3x — fall back to plain shell, never show 'failed'
+                            // CLI failed 3x — fall back to plain shell permanently
                             NSLog("[aterm] CLI failed to start, falling back to shell for '%@'", workspace.name)
+                            workspace.cliGaveUp = true
                             workspace.status = "running"
                             workspace.foregroundProcessName = "zsh (CLI unavailable)"
-                            workspace.rootProcessID = nil
-                            // Shell is already running — just stop trying CLI bootstrap
+                            // Shell is already running — never retry CLI until user changes in Preferences
                         } else {
                             workspace.status = "restarting"
                             workspace.rootProcessID = nil
@@ -1244,6 +1233,7 @@ private final class ManagedWorkspace {
     var isSystem: Bool
     var restartCount: Int = 0
     var lastLaunchTime: Date?
+    var cliGaveUp: Bool = false
 
     init(
         id: UUID,
