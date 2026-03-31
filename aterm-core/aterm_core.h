@@ -48,6 +48,7 @@ int32_t aterm_core_init_gpu(struct AtermCore *core,
                             float scale);
 
 int32_t aterm_core_spawn_shell(struct AtermCore *core,
+                               const char *name,
                                const char *cwd,
                                uint16_t cols,
                                uint16_t rows);
@@ -84,6 +85,11 @@ void aterm_core_selection_clear(struct AtermCore *core);
  * Returns selected text or NULL. Caller must free with aterm_core_free_string.
  */
 char *aterm_core_selection_text(const struct AtermCore *core);
+
+/**
+ * Check if the visible terminal screen contains a text pattern. Returns 1 if found, 0 otherwise.
+ */
+int32_t aterm_core_screen_contains(const struct AtermCore *core, const char *pattern);
 
 /**
  * Returns JSON string of internal workspaces. Caller must free with aterm_core_free_string.
