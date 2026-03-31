@@ -432,9 +432,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func which(_ command: String) -> Bool {
+        // Use login shell to find binaries — macOS app environment has limited PATH
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [command]
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = ["-l", "-c", "command -v \(command) >/dev/null 2>&1"]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
