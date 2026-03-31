@@ -56,9 +56,9 @@ struct OnboardingView: View {
                     // Shell Selection
                     settingSection(title: "Default shell", step: 2) {
                         Picker("", selection: $selectedShell) {
-                            Text("zsh").tag("zsh")
-                            Text("bash").tag("bash")
-                            Text("fish").tag("fish")
+                            Text("zsh").foregroundColor(.white).tag("zsh")
+                            Text("bash").foregroundColor(.white).tag("bash")
+                            Text("fish").foregroundColor(.white).tag("fish")
                         }
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 240)
@@ -66,8 +66,11 @@ struct OnboardingView: View {
 
                     // Tailscale
                     settingSection(title: "Connect to other machines?", step: 3) {
-                        Toggle("Enable Tailscale mesh networking", isOn: $tailscaleEnabled)
-                            .toggleStyle(.switch)
+                        Toggle(isOn: $tailscaleEnabled) {
+                            Text("Enable Tailscale mesh networking")
+                                .foregroundColor(.white.opacity(0.85))
+                        }
+                        .toggleStyle(.switch)
                     }
                 }
                 .padding(24)
@@ -108,16 +111,16 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(installed ? .white : .gray)
+                        .foregroundColor(installed ? .white : .white.opacity(0.4))
                     Text(desc)
                         .font(.system(size: 11))
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.5))
                 }
                 Spacer()
                 if value != "none" {
                     Text(installed ? "installed" : "not found")
                         .font(.system(size: 10))
-                        .foregroundColor(installed ? .green : .gray.opacity(0.6))
+                        .foregroundColor(installed ? .green : .white.opacity(0.3))
                 }
             }
             .padding(.horizontal, 12)
