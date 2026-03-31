@@ -763,8 +763,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 self.refreshWorkspaceProcesses()
             }
-            guard result == 0, let bootstrapCommand else { return }
-            self.bootstrapWorkspace(id: workspaceID, command: bootstrapCommand)
         }
 
         let workspace = ManagedWorkspace(
