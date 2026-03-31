@@ -225,11 +225,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func createWorkspaceFromOnboarding(_ result: OnboardingResult) {
+        // Trust user's selection — don't check cliAvailable.
+        // If CLI fails to spawn, PTY termination will trigger zsh fallback.
         let command: WorkspaceLaunchCommand
         switch result.defaultCLI {
-        case "claude": command = cliAvailable(for: .claude) ? .claude : .zsh
-        case "codex": command = cliAvailable(for: .codex) ? .codex : .zsh
-        case "gemini": command = cliAvailable(for: .gemini) ? .gemini : .zsh
+        case "claude": command = .claude
+        case "codex": command = .codex
+        case "gemini": command = .gemini
         default: command = .zsh
         }
 
