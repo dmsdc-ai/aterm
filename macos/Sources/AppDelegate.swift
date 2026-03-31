@@ -143,22 +143,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func isSetupCompleted() -> Bool {
-        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return false
+    private func clearPersistedSessions() {
+        let fileManager = FileManager.default
+        let sessionPaths = [
+            NSHomeDirectory() + "/.aterm/sessions.json",
+            NSHomeDirectory() + "/.aigentry/config/sessions.json",
+        ]
+        for path in sessionPaths {
+            try? fileManager.removeItem(atPath: path)
         }
-        return config["setupCompleted"] as? Bool ?? false
     }
 
     @discardableResult
     private func restoreWorkspaces() -> Int {
-        guard isSetupCompleted() else {
-            NSLog("[aterm] first-run wizard not completed — skipping restore")
-            // Clean stale sessions from both old and new paths
-            try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.aterm/sessions.json")
-            try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.aigentry/config/sessions.json")
+        guard !needsOnboarding() else {
+            NSLog("[aterm] onboarding incomplete — skipping restore and clearing stale sessions")
+            clearPersistedSessions()
             return 0
         }
 
