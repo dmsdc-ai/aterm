@@ -755,7 +755,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let baselineChildPIDs: Set<Int32> = []
         let terminalView = TerminalView(frame: terminalContainerView.bounds)
         terminalView.workspaceName = name
-        terminalView.spawnCommand = bootstrapCommand
         terminalView.initialWorkingDirectory = cwd
         terminalView.autoresizingMask = [.width, .height]
         terminalView.isHidden = true
@@ -764,6 +763,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 self.refreshWorkspaceProcesses()
             }
+            guard result == 0, let bootstrapCommand else { return }
+            self.bootstrapWorkspace(id: workspaceID, command: bootstrapCommand)
         }
 
         let workspace = ManagedWorkspace(
