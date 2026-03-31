@@ -990,6 +990,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshWorkspaceProcesses() {
         let appPID = ProcessInfo.processInfo.processIdentifier
+        let now = Date()
         let currentChildren = directChildProcessIDs(of: appPID)
         var assignedRootPIDs = Set(managedWorkspaces.values.compactMap(\.rootProcessID))
 
@@ -1010,19 +1011,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         for id in workspaceOrder {
             guard let workspace = managedWorkspaces[id] else { continue }
+            let defaultProcessName = workspace.launchCommand.displayTitle(
+                customCommand: workspace.customCommand
+            )
+            let withinStartupGracePeriod = now.timeIntervalSince(workspace.createdAt) < 5.0
 
             guard let rootPID = workspace.rootProcessID else {
-                workspace.status = "starting"
-                workspace.foregroundProcessName = workspace.launchCommand.displayTitle(
-                    customCommand: workspace.customCommand
-                )
+                if workspace.cliGaveUp {
+                    workspace.status = "running"
+                    workspace.foregroundProcessName = "shell (CLI unavailable)"
+                } else {
+                    workspace.status = "starting"
+                    workspace.foregroundProcessName = defaultProcessName
+                }
                 continue
             }
 
             if !currentChildren.contains(rootPID) && !processExists(rootPID) {
-                workspace.foregroundProcessName = workspace.launchCommand.displayTitle(
-                    customCommand: workspace.customCommand
-                )
+                workspace.foregroundProcessName = defaultProcessName
+
+                // Give the shell time to become the tracked root process before
+                // treating short-lived intermediate children as failures.
+                if withinStartupGracePeriod {
+                    workspace.rootProcessID = nil
+                    workspace.status = workspace.cliGaveUp ? "running" : "starting"
+                    workspace.foregroundProcessName = workspace.cliGaveUp
+                        ? "shell (CLI unavailable)"
+                        : defaultProcessName
+                    continue
+                }
+
+                if workspace.isSystem && workspace.cliGaveUp {
+                    workspace.rootProcessID = nil
+                    workspace.status = "running"
+                    workspace.foregroundProcessName = "shell (CLI unavailable)"
+                    continue
+                }
+
                 // Auto-restart system workspaces with backoff protection
                 if workspace.isSystem && !workspace.cliGaveUp {
                     let uptime = workspace.lastLaunchTime.map { Date().timeIntervalSince($0) } ?? 0
@@ -1033,8 +1058,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             // CLI failed 3x — fall back to plain shell permanently
                             NSLog("[aterm] CLI failed to start, falling back to shell for '%@'", workspace.name)
                             workspace.cliGaveUp = true
+                            workspace.rootProcessID = nil
+                            workspace.restartCount = 0
                             workspace.status = "running"
-                            workspace.foregroundProcessName = "zsh (CLI unavailable)"
+                            workspace.foregroundProcessName = "shell (CLI unavailable)"
                             // Shell is already running — never retry CLI until user changes in Preferences
                         } else {
                             workspace.status = "restarting"
