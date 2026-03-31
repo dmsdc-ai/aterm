@@ -178,16 +178,15 @@ impl AtermCore {
     }
 
     fn spawn_shell(&mut self, name: &str, cwd: &str, command: Option<&str>, cols: u16, rows: u16) -> i32 {
+        // When command is set (e.g. "claude --dangerously-skip-permissions --continue"),
+        // run it via login shell: /bin/zsh -l -c "<command>"
+        // This ensures PATH/env are loaded and no shell prompt is visible.
         let (cmd, args) = match command {
-            Some(s) => {
-                let parts: Vec<&str> = s.split_whitespace().collect();
-                if parts.is_empty() {
-                    (None, None)
-                } else {
-                    (Some(parts[0].to_string()), Some(parts[1..].iter().map(|s| s.to_string()).collect()))
-                }
+            Some(s) if !s.is_empty() => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                (Some(shell), Some(vec!["-l".to_string(), "-c".to_string(), s.to_string()]))
             }
-            None => (None, None),
+            _ => (None, None),
         };
         match self.pty_manager.create(
             name.to_string(),
