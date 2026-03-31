@@ -74,7 +74,7 @@ struct OnboardingView: View {
                     // Tailscale
                     settingSection(title: "Connect to other machines?", step: 3) {
                         Toggle(isOn: $tailscaleEnabled) {
-                            Text("Tailscale networking")
+                            Text("Tailscale")
                                 .foregroundColor(.white.opacity(0.85))
                         }
                         .toggleStyle(.switch)
