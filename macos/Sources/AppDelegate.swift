@@ -156,9 +156,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func restoreWorkspaces() -> Int {
         guard isSetupCompleted() else {
             NSLog("[aterm] first-run wizard not completed — skipping restore")
-            // Clean stale sessions.json from previous installs
-            let sessionsPath = NSHomeDirectory() + "/.aterm/sessions.json"
-            try? FileManager.default.removeItem(atPath: sessionsPath)
+            // Clean stale sessions from both old and new paths
+            try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.aterm/sessions.json")
+            try? FileManager.default.removeItem(atPath: NSHomeDirectory() + "/.aigentry/config/sessions.json")
             return 0
         }
 
@@ -170,7 +170,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let entry = aterm_session_get(nil, UInt32(i))
             defer { aterm_session_free(entry) }
 
-            guard let idPtr = entry.id else { continue }
+            guard let idPtr = entry.id else {
+                NSLog("[aterm] skipping session entry %d: nil id", i)
+                continue
+            }
             let name = String(cString: idPtr)
             let cwd = entry.cwd.map { String(cString: $0) } ?? NSHomeDirectory()
             let commandStr = entry.command.map { String(cString: $0) } ?? ""
