@@ -777,26 +777,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Wait for shell to be ready before sending bootstrap command.
-    /// Uses process state instead of screen content — shell spawn detected when
-    /// rootProcessID is assigned and alive, then waits briefly for init.
+    /// Checks: 1) rootProcessID alive  2) shell prompt visible on screen  3) 2s init delay
+    private static let shellPromptChars = ["% ", "$ ", "# "]
+
     private func waitForShellReady(workspaceID: UUID, command: String, attempts: Int = 0) {
-        guard attempts < 10 else {
-            NSLog("[aterm] shell not ready after 5s — skipping bootstrap")
+        guard attempts < 20 else {
+            NSLog("[aterm] shell not ready after 10s — skipping bootstrap")
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self,
                   let workspace = self.managedWorkspaces[workspaceID],
-                  workspace.terminalView.corePointer != nil else { return }
+                  let core = workspace.terminalView.corePointer else { return }
 
             // Check if the shell process (rootPID) is alive
-            if let rootPID = workspace.rootProcessID, self.processExists(rootPID) {
-                // Shell process is running — wait for shell init before sending command
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let rootPID = workspace.rootProcessID, self.processExists(rootPID) else {
+                self.waitForShellReady(workspaceID: workspaceID, command: command, attempts: attempts + 1)
+                return
+            }
+
+            // Check if shell prompt is visible on screen
+            aterm_core_sync_pty(core)
+            var promptFound = false
+            for pattern in Self.shellPromptChars {
+                let found = pattern.withCString { ptr in
+                    aterm_core_screen_contains(core, ptr) != 0
+                }
+                if found {
+                    promptFound = true
+                    break
+                }
+            }
+
+            if promptFound {
+                // Shell prompt visible — wait 2s for full init (zshrc/profile) then send
+                NSLog("[aterm] shell prompt detected for '%@' (attempt %d), sending bootstrap in 2s", workspace.name, attempts)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                     self?.sendBootstrapCommand(workspaceID: workspaceID, command: command)
                 }
             } else {
-                // Shell not assigned yet — keep polling
                 self.waitForShellReady(workspaceID: workspaceID, command: command, attempts: attempts + 1)
             }
         }
@@ -818,11 +837,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ensureClaudeProjectTrust(cwd: workspace.cwd)
         }
 
-        NSLog("[aterm] sending bootstrap to '%@': %@", workspace.name, command)
+        NSLog("[aterm] sending bootstrap to '%@' (len=%d, cliGaveUp=%d): %@",
+              workspace.name, command.count, workspace.cliGaveUp ? 1 : 0, command)
         let text = command + "\n"
         text.withCString { ptr in
             aterm_core_write_pty(core, ptr, text.utf8.count)
         }
+        workspace.lastLaunchTime = Date()
 
         // Watch for trust prompt after CLI starts
         let isCli = command.contains("claude") || command.contains("codex") || command.contains("gemini")
