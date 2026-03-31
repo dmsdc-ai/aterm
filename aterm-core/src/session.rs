@@ -235,3 +235,49 @@ pub fn check_claude_history(cwd: &str) -> bool {
         })
         .unwrap_or(false)
 }
+
+// -- FFI support --
+
+use std::ffi::{CString, c_char};
+
+#[repr(C)]
+pub struct SessionEntryFFI {
+    pub id: *const c_char,
+    pub cwd: *const c_char,
+    pub command: *const c_char,
+    pub args_json: *const c_char,
+    pub custom_command: *const c_char,
+    pub is_system: bool,
+    pub resume_command: *const c_char,
+}
+
+impl SessionEntryFFI {
+    pub fn from_entry(entry: &SessionEntry) -> Self {
+        let to_ptr = |s: &str| CString::new(s).unwrap_or_default().into_raw() as *const c_char;
+        let opt_ptr = |s: &Option<String>| match s {
+            Some(v) => CString::new(v.as_str()).unwrap_or_default().into_raw() as *const c_char,
+            None => std::ptr::null(),
+        };
+        SessionEntryFFI {
+            id: to_ptr(&entry.id),
+            cwd: to_ptr(&entry.cwd),
+            command: to_ptr(&entry.command),
+            args_json: to_ptr(&serde_json::to_string(&entry.args).unwrap_or_else(|_| "[]".to_string())),
+            custom_command: opt_ptr(&entry.custom_command),
+            is_system: entry.is_system,
+            resume_command: opt_ptr(&entry.resume_command),
+        }
+    }
+
+    pub fn null() -> Self {
+        SessionEntryFFI {
+            id: std::ptr::null(),
+            cwd: std::ptr::null(),
+            command: std::ptr::null(),
+            args_json: std::ptr::null(),
+            custom_command: std::ptr::null(),
+            is_system: false,
+            resume_command: std::ptr::null(),
+        }
+    }
+}

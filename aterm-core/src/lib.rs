@@ -7,7 +7,7 @@ pub mod tailscale;
 pub mod telepty;
 pub mod terminal;
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -718,4 +718,76 @@ fn config_dir_exists(config_dir_name: &str) -> bool {
     dirs::home_dir()
         .map(|home| home.join(config_dir_name).is_dir())
         .unwrap_or(false)
+}
+
+// -- Session persistence FFI --
+
+use crate::session::{SessionEntryFFI, SessionStore, sessions_path};
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_session_count(core: *const AtermCore) -> u32 {
+    if core.is_null() {
+        return 0;
+    }
+    let store = SessionStore::with_path(sessions_path());
+    store.load().map(|d| d.sessions.len() as u32).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_session_get(core: *const AtermCore, index: u32) -> SessionEntryFFI {
+    if core.is_null() {
+        return SessionEntryFFI::null();
+    }
+    let store = SessionStore::with_path(sessions_path());
+    let entries = store.load().map(|d| d.sessions).unwrap_or_default();
+    if (index as usize) < entries.len() {
+        SessionEntryFFI::from_entry(&entries[index as usize])
+    } else {
+        SessionEntryFFI::null()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_session_free(entry: SessionEntryFFI) {
+    let free_ptr = |p: *const c_char| {
+        if !p.is_null() {
+            drop(CString::from_raw(p as *mut c_char));
+        }
+    };
+    free_ptr(entry.id);
+    free_ptr(entry.cwd);
+    free_ptr(entry.command);
+    free_ptr(entry.args_json);
+    free_ptr(entry.custom_command);
+    free_ptr(entry.resume_command);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_sessions_save(core: *mut AtermCore) {
+    if core.is_null() {
+        return;
+    }
+    let store = SessionStore::with_path(sessions_path());
+    let _ = store.save(&(*core).pty_manager);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_sessions_restore(core: *mut AtermCore) -> u32 {
+    if core.is_null() {
+        return 0;
+    }
+    let core = &mut *core;
+    let store = SessionStore::with_path(sessions_path());
+    match store.load() {
+        Ok(data) => {
+            let count = data.sessions.len() as u32;
+            for entry in data.sessions {
+                if let Err(e) = core.pty_manager.restore_session_entry(entry) {
+                    eprintln!("[aterm] restore session skipped: {e}");
+                }
+            }
+            count
+        }
+        Err(_) => 0,
+    }
 }
