@@ -1,6 +1,28 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwiftSessionEntry {
+    name: String,
+    command: Option<String>,
+    custom_command: Option<String>,
+    cwd: Option<String>,
+    is_active: Option<bool>,
+    is_system: Option<bool>,
+    resume_command: Option<String>,
+}
+
+fn save_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data)?;
+
+    #[cfg(target_os = "windows")]
+    { let _ = std::fs::remove_file(path); }
+
+    std::fs::rename(&tmp, path)
+}
+
 use crate::pty::{PtyManager, SharedPtyManager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +76,41 @@ impl SessionStore {
         let contents = match std::fs::read_to_string(&self.path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Check for Swift format at ~/.aigentry/config/sessions.json
+                let swift_path = dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("/tmp"))
+                    .join(".aigentry/config/sessions.json");
+                if swift_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&swift_path) {
+                        match serde_json::from_str::<Vec<SwiftSessionEntry>>(&content) {
+                            Ok(swift_entries) => {
+                                let entries: Vec<SessionEntry> = swift_entries
+                                    .into_iter()
+                                    .map(|s| SessionEntry {
+                                        id: s.name,
+                                        cwd: s.cwd.unwrap_or_default(),
+                                        command: s.command.unwrap_or_default(),
+                                        args: vec![],
+                                        custom_command: s.custom_command,
+                                        is_system: s.is_system.unwrap_or(false),
+                                        resume_command: s.resume_command,
+                                    })
+                                    .collect();
+                                let data = SessionData { sessions: entries };
+                                if let Ok(json) = serde_json::to_string_pretty(&data) {
+                                    if let Some(parent) = self.path.parent() {
+                                        let _ = std::fs::create_dir_all(parent);
+                                    }
+                                    let _ = save_atomic(&self.path, json.as_bytes());
+                                }
+                                return Ok(data);
+                            }
+                            Err(e) => {
+                                eprintln!("[session] Swift migration parse failed: {e}. Starting fresh.");
+                            }
+                        }
+                    }
+                }
                 return Ok(SessionData {
                     sessions: Vec::new(),
                 });
@@ -70,7 +127,7 @@ impl SessionStore {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let json = serde_json::to_string_pretty(&data).map_err(|error| error.to_string())?;
-        std::fs::write(&self.path, json).map_err(|error| error.to_string())
+        save_atomic(&self.path, json.as_bytes()).map_err(|error| error.to_string())
     }
 
     pub fn save_shared(&self, manager: &SharedPtyManager) -> Result<(), String> {
