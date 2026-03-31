@@ -55,13 +55,20 @@ struct OnboardingView: View {
 
                     // Shell Selection
                     settingSection(title: "Default shell", step: 2) {
-                        Picker("", selection: $selectedShell) {
-                            Text("zsh").foregroundColor(.white).tag("zsh")
-                            Text("bash").foregroundColor(.white).tag("bash")
-                            Text("fish").foregroundColor(.white).tag("fish")
+                        HStack(spacing: 8) {
+                            ForEach(["zsh", "bash", "fish"], id: \.self) { shell in
+                                Button(action: { selectedShell = shell }) {
+                                    Text(shell)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
+                                        .background(selectedShell == shell ? Color.cyan : Color.white.opacity(0.1))
+                                        .cornerRadius(8)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
-                        .pickerStyle(.segmented)
-                        .frame(maxWidth: 240)
                     }
 
                     // Tailscale
