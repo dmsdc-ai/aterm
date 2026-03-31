@@ -50,10 +50,13 @@ int32_t aterm_core_init_gpu(struct AtermCore *core,
 int32_t aterm_core_spawn_shell(struct AtermCore *core,
                                const char *name,
                                const char *cwd,
+                               const char *command,
                                uint16_t cols,
                                uint16_t rows);
 
 void aterm_core_write_pty(struct AtermCore *core, const char *text, uintptr_t len);
+
+int32_t aterm_core_workspace_is_alive(const struct AtermCore *core);
 
 void aterm_core_named_key(struct AtermCore *core, uint32_t key_code);
 

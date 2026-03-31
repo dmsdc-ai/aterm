@@ -4,7 +4,14 @@ import QuartzCore
 class TerminalView: NSView, NSTextInputClient {
     private(set) var core: OpaquePointer?  // AtermCore*
     var corePointer: OpaquePointer? { core }
+    var didSpawnShell: Bool { shellSpawned }
+    var isPtyAlive: Bool {
+        guard shellSpawned, let core = core else { return false }
+        return aterm_core_workspace_is_alive(core) != 0
+    }
+    var onShellSpawned: ((Int32) -> Void)?
     var workspaceName: String = "main"
+    var spawnCommand: String?  // nil = default shell, "claude" = run claude directly
     var initialWorkingDirectory: String = NSHomeDirectory()
     private var displayLink: CVDisplayLink?
     private var markedText = NSMutableAttributedString()
@@ -425,12 +432,23 @@ class TerminalView: NSView, NSTextInputClient {
         let cwd = initialWorkingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? NSHomeDirectory()
             : initialWorkingDirectory
-        _ = workspaceName.withCString { name in
+        let result = workspaceName.withCString { name in
             cwd.withCString { cwd in
-                aterm_core_spawn_shell(core, name, cwd, cols, rows)
+                if let cmd = spawnCommand {
+                    return cmd.withCString { cmdPtr in
+                        aterm_core_spawn_shell(core, name, cwd, cmdPtr, cols, rows)
+                    }
+                } else {
+                    return aterm_core_spawn_shell(core, name, cwd, nil, cols, rows)
+                }
             }
         }
-        shellSpawned = true
+        if result == 0 {
+            shellSpawned = true
+        } else {
+            NSLog("[aterm] shell spawn failed for '%@': %d", workspaceName, result)
+        }
+        onShellSpawned?(result)
     }
 
     // Capture Cmd+key that bypass keyDown

@@ -751,13 +751,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         isSystem: Bool = false
     ) {
         let workspaceID = UUID()
-        let baselineChildPIDs = directChildProcessIDs(of: ProcessInfo.processInfo.processIdentifier)
+        let bootstrapCommand = command.bootstrapCommand(customCommand: customCommand)
+        let baselineChildPIDs: Set<Int32> = []
         let terminalView = TerminalView(frame: terminalContainerView.bounds)
         terminalView.workspaceName = name
+        terminalView.spawnCommand = bootstrapCommand
         terminalView.initialWorkingDirectory = cwd
         terminalView.autoresizingMask = [.width, .height]
         terminalView.isHidden = true
-        terminalContainerView.addSubview(terminalView)
+        terminalView.onShellSpawned = { [weak self] result in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.refreshWorkspaceProcesses()
+            }
+        }
 
         let workspace = ManagedWorkspace(
             id: workspaceID,
@@ -778,17 +785,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             workspaceOrder.append(workspaceID)
         }
+        terminalContainerView.addSubview(terminalView)
 
         if shouldSelect {
             selectWorkspace(workspaceID)
         } else {
             rebuildSidebarState()
-        }
-
-        if let bootstrapCommand = command.bootstrapCommand(customCommand: customCommand) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                self?.bootstrapWorkspace(id: workspaceID, command: bootstrapCommand)
-            }
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -801,29 +803,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func bootstrapWorkspace(id: UUID, command: String) {
         guard let workspace = managedWorkspaces[id] else { return }
         workspace.lastLaunchTime = Date()
-        waitForShellReady(workspaceID: id, command: command)
-    }
-
-    /// Wait for shell to be ready before sending bootstrap command.
-    /// Waits for rootProcessID to be alive, then sends after 2s delay for shell init.
-    private func waitForShellReady(workspaceID: UUID, command: String, attempts: Int = 0) {
-        guard attempts < 10 else {
-            NSLog("[aterm] shell process not detected after 5s — skipping bootstrap")
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self,
-                  let workspace = self.managedWorkspaces[workspaceID] else { return }
-
-            if let rootPID = workspace.rootProcessID, self.processExists(rootPID) {
-                // Shell process alive — wait 2s for zshrc/profile init then send
-                NSLog("[aterm] shell alive (pid %d) for '%@', sending bootstrap in 2s", rootPID, workspace.name)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    self?.sendBootstrapCommand(workspaceID: workspaceID, command: command)
-                }
-            } else {
-                self.waitForShellReady(workspaceID: workspaceID, command: command, attempts: attempts + 1)
-            }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.sendBootstrapCommand(workspaceID: id, command: command)
         }
     }
 
@@ -989,116 +970,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshWorkspaceProcesses() {
-        let appPID = ProcessInfo.processInfo.processIdentifier
-        let now = Date()
-        let currentChildren = directChildProcessIDs(of: appPID)
-        var assignedRootPIDs = Set(managedWorkspaces.values.compactMap(\.rootProcessID))
-
-        for id in workspaceOrder {
-            guard let workspace = managedWorkspaces[id], workspace.rootProcessID == nil else {
-                continue
-            }
-
-            let candidates = currentChildren
-                .subtracting(workspace.baselineChildPIDs)
-                .subtracting(assignedRootPIDs)
-                .subtracting(excludedChildPIDs)
-            if let candidate = candidates.max() {
-                workspace.rootProcessID = candidate
-                assignedRootPIDs.insert(candidate)
-            }
-        }
-
         for id in workspaceOrder {
             guard let workspace = managedWorkspaces[id] else { continue }
-            let defaultProcessName = workspace.launchCommand.displayTitle(
-                customCommand: workspace.customCommand
-            )
-            let withinStartupGracePeriod = now.timeIntervalSince(workspace.createdAt) < 5.0
+            let defaultProcessName = workspace.cliGaveUp
+                ? "shell (CLI unavailable)"
+                : workspace.launchCommand.displayTitle(customCommand: workspace.customCommand)
 
-            guard let rootPID = workspace.rootProcessID else {
-                if workspace.cliGaveUp {
-                    workspace.status = "running"
-                    workspace.foregroundProcessName = "shell (CLI unavailable)"
-                } else {
-                    workspace.status = "starting"
-                    workspace.foregroundProcessName = defaultProcessName
-                }
-                continue
-            }
-
-            if !currentChildren.contains(rootPID) && !processExists(rootPID) {
+            guard workspace.terminalView.didSpawnShell else {
+                workspace.status = "starting"
                 workspace.foregroundProcessName = defaultProcessName
-
-                // Give the shell time to become the tracked root process before
-                // treating short-lived intermediate children as failures.
-                if withinStartupGracePeriod {
-                    workspace.rootProcessID = nil
-                    workspace.status = workspace.cliGaveUp ? "running" : "starting"
-                    workspace.foregroundProcessName = workspace.cliGaveUp
-                        ? "shell (CLI unavailable)"
-                        : defaultProcessName
-                    continue
-                }
-
-                if workspace.isSystem && workspace.cliGaveUp {
-                    workspace.rootProcessID = nil
-                    workspace.status = "running"
-                    workspace.foregroundProcessName = "shell (CLI unavailable)"
-                    continue
-                }
-
-                // Auto-restart system workspaces with backoff protection
-                if workspace.isSystem && !workspace.cliGaveUp {
-                    let uptime = workspace.lastLaunchTime.map { Date().timeIntervalSince($0) } ?? 0
-                    if uptime < 10 {
-                        workspace.restartCount += 1
-                        NSLog("[aterm] system workspace '%@' exited too quickly (%.1fs), attempt %d/3", workspace.name, uptime, workspace.restartCount)
-                        if workspace.restartCount >= 3 {
-                            // CLI failed 3x — fall back to plain shell permanently
-                            NSLog("[aterm] CLI failed to start, falling back to shell for '%@'", workspace.name)
-                            workspace.cliGaveUp = true
-                            workspace.rootProcessID = nil
-                            workspace.restartCount = 0
-                            workspace.status = "running"
-                            workspace.foregroundProcessName = "shell (CLI unavailable)"
-                            // Shell is already running — never retry CLI until user changes in Preferences
-                        } else {
-                            workspace.status = "restarting"
-                            workspace.rootProcessID = nil
-                            let wsID = id
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                                self?.restartSystemWorkspace(id: wsID)
-                            }
-                        }
-                    } else {
-                        // Was running long enough — genuine crash, restart immediately
-                        workspace.status = "restarting"
-                        workspace.rootProcessID = nil
-                        workspace.restartCount = 0
-                        let wsID = id
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                            self?.restartSystemWorkspace(id: wsID)
-                        }
-                    }
-                } else {
-                    workspace.status = "dead"
-                }
                 continue
             }
 
-            // Reset restart counter after 30s of successful running
-            if workspace.isSystem && workspace.restartCount > 0 {
-                let uptime = workspace.lastLaunchTime.map { Date().timeIntervalSince($0) } ?? 0
-                if uptime > 30 {
-                    workspace.restartCount = 0
-                }
+            guard workspace.terminalView.isPtyAlive else {
+                workspace.status = "dead"
+                workspace.foregroundProcessName = defaultProcessName
+                continue
             }
 
             workspace.status = "running"
-            workspace.foregroundProcessName = foregroundProcessName(forRootPID: rootPID)
-                ?? processName(for: rootPID)
-                ?? workspace.launchCommand.displayTitle(customCommand: workspace.customCommand)
+            workspace.foregroundProcessName = defaultProcessName
         }
 
         rebuildSidebarState()

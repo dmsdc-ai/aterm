@@ -488,6 +488,31 @@ impl PtyManager {
         self.workspaces.get(id).map(|ws| ws.writer.clone())
     }
 
+    pub fn workspace_is_alive(&self, id: &str) -> bool {
+        let Ok(ws) = self.workspace(id) else {
+            return false;
+        };
+
+        let alive = ws
+            .child
+            .lock()
+            .ok()
+            .and_then(|mut child| child.try_wait().ok())
+            .map(|status| status.is_none())
+            .unwrap_or_else(|| {
+                ws.status
+                    .lock()
+                    .map(|status| status.as_str() != "dead")
+                    .unwrap_or(false)
+            });
+
+        if !alive {
+            set_workspace_status(&ws.status, "dead");
+        }
+
+        alive
+    }
+
     fn workspace(&self, id: &str) -> Result<&Workspace, String> {
         self.workspaces
             .get(id)

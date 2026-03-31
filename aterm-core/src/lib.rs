@@ -177,11 +177,11 @@ impl AtermCore {
         0 // success
     }
 
-    fn spawn_shell(&mut self, name: &str, cwd: &str, cols: u16, rows: u16) -> i32 {
+    fn spawn_shell(&mut self, name: &str, cwd: &str, command: Option<&str>, cols: u16, rows: u16) -> i32 {
         match self.pty_manager.create(
             name.to_string(),
             cwd.to_string(),
-            None,
+            command.map(|s| s.to_string()),
             None,
             Some(cols),
             Some(rows),
@@ -211,6 +211,13 @@ impl AtermCore {
                 eprintln!("[aterm-core] pty write error: {e}");
             }
         }
+    }
+
+    fn workspace_is_alive(&self) -> bool {
+        self.workspace_id
+            .as_ref()
+            .map(|id| self.pty_manager.workspace_is_alive(id))
+            .unwrap_or(false)
     }
 
     fn named_key(&self, code: u32) {
@@ -394,6 +401,7 @@ pub unsafe extern "C" fn aterm_core_spawn_shell(
     core: *mut AtermCore,
     name: *const c_char,
     cwd: *const c_char,
+    command: *const c_char,
     cols: u16,
     rows: u16,
 ) -> i32 {
@@ -402,7 +410,8 @@ pub unsafe extern "C" fn aterm_core_spawn_shell(
     }
     let name_str = if name.is_null() { "main".into() } else { CStr::from_ptr(name).to_string_lossy() };
     let cwd_str = CStr::from_ptr(cwd).to_string_lossy();
-    (*core).spawn_shell(&name_str, &cwd_str, cols, rows)
+    let cmd = if command.is_null() { None } else { Some(CStr::from_ptr(command).to_string_lossy()) };
+    (*core).spawn_shell(&name_str, &cwd_str, cmd.as_deref(), cols, rows)
 }
 
 #[no_mangle]
@@ -418,6 +427,14 @@ pub unsafe extern "C" fn aterm_core_write_pty(
     if let Ok(s) = std::str::from_utf8(slice) {
         (*core).write_pty(s);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_workspace_is_alive(core: *const AtermCore) -> i32 {
+    if core.is_null() {
+        return 0;
+    }
+    (*core).workspace_is_alive() as i32
 }
 
 #[no_mangle]
