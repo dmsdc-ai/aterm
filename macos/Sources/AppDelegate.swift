@@ -115,29 +115,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Workspace Persistence
 
-    private static let workspacesFileURL: URL = {
-        let home = NSHomeDirectory()
-        return URL(fileURLWithPath: "\(home)/.aigentry/config/sessions.json")
-    }()
-
     private func saveWorkspaces() {
         let entries: [[String: Any]] = workspaceOrder.compactMap { id in
             guard let ws = managedWorkspaces[id] else { return nil }
             return [
-                "name": ws.name,
-                "command": ws.launchCommand.rawValue,
-                "customCommand": ws.customCommand,
+                "id": ws.name,
                 "cwd": ws.cwd,
-                "resumeCommand": ws.launchCommand.bootstrapCommand(customCommand: ws.customCommand) ?? "",
-                "isActive": ws.status != "dead",
+                "command": ws.launchCommand.rawValue,
+                "args": [] as [String],
+                "customCommand": ws.customCommand,
                 "isSystem": ws.isSystem,
+                "resumeCommand": ws.launchCommand.bootstrapCommand(customCommand: ws.customCommand) ?? "",
             ] as [String: Any]
         }
+        let wrapper: [String: Any] = ["sessions": entries]
         do {
-            let dir = Self.workspacesFileURL.deletingLastPathComponent()
+            let sessionsURL = URL(fileURLWithPath: NSHomeDirectory() + "/.aterm/sessions.json")
+            let dir = sessionsURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: entries, options: .prettyPrinted)
-            try data.write(to: Self.workspacesFileURL)
+            let data = try JSONSerialization.data(withJSONObject: wrapper, options: [.prettyPrinted, .sortedKeys])
+            // Atomic write: write to .tmp then rename
+            let tmpURL = sessionsURL.appendingPathExtension("tmp")
+            try data.write(to: tmpURL)
+            _ = try FileManager.default.replaceItemAt(sessionsURL, withItemAt: tmpURL)
         } catch {
             NSLog("[aterm] save workspaces failed: %@", error.localizedDescription)
         }
@@ -157,56 +157,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard isSetupCompleted() else {
             NSLog("[aterm] first-run wizard not completed — skipping restore")
             // Clean stale sessions.json from previous installs
-            try? FileManager.default.removeItem(at: Self.workspacesFileURL)
+            let sessionsPath = NSHomeDirectory() + "/.aterm/sessions.json"
+            try? FileManager.default.removeItem(atPath: sessionsPath)
             return 0
         }
 
-        guard let data = try? Data(contentsOf: Self.workspacesFileURL),
-              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return 0
-        }
+        let count = Int(aterm_session_count(nil))
+        if count == 0 { return 0 }
 
-        // Also migrate from old location if needed
-        let oldURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("aterm/sessions.json")
-        if entries.isEmpty, let oldData = try? Data(contentsOf: oldURL),
-           let oldEntries = try? JSONSerialization.jsonObject(with: oldData) as? [[String: Any]], !oldEntries.isEmpty {
-            return restoreEntries(oldEntries)
-        }
+        var restored = 0
+        for i in 0..<count {
+            let entry = aterm_session_get(nil, UInt32(i))
+            defer { aterm_session_free(entry) }
 
-        return restoreEntries(entries)
-    }
+            guard let idPtr = entry.id else { continue }
+            let name = String(cString: idPtr)
+            let cwd = entry.cwd.map { String(cString: $0) } ?? NSHomeDirectory()
+            let commandStr = entry.command.map { String(cString: $0) } ?? ""
+            let custom = entry.custom_command.map { String(cString: $0) } ?? ""
 
-    private func restoreEntries(_ entries: [[String: Any]]) -> Int {
-        var count = 0
-        let activeEntries = entries.filter { ($0["isActive"] as? Bool) != false }
-        for (index, entry) in activeEntries.enumerated() {
-            guard let name = entry["name"] as? String,
-                  let commandRaw = entry["command"] as? String,
-                  let cwd = entry["cwd"] as? String else { continue }
-
-            let custom = entry["customCommand"] as? String ?? ""
             let effectiveCwd = FileManager.default.fileExists(atPath: cwd) ? cwd : NSHomeDirectory()
-
-            // CLI binary fallback: if CLI not installed, fall back to zsh
-            let requestedCommand = WorkspaceLaunchCommand(rawValue: commandRaw) ?? .zsh
+            let requestedCommand = WorkspaceLaunchCommand(rawValue: commandStr) ?? .zsh
             let command = cliAvailable(for: requestedCommand) ? requestedCommand : .zsh
 
-            let system = entry["isSystem"] as? Bool ?? false
             createWorkspace(
                 name: name,
                 command: command,
                 customCommand: custom,
                 cwd: effectiveCwd,
-                shouldSelect: index == activeEntries.count - 1,
-                isSystem: system
+                shouldSelect: i == count - 1,
+                isSystem: entry.is_system
             )
-            count += 1
+            restored += 1
         }
-        if count > 0 {
-            NSLog("[aterm] restored %d workspaces", count)
+        if restored > 0 {
+            NSLog("[aterm] restored %d workspaces", restored)
         }
-        return count
+        return restored
     }
 
     private func cliAvailable(for command: WorkspaceLaunchCommand) -> Bool {
@@ -239,6 +226,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let name = userSelectedCli ? "orchestrator" : "main"
         let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
         let cwd = FileManager.default.fileExists(atPath: orchestratorDir) ? orchestratorDir : NSHomeDirectory()
+
+        // Pre-create Claude Code trust directory so the trust prompt is skipped
+        if command == .claude {
+            let sanitized = cwd.replacingOccurrences(of: "/", with: "-")
+            let trustDir = NSHomeDirectory() + "/.claude/projects/\(sanitized)"
+            try? FileManager.default.createDirectory(atPath: trustDir, withIntermediateDirectories: true)
+        }
 
         NSLog("[aterm] creating workspace from onboarding: name=%@, cli=%@, command=%@", name, result.defaultCLI, command.rawValue)
         createWorkspace(

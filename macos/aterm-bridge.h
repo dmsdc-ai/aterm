@@ -63,6 +63,23 @@ char* aterm_core_list_workspaces(const AtermCore* core);
 char* aterm_core_detect_clis(void);
 void aterm_core_free_string(char* ptr);
 
+// Session persistence
+typedef struct SessionEntryFFI {
+    const char *id;
+    const char *cwd;
+    const char *command;
+    const char *args_json;
+    const char *custom_command;
+    bool is_system;
+    const char *resume_command;
+} SessionEntryFFI;
+
+uint32_t aterm_session_count(const AtermCore* core);
+SessionEntryFFI aterm_session_get(const AtermCore* core, uint32_t index);
+void aterm_session_free(SessionEntryFFI entry);
+void aterm_sessions_save(AtermCore* core);
+uint32_t aterm_sessions_restore(AtermCore* core);
+
 // Tailscale
 int32_t aterm_tailscale_connect(const char* hostname, const char* control_url, const char* auth_key);
 void aterm_tailscale_shutdown(void);

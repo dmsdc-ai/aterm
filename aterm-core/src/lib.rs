@@ -725,19 +725,13 @@ fn config_dir_exists(config_dir_name: &str) -> bool {
 use crate::session::{SessionEntryFFI, SessionStore, sessions_path};
 
 #[no_mangle]
-pub unsafe extern "C" fn aterm_session_count(core: *const AtermCore) -> u32 {
-    if core.is_null() {
-        return 0;
-    }
+pub unsafe extern "C" fn aterm_session_count(_core: *const AtermCore) -> u32 {
     let store = SessionStore::with_path(sessions_path());
     store.load().map(|d| d.sessions.len() as u32).unwrap_or(0)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn aterm_session_get(core: *const AtermCore, index: u32) -> SessionEntryFFI {
-    if core.is_null() {
-        return SessionEntryFFI::null();
-    }
+pub unsafe extern "C" fn aterm_session_get(_core: *const AtermCore, index: u32) -> SessionEntryFFI {
     let store = SessionStore::with_path(sessions_path());
     let entries = store.load().map(|d| d.sessions).unwrap_or_default();
     if (index as usize) < entries.len() {
