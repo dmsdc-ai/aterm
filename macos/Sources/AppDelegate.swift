@@ -156,6 +156,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func restoreWorkspaces() -> Int {
         guard isSetupCompleted() else {
             NSLog("[aterm] first-run wizard not completed — skipping restore")
+            // Clean stale sessions.json from previous installs
+            try? FileManager.default.removeItem(at: Self.workspacesFileURL)
             return 0
         }
 
@@ -220,6 +222,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .custom:
             return true
         }
+    }
+
+    private func createWorkspaceFromOnboarding(_ result: OnboardingResult) {
+        let command: WorkspaceLaunchCommand
+        switch result.defaultCLI {
+        case "claude": command = cliAvailable(for: .claude) ? .claude : .zsh
+        case "codex": command = cliAvailable(for: .codex) ? .codex : .zsh
+        case "gemini": command = cliAvailable(for: .gemini) ? .gemini : .zsh
+        default: command = .zsh
+        }
+
+        let userSelectedCli = result.defaultCLI != "none"
+        let name = userSelectedCli ? "orchestrator" : "main"
+        let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
+        let cwd = FileManager.default.fileExists(atPath: orchestratorDir) ? orchestratorDir : NSHomeDirectory()
+
+        NSLog("[aterm] creating workspace from onboarding: name=%@, cli=%@, command=%@", name, result.defaultCLI, command.rawValue)
+        createWorkspace(
+            name: name,
+            command: command,
+            customCommand: "",
+            cwd: cwd,
+            shouldSelect: true,
+            isSystem: userSelectedCli
+        )
     }
 
     private func createDefaultWorkspace() {
@@ -348,7 +375,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             cliStatus: cliStatus,
             onComplete: { [weak self] result in
                 self?.saveOnboardingResult(result)
-                self?.createDefaultWorkspace()
+                self?.createWorkspaceFromOnboarding(result)
             }
         )
 
