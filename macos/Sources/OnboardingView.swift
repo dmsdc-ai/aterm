@@ -102,7 +102,7 @@ struct OnboardingView: View {
             }
             .padding(.vertical, 16)
         }
-        .frame(width: 420, height: 600)
+        .frame(width: 420, height: 680)
         .background(Color(nsColor: NSColor(white: 0.12, alpha: 1.0)))
     }
 
