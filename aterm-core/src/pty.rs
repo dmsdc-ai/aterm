@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -108,7 +108,11 @@ struct Workspace {
     inject_queue: SharedInjectQueue,
     idle_state: Arc<Mutex<IdleState>>,
     auto_restart: bool,
+    restart_count: Arc<AtomicU32>,
     ephemeral: bool,
+    custom_command: Option<String>,
+    is_system: bool,
+    resume_command: Option<String>,
 }
 
 pub struct PtyManager {
@@ -231,6 +235,9 @@ impl PtyManager {
         cols: Option<u16>,
         rows: Option<u16>,
         ephemeral: bool,
+        custom_command: Option<String>,
+        is_system: bool,
+        resume_command: Option<String>,
     ) -> Result<String, String> {
         if self.workspaces.contains_key(&id) {
             return Err(format!("Workspace '{}' already exists", id));
@@ -247,7 +254,7 @@ impl PtyManager {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let spawned = spawn_workspace_process(&cwd, &shell, &launch_args, clone_size(&size))?;
+        let spawned = spawn_workspace_process(&cwd, &shell, &launch_args, clone_size(&size), Some(&id))?;
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(spawned.writer));
         let inject_queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
@@ -275,6 +282,8 @@ impl PtyManager {
         let reader_master = master.clone();
         let reader_child = child.clone();
         let reader_inject_queue = inject_queue.clone();
+        let restart_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+        let reader_restart_count = restart_count.clone();
 
         thread::spawn(move || {
             reader_loop(
@@ -295,6 +304,7 @@ impl PtyManager {
                 reader_master,
                 reader_child,
                 reader_inject_queue,
+                reader_restart_count,
             );
         });
 
@@ -327,7 +337,11 @@ impl PtyManager {
             inject_queue,
             idle_state,
             auto_restart,
+            restart_count,
             ephemeral,
+            custom_command,
+            is_system,
+            resume_command,
         };
 
         self.workspaces.insert(id.clone(), workspace);
@@ -348,7 +362,7 @@ impl PtyManager {
             Some(entry.command)
         };
 
-        self.create(entry.id, entry.cwd, cmd, args, None, None, false)
+        self.create(entry.id, entry.cwd, cmd, args, None, None, false, entry.custom_command, entry.is_system, entry.resume_command)
     }
 
     pub fn close(&mut self, id: &str) -> Result<(), String> {
@@ -473,6 +487,9 @@ impl PtyManager {
                 cwd: ws.cwd.clone(),
                 command: ws.command.clone(),
                 args: strip_claude_continue_arg(&ws.command, &ws.args),
+                custom_command: ws.custom_command.clone(),
+                is_system: ws.is_system,
+                resume_command: ws.resume_command.clone(),
             })
             .collect()
     }
@@ -531,6 +548,7 @@ fn spawn_workspace_process(
     command: &str,
     args: &[String],
     size: PtySize,
+    workspace_id: Option<&str>,
 ) -> Result<SpawnedWorkspace, String> {
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(|error| error.to_string())?;
@@ -545,6 +563,9 @@ fn spawn_workspace_process(
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "aterm");
     cmd.env("TERM_PROGRAM_VERSION", "3.0");
+    if let Some(ws_id) = workspace_id {
+        cmd.env("ATERM_SESSION_ID", ws_id);
+    }
     if let Some(path_env) = augmented_path_env() {
         cmd.env("PATH", path_env);
     }
@@ -576,6 +597,7 @@ fn try_restart_workspace(
     idle_state: &Arc<Mutex<IdleState>>,
     inject_queue: &SharedInjectQueue,
     signal: &PtyOutputSignal,
+    restart_count: &Arc<AtomicU32>,
 ) -> bool {
     eprintln!("[PTY] auto-restart: attempting respawn for {}", ws_id);
 
@@ -586,7 +608,7 @@ fn try_restart_workspace(
         pixel_height: 0,
     });
 
-    let spawned = match spawn_workspace_process(cwd, command, args, current_size) {
+    let spawned = match spawn_workspace_process(cwd, command, args, current_size, Some(ws_id)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[PTY] auto-restart failed for {}: {}", ws_id, e);
@@ -636,6 +658,7 @@ fn try_restart_workspace(
     let restart_master = master.clone();
     let restart_child = child.clone();
     let restart_inject_queue = inject_queue.clone();
+    let restart_restart_count = restart_count.clone();
 
     thread::spawn(move || {
         reader_loop(
@@ -656,6 +679,7 @@ fn try_restart_workspace(
             restart_master,
             restart_child,
             restart_inject_queue,
+            restart_restart_count,
         );
     });
 
@@ -691,6 +715,7 @@ fn reader_loop(
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
     inject_queue: SharedInjectQueue,
+    restart_count: Arc<AtomicU32>,
 ) {
     let mut buf = [0u8; 4096];
     let mut leftover: Vec<u8> = Vec::new();
@@ -777,13 +802,29 @@ fn reader_loop(
     }
 
     if auto_restart {
-        let restarted = try_restart_workspace(
-            &ws_id, &cwd, &command, &args,
-            &size, &master, &writer, &child,
-            &buffer, &term_bytes, &status, &idle_state, &inject_queue, &signal,
-        );
-        if restarted {
-            return; // New reader thread is running
+        let attempts = restart_count.fetch_add(1, Ordering::SeqCst);
+        if attempts >= 3 {
+            eprintln!("[PTY] auto-restart: max retries (3) reached for {}, giving up", ws_id);
+            if let Ok(mut current) = status.lock() {
+                *current = "dead".to_string();
+            }
+            signal.mark_dirty();
+        } else {
+            // Always strip --continue on retry (graceful degradation for first-run)
+            let retry_args: Vec<String> = args.iter()
+                .filter(|a| a.as_str() != "--continue")
+                .cloned()
+                .collect();
+            eprintln!("[PTY] auto-restart: attempt {}/3 for {} (without --continue)", attempts + 1, ws_id);
+            let restarted = try_restart_workspace(
+                &ws_id, &cwd, &command, &retry_args,
+                &size, &master, &writer, &child,
+                &buffer, &term_bytes, &status, &idle_state, &inject_queue, &signal,
+                &restart_count,
+            );
+            if restarted {
+                return; // New reader thread is running
+            }
         }
     }
 

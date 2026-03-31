@@ -16,6 +16,12 @@ pub struct SessionEntry {
     pub cwd: String,
     pub command: String,
     pub args: Vec<String>,
+    #[serde(default)]
+    pub custom_command: Option<String>,
+    #[serde(default)]
+    pub is_system: bool,
+    #[serde(default)]
+    pub resume_command: Option<String>,
 }
 
 #[derive(Debug, Clone)]

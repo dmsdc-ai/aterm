@@ -198,6 +198,9 @@ impl AtermCore {
             Some(cols),
             Some(rows),
             false,
+            None,
+            false,
+            None,
         ) {
             Ok(id) => {
                 eprintln!("[aterm-core] spawned: {id}");
