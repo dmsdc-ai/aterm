@@ -37,6 +37,16 @@
 
 typedef struct AtermCore AtermCore;
 
+typedef struct SessionEntryFFI {
+  const char *id;
+  const char *cwd;
+  const char *command;
+  const char *args_json;
+  const char *custom_command;
+  bool is_system;
+  const char *resume_command;
+} SessionEntryFFI;
+
 struct AtermCore *aterm_core_new(void);
 
 void aterm_core_free(struct AtermCore *core);
@@ -110,6 +120,16 @@ void aterm_tailscale_shutdown(void);
 char *aterm_tailscale_status_json(void);
 
 char *aterm_core_detect_clis(void);
+
+uint32_t aterm_session_count(const struct AtermCore *_core);
+
+struct SessionEntryFFI aterm_session_get(const struct AtermCore *_core, uint32_t index);
+
+void aterm_session_free(struct SessionEntryFFI entry);
+
+void aterm_sessions_save(struct AtermCore *core);
+
+uint32_t aterm_sessions_restore(struct AtermCore *core);
 
 extern int tailscale_new(void);
 
