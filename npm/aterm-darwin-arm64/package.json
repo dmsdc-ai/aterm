@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aterm-darwin-arm64",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "darwin-arm64 native bundle for @dmsdc-ai/aterm",
   "type": "module",
   "files": [

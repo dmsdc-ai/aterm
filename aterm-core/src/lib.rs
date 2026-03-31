@@ -178,16 +178,18 @@ impl AtermCore {
     }
 
     fn spawn_shell(&mut self, name: &str, cwd: &str, command: Option<&str>, cols: u16, rows: u16) -> i32 {
-        // When command is set (e.g. "claude --dangerously-skip-permissions --continue"),
-        // run it via login shell: /bin/zsh -l -c "<command>"
-        // This ensures PATH/env are loaded and no shell prompt is visible.
+        // Parse command string into program + args directly.
+        // augmented_path_env() and resolve_command_binary() handle PATH resolution.
         let (cmd, args) = match command {
             Some(s) if !s.is_empty() => {
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-                (Some(shell), Some(vec!["-l".to_string(), "-c".to_string(), s.to_string()]))
+                let parts: Vec<&str> = s.split_whitespace().collect();
+                let program = parts[0].to_string();
+                let cmd_args: Vec<String> = parts[1..].iter().map(|a| a.to_string()).collect();
+                (Some(program), if cmd_args.is_empty() { None } else { Some(cmd_args) })
             }
             _ => (None, None),
         };
+        eprintln!("[aterm-core] spawn_shell: name={name} cmd={cmd:?} args={args:?}");
         match self.pty_manager.create(
             name.to_string(),
             cwd.to_string(),
@@ -198,7 +200,7 @@ impl AtermCore {
             false,
         ) {
             Ok(id) => {
-                eprintln!("[aterm-core] shell spawned: {id}");
+                eprintln!("[aterm-core] spawned: {id}");
                 // Connect PTY writer to terminal so DA responses flow back
                 if let Some(ref terminal) = self.terminal {
                     if let Some(writer) = self.pty_manager.workspace_writer(&id) {
