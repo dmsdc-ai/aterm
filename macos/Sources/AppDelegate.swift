@@ -753,6 +753,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let workspaceID = UUID()
         let baselineChildPIDs = directChildProcessIDs(of: ProcessInfo.processInfo.processIdentifier)
         let terminalView = TerminalView(frame: terminalContainerView.bounds)
+        terminalView.workspaceName = name
         terminalView.initialWorkingDirectory = cwd
         terminalView.autoresizingMask = [.width, .height]
         terminalView.isHidden = true

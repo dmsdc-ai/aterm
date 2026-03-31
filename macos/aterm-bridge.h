@@ -31,7 +31,7 @@ void aterm_core_free(AtermCore* core);
 int32_t aterm_core_init_gpu(AtermCore* core, void* ns_view, uint32_t width, uint32_t height, float scale);
 
 // PTY
-int32_t aterm_core_spawn_shell(AtermCore* core, const char* cwd, uint16_t cols, uint16_t rows);
+int32_t aterm_core_spawn_shell(AtermCore* core, const char* name, const char* cwd, uint16_t cols, uint16_t rows);
 void aterm_core_write_pty(AtermCore* core, const char* text, size_t len);
 void aterm_core_named_key(AtermCore* core, uint32_t key_code);
 

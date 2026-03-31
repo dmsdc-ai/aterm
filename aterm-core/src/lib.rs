@@ -177,9 +177,9 @@ impl AtermCore {
         0 // success
     }
 
-    fn spawn_shell(&mut self, cwd: &str, cols: u16, rows: u16) -> i32 {
+    fn spawn_shell(&mut self, name: &str, cwd: &str, cols: u16, rows: u16) -> i32 {
         match self.pty_manager.create(
-            "main".to_string(),
+            name.to_string(),
             cwd.to_string(),
             None,
             None,
@@ -392,6 +392,7 @@ pub unsafe extern "C" fn aterm_core_init_gpu(
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_spawn_shell(
     core: *mut AtermCore,
+    name: *const c_char,
     cwd: *const c_char,
     cols: u16,
     rows: u16,
@@ -399,8 +400,9 @@ pub unsafe extern "C" fn aterm_core_spawn_shell(
     if core.is_null() || cwd.is_null() {
         return -1;
     }
+    let name_str = if name.is_null() { "main".into() } else { CStr::from_ptr(name).to_string_lossy() };
     let cwd_str = CStr::from_ptr(cwd).to_string_lossy();
-    (*core).spawn_shell(&cwd_str, cols, rows)
+    (*core).spawn_shell(&name_str, &cwd_str, cols, rows)
 }
 
 #[no_mangle]

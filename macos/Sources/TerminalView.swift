@@ -4,6 +4,7 @@ import QuartzCore
 class TerminalView: NSView, NSTextInputClient {
     private(set) var core: OpaquePointer?  // AtermCore*
     var corePointer: OpaquePointer? { core }
+    var workspaceName: String = "main"
     var initialWorkingDirectory: String = NSHomeDirectory()
     private var displayLink: CVDisplayLink?
     private var markedText = NSMutableAttributedString()
@@ -424,8 +425,10 @@ class TerminalView: NSView, NSTextInputClient {
         let cwd = initialWorkingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? NSHomeDirectory()
             : initialWorkingDirectory
-        _ = cwd.withCString { cwd in
-            aterm_core_spawn_shell(core, cwd, cols, rows)
+        _ = workspaceName.withCString { name in
+            cwd.withCString { cwd in
+                aterm_core_spawn_shell(core, name, cwd, cols, rows)
+            }
         }
         shellSpawned = true
     }
