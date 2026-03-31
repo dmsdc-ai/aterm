@@ -759,6 +759,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let baselineChildPIDs: Set<Int32> = []
         let terminalView = TerminalView(frame: terminalContainerView.bounds)
         terminalView.workspaceName = name
+        terminalView.spawnCommand = bootstrapCommand
         terminalView.initialWorkingDirectory = cwd
         terminalView.autoresizingMask = [.width, .height]
         terminalView.isHidden = true
