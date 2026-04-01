@@ -11,7 +11,7 @@ pub mod terminal;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::pty::{PtyManager, PtyOutputSignal};
 use crate::renderer::TerminalGridRenderer;
@@ -784,5 +784,162 @@ pub unsafe extern "C" fn aterm_sessions_restore(core: *mut AtermCore) -> u32 {
             count
         }
         Err(_) => 0,
+    }
+}
+
+// -- IPC Phase 1: AtermApp singleton + C ABI --
+
+use crate::app::AtermApp;
+
+static ATERM_APP: OnceLock<Arc<std::sync::Mutex<AtermApp>>> = OnceLock::new();
+
+fn global_app() -> &'static Arc<std::sync::Mutex<AtermApp>> {
+    ATERM_APP.get_or_init(|| {
+        let app = Arc::new(std::sync::Mutex::new(AtermApp::new()));
+        AtermApp::start_ipc(&app);
+        app
+    })
+}
+
+/// C callback table for PlatformHost trait.
+#[repr(C)]
+pub struct AtermHostCallbacks {
+    pub userdata: *mut c_void,
+    pub create_workspace_view: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    pub close_workspace_view: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub focus_workspace: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub list_workspaces: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
+    pub on_workspace_event: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub request_redraw: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+unsafe impl Send for AtermHostCallbacks {}
+unsafe impl Sync for AtermHostCallbacks {}
+
+/// Adapter: wraps C callbacks into PlatformHost trait
+struct HostBridge {
+    callbacks: AtermHostCallbacks,
+}
+
+unsafe impl Send for HostBridge {}
+unsafe impl Sync for HostBridge {}
+
+impl aterm_session::host::PlatformHost for HostBridge {
+    fn create_workspace_view(&self, id: &str, config: &aterm_session::types::WorkspaceConfig) {
+        if let Some(cb) = self.callbacks.create_workspace_view {
+            let id_c = CString::new(id).unwrap_or_default();
+            let config_json = serde_json::to_string(config).unwrap_or_default();
+            let config_c = CString::new(config_json).unwrap_or_default();
+            unsafe { cb(self.callbacks.userdata, id_c.as_ptr(), config_c.as_ptr()) };
+        }
+    }
+
+    fn close_workspace_view(&self, id: &str) {
+        if let Some(cb) = self.callbacks.close_workspace_view {
+            let id_c = CString::new(id).unwrap_or_default();
+            unsafe { cb(self.callbacks.userdata, id_c.as_ptr()) };
+        }
+    }
+
+    fn focus_workspace(&self, id: &str) {
+        if let Some(cb) = self.callbacks.focus_workspace {
+            let id_c = CString::new(id).unwrap_or_default();
+            unsafe { cb(self.callbacks.userdata, id_c.as_ptr()) };
+        }
+    }
+
+    fn list_workspaces(&self) -> Vec<aterm_session::types::WorkspaceInfo> {
+        if let Some(cb) = self.callbacks.list_workspaces {
+            let ptr = unsafe { cb(self.callbacks.userdata) };
+            if !ptr.is_null() {
+                let json = unsafe { CStr::from_ptr(ptr).to_string_lossy() };
+                let result = serde_json::from_str(&json).unwrap_or_default();
+                unsafe { drop(CString::from_raw(ptr)) };
+                return result;
+            }
+        }
+        Vec::new()
+    }
+
+    fn on_workspace_event(&self, event: aterm_session::types::WorkspaceEvent) {
+        if let Some(cb) = self.callbacks.on_workspace_event {
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            let json_c = CString::new(json).unwrap_or_default();
+            unsafe { cb(self.callbacks.userdata, json_c.as_ptr()) };
+        }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(cb) = self.callbacks.request_redraw {
+            unsafe { cb(self.callbacks.userdata) };
+        }
+    }
+}
+
+/// Register platform host callbacks. Call once at startup.
+#[no_mangle]
+pub unsafe extern "C" fn aterm_set_host(callbacks: AtermHostCallbacks) {
+    let host = Box::new(HostBridge { callbacks });
+    if let Ok(mut app) = global_app().lock() {
+        app.set_host(host);
+    }
+}
+
+/// Dispatch a SessionAction (JSON) and return a response (JSON).
+/// Caller must free the returned string with aterm_core_free_string.
+#[no_mangle]
+pub unsafe extern "C" fn aterm_dispatch(
+    action_json: *const c_char,
+    action_len: usize,
+) -> *mut c_char {
+    if action_json.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let slice = std::slice::from_raw_parts(action_json as *const u8, action_len);
+    let action_str = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => {
+            return ipc_to_c_string(r#"{"status":"Error","message":"invalid utf8"}"#);
+        }
+    };
+
+    let action = match serde_json::from_str::<aterm_session::action::SessionAction>(action_str) {
+        Ok(a) => a,
+        Err(e) => {
+            let resp = format!(r#"{{"status":"Error","message":"parse error: {}"}}"#, e);
+            return ipc_to_c_string(&resp);
+        }
+    };
+
+    let response = match global_app().lock() {
+        Ok(mut app) => app.dispatch(action),
+        Err(e) => aterm_session::action::ActionResponse::error(e.to_string()),
+    };
+
+    let json = serde_json::to_string(&response).unwrap_or_else(|_| {
+        r#"{"status":"Error","message":"serialize failed"}"#.to_string()
+    });
+    ipc_to_c_string(&json)
+}
+
+/// Get the IPC socket path. Caller must free with aterm_core_free_string.
+#[no_mangle]
+pub extern "C" fn aterm_ipc_socket_path() -> *mut c_char {
+    let path = global_app().lock().map(|app| app.socket_path().to_string()).unwrap_or_default();
+    ipc_to_c_string(&path)
+}
+
+/// Get the IPC auth token. Caller must free with aterm_core_free_string.
+#[no_mangle]
+pub extern "C" fn aterm_ipc_token() -> *mut c_char {
+    let token = global_app().lock().map(|app| app.token().to_string()).unwrap_or_default();
+    ipc_to_c_string(&token)
+}
+
+fn ipc_to_c_string(s: &str) -> *mut c_char {
+    match CString::new(s) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
     }
 }
