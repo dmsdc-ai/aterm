@@ -212,7 +212,13 @@ impl AtermCore {
                         terminal.set_pty_writer(writer);
                     }
                 }
-                self.workspace_id = Some(id);
+                self.workspace_id = Some(id.clone());
+                // Register inject queue with global IPC app
+                if let Some(queue) = self.pty_manager.inject_queue_for(&id) {
+                    if let Ok(mut app) = crate::global_app().lock() {
+                        app.register_workspace(&id, queue, command.unwrap_or(""), cwd);
+                    }
+                }
                 0
             }
             Err(e) => {

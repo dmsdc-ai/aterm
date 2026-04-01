@@ -445,6 +445,11 @@ impl PtyManager {
         Ok(pending)
     }
 
+    /// Get a clone of the inject queue for a workspace (for external dispatch).
+    pub fn inject_queue_for(&self, id: &str) -> Option<crate::inject::SharedInjectQueue> {
+        self.workspaces.get(id).map(|ws| ws.inject_queue.clone())
+    }
+
     pub fn peek_queue(&self, id: &str) -> Result<Vec<InjectMessageInfo>, String> {
         let ws = self.workspace(id)?;
         let queue = ws.inject_queue.lock().map_err(|error| error.to_string())?;
