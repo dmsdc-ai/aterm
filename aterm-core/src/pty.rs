@@ -565,10 +565,17 @@ fn spawn_workspace_process(
     cmd.env("TERM_PROGRAM_VERSION", "3.0");
     if let Some(ws_id) = workspace_id {
         cmd.env("ATERM_SESSION_ID", ws_id);
+        cmd.env("ATERM_WORKSPACE_NAME", ws_id);
+        cmd.env("TELEPTY_SESSION_ID", ws_id);
+        cmd.env("ATERM_WORKSPACE_CLI", detect_cli_type(command));
     }
     if let Some(path_env) = augmented_path_env() {
         cmd.env("PATH", path_env);
     }
+
+    // IPC socket path for child processes
+    let socket_path = format!("/tmp/aterm-{}.sock", std::process::id());
+    cmd.env("ATERM_IPC_SOCKET", &socket_path);
 
     let child = pair.slave.spawn_command(cmd).map_err(|error| error.to_string())?;
     let reader = pair.master.try_clone_reader().map_err(|error| error.to_string())?;
@@ -1047,6 +1054,16 @@ mod tests {
         signal.mark_dirty();
         assert!(signal.has_dirty());
         assert!(signal.take_dirty());
+    }
+}
+
+fn detect_cli_type(command: &str) -> &'static str {
+    let bin = command.rsplit('/').next().unwrap_or(command);
+    match bin {
+        "claude" => "claude",
+        "codex" => "codex",
+        "gemini" => "gemini",
+        _ => "shell",
     }
 }
 

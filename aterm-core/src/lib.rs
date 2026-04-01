@@ -6,6 +6,7 @@ pub mod renderer;
 pub mod session;
 pub mod tailscale;
 pub mod telepty;
+pub mod telepty_bridge;
 pub mod terminal;
 
 use std::ffi::{c_char, c_void, CStr, CString};
