@@ -15,39 +15,39 @@ enum AtermThemeMode: UInt8 {
 enum AtermTheme {
     static let windowBackground = NSColor.atermDynamic(
         light: .atermHex(0xFAF6F0),
-        dark: .atermHex(0x0D1117)
+        dark: .atermHex(0x000000)
     )
     static let terminalBackground = NSColor.atermDynamic(
         light: .atermHex(0xFAF6F0),
-        dark: .atermHex(0x0D1117)
+        dark: .atermHex(0x000000)
     )
     static let terminalForeground = NSColor.atermDynamic(
         light: .atermHex(0x24292F),
-        dark: .atermHex(0xC9D1D9)
+        dark: .atermHex(0xE0E0E0)
     )
     static let sidebarBackground = NSColor.atermDynamic(
         light: .atermHex(0xF0EBE3),
-        dark: .atermHex(0x111827)
+        dark: .atermHex(0x0A0A0A)
     )
     static let sidebarHeaderBackground = NSColor.atermDynamic(
         light: .atermHex(0xE8E0D4),
-        dark: .atermHex(0x161B22)
+        dark: .atermHex(0x0A0A0A)
     )
     static let panelBackground = NSColor.atermDynamic(
         light: .atermHex(0xFFFDFC),
-        dark: .atermHex(0x131A24)
+        dark: .atermHex(0x0A0A0A)
     )
     static let panelInsetBackground = NSColor.atermDynamic(
         light: .atermHex(0xF7F2EC),
-        dark: .atermHex(0x18212D)
+        dark: .atermHex(0x111111)
     )
     static let border = NSColor.atermDynamic(
         light: .atermHex(0xD8CEC1),
-        dark: .atermHex(0x283548)
+        dark: .atermHex(0x1A1A1A)
     )
     static let textPrimary = NSColor.atermDynamic(
         light: .atermHex(0x24292F),
-        dark: .atermHex(0xC9D1D9)
+        dark: .atermHex(0xE0E0E0)
     )
     static let textSecondary = NSColor.atermDynamic(
         light: .atermHex(0x57606A),

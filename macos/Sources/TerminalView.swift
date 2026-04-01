@@ -64,10 +64,10 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        syncMetalLayerBacking()
         applyTheme()
         guard !hasInitializedCore else { return }
         guard self.window != nil, let core = core else { return }
-        syncMetalLayerBacking()
 
         // Init GPU with this view's pointer
         let viewPtr = Unmanaged.passUnretained(self).toOpaque()

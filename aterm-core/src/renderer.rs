@@ -91,7 +91,7 @@ const DARK_ANSI: [ThemeRgb; 16] = [
     ThemeRgb::new(0x8b, 0x5c, 0xf6),
     ThemeRgb::new(0xec, 0x48, 0x99),
     ThemeRgb::new(0x06, 0xb6, 0xd4),
-    ThemeRgb::new(0xb1, 0xba, 0xc4),
+    ThemeRgb::new(0xd0, 0xd7, 0xde),
     ThemeRgb::new(0x6e, 0x76, 0x81),
     ThemeRgb::new(0xff, 0x7b, 0x72),
     ThemeRgb::new(0x56, 0xd3, 0x64),
@@ -252,9 +252,9 @@ fn scheme_palette(scheme: ColorScheme) -> ThemePalette {
 fn theme_palette(mode: TerminalThemeMode) -> ThemePalette {
     match mode {
         TerminalThemeMode::Dark => ThemePalette {
-            background: ThemeRgb::new(0x0d, 0x11, 0x17),
-            foreground: ThemeRgb::new(0xc9, 0xd1, 0xd9),
-            cursor: ThemeRgb::new(0xd4, 0xa5, 0x74),
+            background: ThemeRgb::new(0x00, 0x00, 0x00),
+            foreground: ThemeRgb::new(0xe0, 0xe0, 0xe0),
+            cursor: ThemeRgb::new(0xe0, 0xe0, 0xe0),
             selection_fg: ThemeRgb::new(0xff, 0xff, 0xff),
             selection_bg: [
                 0x33 as f32 / 255.0,

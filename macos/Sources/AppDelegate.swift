@@ -65,6 +65,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onAttachExternalSession: { [weak self] sessionID in
                 self?.attachExternalSession(sessionID)
+            },
+            onOpenSettings: { [weak self] in
+                self?.showPreferences()
             }
         )
         let sidebarHost = NSHostingView(rootView: sidebarView)
@@ -236,10 +239,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let dir = sessionsURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: wrapper, options: [.prettyPrinted, .sortedKeys])
-            // Atomic write: write to .tmp then rename
+            // Atomic write: write to .tmp then rename/replace
             let tmpURL = sessionsURL.appendingPathExtension("tmp")
             try data.write(to: tmpURL)
-            _ = try FileManager.default.replaceItemAt(sessionsURL, withItemAt: tmpURL)
+            if FileManager.default.fileExists(atPath: sessionsURL.path) {
+                _ = try FileManager.default.replaceItemAt(sessionsURL, withItemAt: tmpURL)
+            } else {
+                try FileManager.default.moveItem(at: tmpURL, to: sessionsURL)
+            }
+            NSLog("[aterm] saved %d workspaces to %@", entries.count, sessionsURL.path)
         } catch {
             NSLog("[aterm] save workspaces failed: %@", error.localizedDescription)
         }

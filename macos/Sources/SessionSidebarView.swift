@@ -318,6 +318,7 @@ struct SessionSidebarView: View {
     let onRenameWorkspace: (UUID, String) -> Void
     let onCloseWorkspace: (UUID) -> Void
     let onAttachExternalSession: (String) -> Void
+    let onOpenSettings: () -> Void
 
     @StateObject private var taskLoader = TaskQueueLoader()
     @State private var renameTarget: SidebarWorkspace?
@@ -391,6 +392,22 @@ struct SessionSidebarView: View {
                 .padding(.vertical, 4)
             }
             .onAppear { taskLoader.startAutoRefresh() }
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            Button(action: onOpenSettings) {
+                HStack(spacing: 6) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12))
+                    Text(AtermLocalization.text(ko: "설정", en: "Settings"))
+                        .font(.system(size: 12))
+                }
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
         }
         .background(Color(nsColor: AtermTheme.sidebarBackground))
         .sheet(
