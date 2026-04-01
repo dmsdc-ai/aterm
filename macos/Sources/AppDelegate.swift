@@ -23,7 +23,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var managedWorkspaces: [UUID: ManagedWorkspace] = [:]
     private var workspaceOrder: [UUID] = []
     private var excludedChildPIDs: Set<Int32> = []
-    private var sessionSaveTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureTeleptyDaemon()
@@ -118,9 +117,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         registerHostCallbacks()
         startProcessPolling()
-        sessionSaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.saveWorkspaces()
-        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -131,8 +127,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         saveWorkspaces()
         // Deregister all workspaces from telepty daemon to prevent ghost sessions
         deregisterTeleptyWorkspaces()
-        sessionSaveTimer?.invalidate()
-        sessionSaveTimer = nil
         processPollTimer?.invalidate()
         processPollTimer = nil
         let env = ProcessInfo.processInfo.environment
