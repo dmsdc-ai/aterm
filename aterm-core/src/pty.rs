@@ -946,13 +946,14 @@ fn is_codex_resume_session(command: &str, args: &[String]) -> bool {
 fn map_key(key: &str) -> Result<&'static str, String> {
     match key.to_lowercase().as_str() {
         "return" | "enter" => Ok("\r"),
-        "ctrl+c" => Ok("\x03"),
-        "ctrl+d" => Ok("\x04"),
-        "ctrl+z" => Ok("\x1a"),
+        "ctrl+c" | "ctrl-c" => Ok("\x03"),
+        "ctrl+d" | "ctrl-d" => Ok("\x04"),
+        "ctrl+l" | "ctrl-l" => Ok("\x0c"),
+        "ctrl+z" | "ctrl-z" => Ok("\x1a"),
         "tab" => Ok("\t"),
-        "escape" => Ok("\x1b"),
+        "esc" | "escape" => Ok("\x1b"),
         _ => Err(format!(
-            "Unknown key: '{}'. Supported: return, ctrl+c, ctrl+d, ctrl+z, tab, escape",
+            "Unknown key: '{}'. Supported: return, ctrl+c/ctrl-c, ctrl+d/ctrl-d, ctrl+l/ctrl-l, ctrl+z/ctrl-z, tab, esc, escape",
             key
         )),
     }

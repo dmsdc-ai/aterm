@@ -59,6 +59,53 @@ impl AtermApp {
         self.host = Some(host);
     }
 
+    fn workspace_exists(&self, name: &str) -> bool {
+        self.workspace_meta.contains_key(name) && self.inject_queues.contains_key(name)
+    }
+
+    fn rename_workspace_registration(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(), String> {
+        if old_name == new_name {
+            return Ok(());
+        }
+        if self.workspace_meta.contains_key(new_name) || self.inject_queues.contains_key(new_name) {
+            return Err(format!("workspace '{}' already exists", new_name));
+        }
+
+        let queue = self
+            .inject_queues
+            .remove(old_name)
+            .ok_or_else(|| format!("workspace '{}' not found", old_name))?;
+        let mut meta = match self.workspace_meta.remove(old_name) {
+            Some(meta) => meta,
+            None => {
+                self.inject_queues.insert(old_name.to_string(), queue);
+                return Err(format!("workspace '{}' not found", old_name));
+            }
+        };
+
+        meta.name = new_name.to_string();
+        self.inject_queues.insert(new_name.to_string(), queue);
+        self.workspace_meta
+            .insert(new_name.to_string(), meta.clone());
+
+        if let Some(ref bridge) = self.telepty_bridge {
+            bridge.deregister(old_name);
+            bridge.register(
+                new_name,
+                new_name,
+                &meta.command,
+                &meta.cwd,
+                &self.socket_path,
+            );
+        }
+
+        Ok(())
+    }
+
     /// Register a workspace's inject queue so IPC can route to it.
     pub fn register_workspace(
         &mut self,
@@ -288,12 +335,109 @@ impl AtermApp {
                     ActionResponse::error(format!("workspace '{}' not found", workspace))
                 }
             }
+            SessionAction::RenameWorkspace { old_name, new_name } => {
+                let new_name = new_name.trim().to_string();
+                if new_name.is_empty() {
+                    return ActionResponse::error("new workspace name cannot be empty");
+                }
+                if !self.workspace_exists(&old_name) {
+                    return ActionResponse::error(format!("workspace '{}' not found", old_name));
+                }
+                if let Some(ref host) = self.host {
+                    host.rename_workspace(&old_name, &new_name);
+                    match self.rename_workspace_registration(&old_name, &new_name) {
+                        Ok(()) => ActionResponse::ok(),
+                        Err(message) => ActionResponse::error(message),
+                    }
+                } else {
+                    ActionResponse::unsupported()
+                }
+            }
+            SessionAction::ClearWorkspace { workspace } => {
+                if !self.workspace_exists(&workspace) {
+                    return ActionResponse::error(format!("workspace '{}' not found", workspace));
+                }
+                if let Some(ref host) = self.host {
+                    host.send_key(&workspace, "ctrl+l");
+                    ActionResponse::ok()
+                } else {
+                    ActionResponse::unsupported()
+                }
+            }
+            SessionAction::SendKey { workspace, key } => {
+                if !self.workspace_exists(&workspace) {
+                    return ActionResponse::error(format!("workspace '{}' not found", workspace));
+                }
+                if !is_supported_send_key(&key) {
+                    return ActionResponse::error(format!(
+                        "unknown key '{}'; supported: enter, return, ctrl+c/ctrl-c, ctrl+d/ctrl-d, ctrl+l/ctrl-l, ctrl+z/ctrl-z, tab, esc, escape",
+                        key
+                    ));
+                }
+                if let Some(ref host) = self.host {
+                    host.send_key(&workspace, &key);
+                    ActionResponse::ok()
+                } else {
+                    ActionResponse::unsupported()
+                }
+            }
+            SessionAction::AttachExternal { session_id } => {
+                let session_id = session_id.trim().to_string();
+                if session_id.is_empty() {
+                    return ActionResponse::error("session_id cannot be empty");
+                }
+                if let Some(ref host) = self.host {
+                    host.attach_external_session(&session_id);
+                    ActionResponse::ok()
+                } else {
+                    ActionResponse::unsupported()
+                }
+            }
+            SessionAction::DetachWorkspace { workspace } => {
+                if !self.workspace_exists(&workspace) {
+                    return ActionResponse::error(format!("workspace '{}' not found", workspace));
+                }
+                if let Some(ref host) = self.host {
+                    host.close_workspace_view(&workspace);
+                    self.deregister_workspace(&workspace);
+                    ActionResponse::ok()
+                } else {
+                    ActionResponse::unsupported()
+                }
+            }
+            SessionAction::ReloadSettings => {
+                if let Some(ref host) = self.host {
+                    host.reload_settings();
+                    ActionResponse::ok()
+                } else {
+                    ActionResponse::unsupported()
+                }
+            }
             SessionAction::ReadScreenText {
                 workspace: _,
                 max_bytes: _,
             } => ActionResponse::unsupported(),
         }
     }
+}
+
+fn is_supported_send_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "enter"
+            | "return"
+            | "ctrl+c"
+            | "ctrl-c"
+            | "ctrl+d"
+            | "ctrl-d"
+            | "ctrl+l"
+            | "ctrl-l"
+            | "ctrl+z"
+            | "ctrl-z"
+            | "tab"
+            | "esc"
+            | "escape"
+    )
 }
 
 fn generate_token() -> String {

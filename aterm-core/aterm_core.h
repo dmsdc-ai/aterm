@@ -55,6 +55,10 @@ typedef struct AtermHostCallbacks {
   void (*create_workspace_view)(void*, const char*, const char*);
   void (*close_workspace_view)(void*, const char*);
   void (*focus_workspace)(void*, const char*);
+  void (*rename_workspace)(void*, const char*, const char*);
+  void (*send_key)(void*, const char*, const char*);
+  void (*attach_external_session)(void*, const char*);
+  void (*reload_settings)(void*);
   char *(*list_workspaces)(void*);
   void (*on_workspace_event)(void*, const char*);
   void (*request_redraw)(void*);

@@ -99,6 +99,10 @@ typedef struct {
     void (*create_workspace_view)(void* userdata, const char* id, const char* config_json);
     void (*close_workspace_view)(void* userdata, const char* id);
     void (*focus_workspace)(void* userdata, const char* id);
+    void (*rename_workspace)(void* userdata, const char* old_name, const char* new_name);
+    void (*send_key)(void* userdata, const char* workspace, const char* key);
+    void (*attach_external_session)(void* userdata, const char* session_id);
+    void (*reload_settings)(void* userdata);
     char* (*list_workspaces)(void* userdata);
     void (*on_workspace_event)(void* userdata, const char* event_json);
     void (*request_redraw)(void* userdata);

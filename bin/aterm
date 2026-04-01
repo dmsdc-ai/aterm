@@ -20,6 +20,7 @@ export ATERM_UI_LANG
 
 # State directory for task board and lessons
 STATE_DIR="${PWD}/state"
+SETTINGS_FILE="${HOME}/.aigentry/config/aterm.json"
 
 tasks_file() { echo "${STATE_DIR}/task-queue.json"; }
 lessons_file() { echo "${STATE_DIR}/lessons.json"; }
@@ -70,6 +71,8 @@ show_help() {
 | `aterm status` | 번들된 에코시스템 상태 표시 |
 | `aterm status <workspace>` | 워크스페이스 상태 확인 |
 | `aterm focus <workspace>` | 워크스페이스 탭으로 포커스 이동 |
+| `aterm rename <old> <new>` | 워크스페이스 이름 변경 |
+| `aterm clear <workspace>` | 워크스페이스 터미널 화면 초기화 |
 | `aterm create <name> --cli <cli> --cwd <path>` | 새 워크스페이스 생성 |
 | `aterm restart <workspace>` | 죽은 세션 재시작 |
 | `aterm kill <workspace>` | 워크스페이스 종료 |
@@ -82,6 +85,13 @@ show_help() {
 | `aterm lessons add '<lesson>' --type failed` | 실패 패턴 추가 |
 | `aterm dispatch <task-id>` | 태스크 분해 → 서브세션 생성 → 실행 → 수집 → 정리 |
 | `aterm dispatch --plan '<desc>'` | 자유 텍스트 태스크 → 동일한 dispatch 흐름 |
+| `aterm log <workspace> [--lines N]` | 워크스페이스 화면 텍스트 읽기 (기본 100줄) |
+| `aterm export <workspace> [--format md\|txt]` | 세션 출력을 파일로 저장 |
+| `aterm settings get <key>` | 설정 값 읽기 (~/.aigentry/config/aterm.json) |
+| `aterm settings set <key> <value>` | 설정 값 변경 |
+| `aterm theme <name>` | 테마 변경 (colorScheme 설정 단축키) |
+| `aterm attach <external-id>` | 외부 세션 연결 |
+| `aterm send-key <workspace> <key>` | 키 전송 (ctrl+c, enter, tab, esc 등) |
 | `aterm help` | 이 도움말 표시 |
 
 ## 에코시스템
@@ -104,6 +114,12 @@ show_help() {
 | `task 42 done` | `태스크 42 완료` | `aterm tasks done 42` |
 | `show lessons` | `레슨 보여줘` | `aterm lessons` |
 | `add lesson: this pattern failed` | `레슨 추가` | `aterm lessons add 'this pattern failed'` |
+| `show session log` | `세션 로그 보여줘` | `aterm log myworkspace` |
+| `export session output` | `세션 출력 저장해줘` | `aterm export myworkspace --format md` |
+| `change theme` | `테마 변경해줘` | `aterm theme solarized` |
+| `read setting` | `설정 확인해줘` | `aterm settings get colorScheme` |
+| `attach external session` | `외부 세션 연결해줘` | `aterm attach ext-session-1` |
+| `send ctrl+c` | `ctrl+c 보내줘` | `aterm send-key myworkspace ctrl+c` |
 
 ### 외부 세션 (다른 터미널/머신, `$ATERM_IPC_SOCKET` 미설정)
 | English request | 한국어 요청 | 명령어 |
@@ -134,6 +150,8 @@ HELP
 | `aterm status` | Show bundled ecosystem health |
 | `aterm status <workspace>` | Check workspace status |
 | `aterm focus <workspace>` | Focus a workspace tab |
+| `aterm rename <old> <new>` | Rename a workspace |
+| `aterm clear <workspace>` | Clear workspace terminal screen |
 | `aterm create <name> --cli <cli> --cwd <path>` | Create a new workspace |
 | `aterm restart <workspace>` | Restart a dead session |
 | `aterm kill <workspace>` | Close a workspace |
@@ -146,6 +164,13 @@ HELP
 | `aterm lessons add '<lesson>' --type failed` | Add a failed pattern |
 | `aterm dispatch <task-id>` | Break down task -> create sub-sessions -> execute -> collect -> cleanup |
 | `aterm dispatch --plan '<desc>'` | Free-text task -> same dispatch flow |
+| `aterm log <workspace> [--lines N]` | Read workspace screen text (default 100 lines) |
+| `aterm export <workspace> [--format md\|txt]` | Save session output to file |
+| `aterm settings get <key>` | Read setting from ~/.aigentry/config/aterm.json |
+| `aterm settings set <key> <value>` | Write setting to aterm.json |
+| `aterm theme <name>` | Change theme (shortcut for settings set colorScheme) |
+| `aterm attach <external-id>` | Attach an external session |
+| `aterm send-key <workspace> <key>` | Send key to workspace (ctrl+c, enter, tab, esc, etc.) |
 | `aterm help` | Show this help |
 
 ## Ecosystem
@@ -168,6 +193,12 @@ HELP
 | `task 42 done` | `태스크 42 완료` | `aterm tasks done 42` |
 | `show lessons` | `레슨 보여줘` | `aterm lessons` |
 | `add lesson: this pattern failed` | `레슨 추가` | `aterm lessons add 'this pattern failed'` |
+| `show session log` | `세션 로그 보여줘` | `aterm log myworkspace` |
+| `export session output` | `세션 출력 저장해줘` | `aterm export myworkspace --format md` |
+| `change theme` | `테마 변경해줘` | `aterm theme solarized` |
+| `read setting` | `설정 확인해줘` | `aterm settings get colorScheme` |
+| `attach external session` | `외부 세션 연결해줘` | `aterm attach ext-session-1` |
+| `send ctrl+c` | `ctrl+c 보내줘` | `aterm send-key myworkspace ctrl+c` |
 
 ### External sessions (other terminal or machine, `$ATERM_IPC_SOCKET` unset)
 | English request | Korean request | Command |
@@ -204,10 +235,17 @@ payloads = {
                             "from": __import__("os").environ.get("ATERM_WORKSPACE_NAME")},
     "status":      lambda: {"action": "WorkspaceStatus", "workspace": args[0]},
     "focus":       lambda: {"action": "FocusWorkspace", "workspace": args[0]},
+    "rename":      lambda: {"action": "RenameWorkspace", "old_name": args[0], "new_name": args[1]},
+    "clear":       lambda: {"action": "ClearWorkspace", "workspace": args[0]},
     "create":      lambda: {"action": "CreateWorkspace", "name": args[0], "cli": args[1], "cwd": args[2]},
     "kill":        lambda: {"action": "CloseWorkspace", "workspace": args[0]},
     "restart":     lambda: {"action": "RestartWorkspace", "workspace": args[0]},
     "restart-all": lambda: {"action": "RestartAllWorkspaces"},
+    "reload-settings": lambda: {"action": "ReloadSettings"},
+    "read-screen":     lambda: {"action": "ReadScreenText", "workspace": args[0],
+                                "lines": int(args[1]) if len(args) > 1 else 100},
+    "attach-external": lambda: {"action": "AttachExternal", "session_id": args[0]},
+    "send-key":        lambda: {"action": "SendKey", "workspace": args[0], "key": args[1]},
 }
 
 payload = json.dumps(payloads[action]()) + "\n"
@@ -256,6 +294,12 @@ try:
                     print(fmt.format(*r))
     elif action == "status":
         print(json.dumps(resp.get("data", {})))
+    elif action == "read-screen":
+        text = resp.get("data", {}).get("text", "") if isinstance(resp.get("data"), dict) else ""
+        if text:
+            print(text)
+        else:
+            print("(비어있음)" if lang == "ko" else "(empty)")
     else:
         print(json.dumps({"status": "ok"}))
 except Exception as e:
@@ -392,6 +436,14 @@ else:
         [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"focus requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
         [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm focus <workspace>"}' >&2; exit 1; }
         aterm_ipc focus "$2" ;;
+    rename)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"rename requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm rename <old> <new>"}' >&2; exit 1; }
+        aterm_ipc rename "$2" "$3" ;;
+    clear)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"clear requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm clear <workspace>"}' >&2; exit 1; }
+        aterm_ipc clear "$2" ;;
     create)
         [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"create requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
         # Parse: aterm create <name> --cli <cli> --cwd <path>
@@ -746,6 +798,138 @@ def main():
 main()
 ' "$ATERM_IPC_SOCKET" "$(tasks_file)" "${@:2}"
         ;;
+    settings)
+        case "${2:-}" in
+            get)
+                [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm settings get <key>"}' >&2; exit 1; }
+                python3 -c '
+import json, sys, os
+f = os.path.expanduser("~/.aigentry/config/aterm.json")
+if not os.path.isfile(f):
+    print("null")
+    sys.exit(0)
+with open(f) as fh:
+    data = json.load(fh)
+key = sys.argv[1]
+parts = key.split(".")
+val = data
+for p in parts:
+    if isinstance(val, dict) and p in val:
+        val = val[p]
+    else:
+        print("null")
+        sys.exit(0)
+if isinstance(val, (dict, list)):
+    print(json.dumps(val, indent=2, ensure_ascii=False))
+else:
+    print(json.dumps(val))
+' "$3" ;;
+            set)
+                [[ $# -lt 4 ]] && { echo '{"error":"usage: aterm settings set <key> <value>"}' >&2; exit 1; }
+                python3 -c '
+import json, sys, os
+f = os.path.expanduser("~/.aigentry/config/aterm.json")
+os.makedirs(os.path.dirname(f), exist_ok=True)
+data = {}
+if os.path.isfile(f):
+    with open(f) as fh:
+        data = json.load(fh)
+key = sys.argv[1]
+raw = sys.argv[2]
+try:
+    val = json.loads(raw)
+except (json.JSONDecodeError, ValueError):
+    val = raw
+parts = key.split(".")
+obj = data
+for p in parts[:-1]:
+    obj = obj.setdefault(p, {})
+obj[parts[-1]] = val
+with open(f, "w") as fh:
+    json.dump(data, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+print(json.dumps({"status": "ok", "key": key, "value": val}))
+' "$3" "$4"
+                if [[ -n "$ATERM_IPC_SOCKET" ]]; then
+                    aterm_ipc reload-settings 2>/dev/null || true
+                fi ;;
+            *) echo '{"error":"usage: aterm settings [get|set]"}' >&2; exit 1 ;;
+        esac ;;
+    theme)
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm theme <name>"}' >&2; exit 1; }
+        python3 -c '
+import json, sys, os
+f = os.path.expanduser("~/.aigentry/config/aterm.json")
+os.makedirs(os.path.dirname(f), exist_ok=True)
+data = {}
+if os.path.isfile(f):
+    with open(f) as fh:
+        data = json.load(fh)
+data["colorScheme"] = sys.argv[1]
+with open(f, "w") as fh:
+    json.dump(data, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+print(json.dumps({"status": "ok", "key": "colorScheme", "value": sys.argv[1]}))
+' "$2"
+        if [[ -n "$ATERM_IPC_SOCKET" ]]; then
+            aterm_ipc reload-settings 2>/dev/null || true
+        fi ;;
+    log)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"log requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm log <workspace> [--lines N]"}' >&2; exit 1; }
+        _ws="$2"; _lines=100
+        if [[ "${3:-}" == "--lines" && -n "${4:-}" ]]; then _lines="$4"; fi
+        aterm_ipc read-screen "$_ws" "$_lines" ;;
+    export)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"export requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm export <workspace> [--format md|txt]"}' >&2; exit 1; }
+        _ws="$2"; _fmt="txt"
+        if [[ "${3:-}" == "--format" && -n "${4:-}" ]]; then _fmt="$4"; fi
+        python3 -c '
+import os, socket, sys, json, time
+
+sock_path = sys.argv[1]
+workspace = sys.argv[2]
+fmt = sys.argv[3]
+
+payload = json.dumps({"action": "ReadScreenText", "workspace": workspace, "lines": 10000}) + "\n"
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    sock.settimeout(5)
+    sock.connect(sock_path)
+    sock.sendall(payload.encode())
+    sock.shutdown(socket.SHUT_WR)
+    data = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk: break
+        data += chunk
+        if b"\n" in data: break
+    resp = json.loads(data.decode().strip().split("\n")[0])
+finally:
+    sock.close()
+
+text = resp.get("data", {}).get("text", "") if isinstance(resp.get("data"), dict) else ""
+ts = time.strftime("%Y%m%d-%H%M%S")
+filename = f"{workspace}-{ts}.{fmt}"
+
+if fmt == "md":
+    content = f"# Session Export: {workspace}\n\n```\n{text}\n```\n"
+else:
+    content = text
+
+with open(filename, "w") as f:
+    f.write(content)
+print(json.dumps({"status": "ok", "file": os.path.abspath(filename)}))
+' "$ATERM_IPC_SOCKET" "$_ws" "$_fmt" ;;
+    attach)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"attach requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm attach <external-id>"}' >&2; exit 1; }
+        aterm_ipc attach-external "$2" ;;
+    send-key)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"send-key requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm send-key <workspace> <key>"}' >&2; exit 1; }
+        aterm_ipc send-key "$2" "$3" ;;
     help|--help|-h)
         show_help
         ;;

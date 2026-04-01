@@ -198,6 +198,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        callbacks.rename_workspace = { userdata, oldNamePtr, newNamePtr in
+            guard let userdata, let oldNamePtr, let newNamePtr else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            let oldName = String(cString: oldNamePtr)
+            let newName = String(cString: newNamePtr)
+            DispatchQueue.main.async {
+                delegate.renameWorkspace(named: oldName, toExact: newName)
+            }
+        }
+        callbacks.send_key = { userdata, workspacePtr, keyPtr in
+            guard let userdata, let workspacePtr, let keyPtr else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            let workspace = String(cString: workspacePtr)
+            let key = String(cString: keyPtr)
+            DispatchQueue.main.async {
+                delegate.sendKey(toWorkspaceNamed: workspace, key: key)
+            }
+        }
+        callbacks.attach_external_session = { userdata, sessionIDPtr in
+            guard let userdata, let sessionIDPtr else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            let sessionID = String(cString: sessionIDPtr)
+            DispatchQueue.main.async {
+                delegate.attachExternalSession(sessionID)
+            }
+        }
+        callbacks.reload_settings = { userdata in
+            guard let userdata else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            DispatchQueue.main.async {
+                delegate.reloadSettingsFromIPC()
+            }
+        }
         callbacks.list_workspaces = { userdata in
             guard let userdata else { return nil }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
@@ -1161,6 +1194,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         workspace.status = "starting"
     }
 
+    private func workspaceID(named name: String) -> UUID? {
+        managedWorkspaces.first(where: { $0.value.name == name })?.key
+    }
+
     private func selectWorkspace(_ id: UUID) {
         guard let workspace = managedWorkspaces[id] else { return }
 
@@ -1191,7 +1228,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             cwd: workspace.cwd,
             excluding: id
         )
+        workspace.terminalView.workspaceName = workspace.name
         rebuildSidebarState()
+        saveWorkspaces()
+    }
+
+    private func renameWorkspace(named oldName: String, toExact nextName: String) {
+        guard let id = workspaceID(named: oldName),
+              let workspace = managedWorkspaces[id] else { return }
+
+        let trimmed = nextName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if let existing = workspaceID(named: trimmed), existing != id {
+            return
+        }
+
+        workspace.name = trimmed
+        workspace.terminalView.workspaceName = trimmed
+        rebuildSidebarState()
+        saveWorkspaces()
     }
 
     private func closeWorkspace(id: UUID) {
@@ -1240,6 +1296,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             cwd: cwd,
             shouldSelect: true
         )
+    }
+
+    private func sendKey(toWorkspaceNamed workspaceName: String, key: String) {
+        guard let id = workspaceID(named: workspaceName),
+              let workspace = managedWorkspaces[id],
+              let core = workspace.terminalView.corePointer,
+              let payload = keyPayload(for: key) else { return }
+
+        payload.withCString { ptr in
+            aterm_core_write_pty(core, ptr, payload.utf8.count)
+        }
+        workspace.lastActivityAt = Date()
+    }
+
+    private func keyPayload(for key: String) -> String? {
+        switch key.lowercased() {
+        case "enter", "return":
+            return "\r"
+        case "ctrl+c", "ctrl-c":
+            return "\u{03}"
+        case "ctrl+d", "ctrl-d":
+            return "\u{04}"
+        case "ctrl+l", "ctrl-l":
+            return "\u{0c}"
+        case "ctrl+z", "ctrl-z":
+            return "\u{1a}"
+        case "tab":
+            return "\t"
+        case "esc", "escape":
+            return "\u{1b}"
+        default:
+            return nil
+        }
+    }
+
+    private func reloadSettingsFromIPC() {
+        AtermSettings.shared.load()
+        applySettings()
+        rebuildSidebarState()
     }
 
     private func rebuildSidebarState() {

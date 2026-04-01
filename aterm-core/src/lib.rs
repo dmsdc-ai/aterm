@@ -947,6 +947,10 @@ pub struct AtermHostCallbacks {
         Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
     pub close_workspace_view: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub focus_workspace: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub rename_workspace: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    pub send_key: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    pub attach_external_session: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub reload_settings: Option<unsafe extern "C" fn(*mut c_void)>,
     pub list_workspaces: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
     pub on_workspace_event: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub request_redraw: Option<unsafe extern "C" fn(*mut c_void)>,
@@ -984,6 +988,41 @@ impl aterm_session::host::PlatformHost for HostBridge {
         if let Some(cb) = self.callbacks.focus_workspace {
             let id_c = CString::new(id).unwrap_or_default();
             unsafe { cb(self.callbacks.userdata, id_c.as_ptr()) };
+        }
+    }
+
+    fn rename_workspace(&self, old_name: &str, new_name: &str) {
+        if let Some(cb) = self.callbacks.rename_workspace {
+            let old_c = CString::new(old_name).unwrap_or_default();
+            let new_c = CString::new(new_name).unwrap_or_default();
+            unsafe { cb(self.callbacks.userdata, old_c.as_ptr(), new_c.as_ptr()) };
+        }
+    }
+
+    fn send_key(&self, workspace: &str, key: &str) {
+        if let Some(cb) = self.callbacks.send_key {
+            let workspace_c = CString::new(workspace).unwrap_or_default();
+            let key_c = CString::new(key).unwrap_or_default();
+            unsafe {
+                cb(
+                    self.callbacks.userdata,
+                    workspace_c.as_ptr(),
+                    key_c.as_ptr(),
+                )
+            };
+        }
+    }
+
+    fn attach_external_session(&self, session_id: &str) {
+        if let Some(cb) = self.callbacks.attach_external_session {
+            let session_c = CString::new(session_id).unwrap_or_default();
+            unsafe { cb(self.callbacks.userdata, session_c.as_ptr()) };
+        }
+    }
+
+    fn reload_settings(&self) {
+        if let Some(cb) = self.callbacks.reload_settings {
+            unsafe { cb(self.callbacks.userdata) };
         }
     }
 
