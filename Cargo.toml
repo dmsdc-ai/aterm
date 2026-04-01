@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "aterm-core"]
+members = [".", "aterm-core", "aterm-session", "aterm-ipc"]
 
 [package]
 name = "aterm-v3"

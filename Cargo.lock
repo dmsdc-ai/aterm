@@ -203,6 +203,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aterm-ipc"
+version = "0.1.0"
+dependencies = [
+ "aterm-session",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
+name = "aterm-session"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aterm-v3"
 version = "0.1.0"
 dependencies = [
