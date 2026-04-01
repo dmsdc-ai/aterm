@@ -49,6 +49,11 @@ void aterm_core_set_dirty_callback(AtermCore* core, AtermDirtyCallback callback,
 void aterm_core_sync_pty(AtermCore* core);
 void aterm_core_set_theme_mode(AtermCore* core, uint8_t mode);
 
+// Settings: color scheme, font size, line height
+void aterm_core_set_color_scheme(AtermCore* core, uint8_t scheme);
+void aterm_core_set_font_size(AtermCore* core, float size);
+void aterm_core_set_line_height(AtermCore* core, float height);
+
 // Scroll
 void aterm_core_scroll(AtermCore* core, int32_t delta);
 

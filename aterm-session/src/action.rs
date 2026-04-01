@@ -9,6 +9,8 @@ pub enum SessionAction {
     FocusWorkspace { workspace: String },
     CloseWorkspace { workspace: String },
     CreateWorkspace { name: String, cli: String, cwd: String },
+    RestartWorkspace { workspace: String },
+    RestartAllWorkspaces,
     ReadScreenText { workspace: String, max_bytes: Option<usize> },
     ListTasks { workspace: String },
     ListLessons { workspace: String },

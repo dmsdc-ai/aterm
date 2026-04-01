@@ -24,6 +24,7 @@ pub struct AtermApp {
     token: String,
 }
 
+#[derive(Clone)]
 struct WorkspaceMeta {
     name: String,
     command: String,
@@ -200,6 +201,54 @@ impl AtermApp {
                 } else {
                     ActionResponse::unsupported()
                 }
+            }
+            SessionAction::RestartWorkspace { workspace } => {
+                let meta = self.workspace_meta.get(&workspace).cloned();
+                if let Some(meta) = meta {
+                    if let Some(ref host) = self.host {
+                        host.close_workspace_view(&workspace);
+                    }
+                    self.deregister_workspace(&workspace);
+                    if let Some(ref host) = self.host {
+                        let config = aterm_session::types::WorkspaceConfig {
+                            name: meta.name.clone(),
+                            cli: meta.command.clone(),
+                            cwd: meta.cwd.clone(),
+                            cols: 80,
+                            rows: 24,
+                        };
+                        host.create_workspace_view(&meta.name, &config);
+                        ActionResponse::ok()
+                    } else {
+                        ActionResponse::unsupported()
+                    }
+                } else {
+                    ActionResponse::error(format!("workspace '{}' not found", workspace))
+                }
+            }
+            SessionAction::RestartAllWorkspaces => {
+                let metas: Vec<WorkspaceMeta> = self.workspace_meta.values().cloned().collect();
+                if let Some(ref host) = self.host {
+                    for meta in &metas {
+                        host.close_workspace_view(&meta.name);
+                    }
+                }
+                for meta in &metas {
+                    self.deregister_workspace(&meta.name);
+                }
+                if let Some(ref host) = self.host {
+                    for meta in &metas {
+                        let config = aterm_session::types::WorkspaceConfig {
+                            name: meta.name.clone(),
+                            cli: meta.command.clone(),
+                            cwd: meta.cwd.clone(),
+                            cols: 80,
+                            rows: 24,
+                        };
+                        host.create_workspace_view(&meta.name, &config);
+                    }
+                }
+                ActionResponse::data(serde_json::json!({ "restarted": metas.len() }))
             }
             SessionAction::ListTasks { workspace } => {
                 if let Some(meta) = self.workspace_meta.get(&workspace) {

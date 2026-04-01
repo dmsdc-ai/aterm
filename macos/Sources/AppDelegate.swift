@@ -23,6 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var managedWorkspaces: [UUID: ManagedWorkspace] = [:]
     private var workspaceOrder: [UUID] = []
     private var excludedChildPIDs: Set<Int32> = []
+    private var sessionSaveTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureTeleptyDaemon()
@@ -96,6 +97,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
 
         setupPreferencesMenu()
+        AtermSettings.shared.load()
 
         let restoredCount = restoreWorkspaces()
         if restoredCount == 0 {
@@ -104,9 +106,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 createDefaultWorkspace()
             }
+        } else if needsOnboarding() {
+            // REINSTALL: sessions restored but config needs setup
+            showOnboarding()
         }
         registerHostCallbacks()
         startProcessPolling()
+        sessionSaveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.saveWorkspaces()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -115,6 +123,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         saveWorkspaces()
+        sessionSaveTimer?.invalidate()
+        sessionSaveTimer = nil
         processPollTimer?.invalidate()
         processPollTimer = nil
         let env = ProcessInfo.processInfo.environment
@@ -232,23 +242,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func clearPersistedSessions() {
-        let fileManager = FileManager.default
-        let sessionPaths = [
-            NSHomeDirectory() + "/.aterm/sessions.json",
-            NSHomeDirectory() + "/.aigentry/config/sessions.json",
-        ]
-        for path in sessionPaths {
-            try? fileManager.removeItem(atPath: path)
-        }
+    private func hasPersistedSessions() -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: NSHomeDirectory() + "/.aterm/sessions.json")
+            || fm.fileExists(atPath: NSHomeDirectory() + "/.aigentry/config/sessions.json")
     }
 
     @discardableResult
     private func restoreWorkspaces() -> Int {
-        guard !needsOnboarding() else {
-            NSLog("[aterm] onboarding incomplete — skipping restore and clearing stale sessions")
-            clearPersistedSessions()
+        // Distinguish first install from reinstall/upgrade.
+        // NEVER clear sessions just because onboarding is incomplete.
+        if !hasPersistedSessions() {
+            if needsOnboarding() {
+                NSLog("[aterm] first install — no sessions to restore")
+            }
             return 0
+        }
+        if needsOnboarding() {
+            NSLog("[aterm] reinstall detected — restoring sessions despite incomplete onboarding")
         }
 
         let count = Int(aterm_session_count(nil))
@@ -491,7 +502,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                     self?.promptForInitialProjectDirectory(using: result) { finalizedResult in
                         self?.saveOnboardingResult(finalizedResult)
-                        self?.createWorkspaceFromOnboarding(finalizedResult)
+                        if self?.managedWorkspaces.isEmpty ?? true {
+                            self?.createWorkspaceFromOnboarding(finalizedResult)
+                        }
                     }
                 }
             }
@@ -516,7 +529,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = NSOpenPanel()
         panel.title = "Choose Project Folder"
         panel.message = "Select a folder for the first workspace. Cancel to use your home directory."
-        panel.prompt = "Use Folder"
+        panel.prompt = AtermLocalization.text(ko: "폴더 사용", en: "Use Folder")
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = false
@@ -544,28 +557,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showPreferences() {
-        let cliStatus = detectClis()
-        let config = readConfig()
+        let settings = AtermSettings.shared
+        settings.load()
 
-        let prefsView = PreferencesView(
-            cliStatus: cliStatus,
-            currentConfig: config,
-            onSave: { [weak self] result in
-                self?.saveOnboardingResult(result)
+        let settingsView = SettingsView(
+            settings: settings,
+            onApply: { [weak self] in
+                self?.applySettings()
             }
         )
 
-        let hostingView = NSHostingView(rootView: prefsView)
+        let hostingView = NSHostingView(rootView: settingsView)
         let prefsWindow = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         prefsWindow.contentView = hostingView
-        prefsWindow.title = "Preferences"
+        prefsWindow.title = AtermLocalization.text(ko: "설정", en: "Settings")
         prefsWindow.center()
         prefsWindow.makeKeyAndOrderFront(nil)
+    }
+
+    /// Apply current settings to all terminal views immediately.
+    func applySettings() {
+        for ws in managedWorkspaces.values {
+            applySettingsToView(ws.terminalView)
+        }
+    }
+
+    /// Apply current settings to a single terminal view.
+    private func applySettingsToView(_ view: TerminalView) {
+        guard let core = view.corePointer else { return }
+        let settings = AtermSettings.shared
+        let schemeIndex = AtermSettings.schemeIndex(settings.colorScheme)
+        let fontSize = Float(settings.fontSize)
+        let lineHeightPx = Float(settings.fontSize * settings.lineHeight)
+
+        aterm_core_set_color_scheme(core, schemeIndex)
+        aterm_core_set_font_size(core, fontSize)
+        aterm_core_set_line_height(core, lineHeightPx)
+
+        // Font size / line height changes affect grid dimensions — trigger resize
+        let backingSize = view.convertToBacking(view.bounds).size
+        if backingSize.width > 0 && backingSize.height > 0 {
+            aterm_core_resize(core, UInt32(backingSize.width), UInt32(backingSize.height))
+        }
+        aterm_core_render(core)
     }
 
     private func setupPreferencesMenu() {
@@ -932,6 +971,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             baselineChildPIDs: baselineChildPIDs,
             isSystem: isSystem
         )
+        terminalView.onActivity = { [weak workspace] in
+            workspace?.lastActivityAt = Date()
+        }
         workspace.lastLaunchTime = Date()
         managedWorkspaces[workspaceID] = workspace
         // System workspaces always first
@@ -941,6 +983,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             workspaceOrder.append(workspaceID)
         }
         terminalContainerView.addSubview(terminalView)
+
+        // Apply user settings (color scheme, font size, line height)
+        applySettingsToView(terminalView)
 
         if shouldSelect {
             selectWorkspace(workspaceID)
@@ -955,19 +1000,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         saveWorkspaces()
 
         // Delegate MD generation to aigentry-devkit (skip silently if not installed)
-        devkitWorkspaceInit(cli: command.rawValue, cwd: cwd)
+        devkitWorkspaceInit(cli: command.rawValue, cwd: cwd, workspaceID: workspaceID)
     }
 
-    private func devkitWorkspaceInit(cli: String, cwd: String) {
+    private func devkitWorkspaceInit(cli: String, cwd: String, workspaceID: UUID) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         task.arguments = ["aigentry-devkit", "workspace-init", "--cli", cli, "--cwd", cwd]
-        task.standardOutput = FileHandle.nullDevice
+        let pipe = Pipe()
+        task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 try task.run()
                 task.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? ""
+                if output.contains("INJECT:/init") {
+                    NSLog("[aterm] devkit signaled INJECT:/init for workspace %@", workspaceID.uuidString)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        guard let self,
+                              let workspace = self.managedWorkspaces[workspaceID],
+                              let core = workspace.terminalView.corePointer else { return }
+                        let text = "/init\n"
+                        text.withCString { ptr in
+                            aterm_core_write_pty(core, ptr, text.utf8.count)
+                        }
+                        NSLog("[aterm] auto-injected /init into workspace '%@'", workspace.name)
+                    }
+                }
             } catch {
                 // aigentry-devkit not installed — standalone mode, skip silently
             }
@@ -1126,6 +1187,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rebuildSidebarState() {
+        let settings = AtermSettings.shared
         workspaceSidebarModel.workspaces = workspaceOrder.compactMap { id in
             guard let workspace = managedWorkspaces[id] else { return nil }
             return SidebarWorkspace(
@@ -1136,9 +1198,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 customCommand: workspace.customCommand,
                 foregroundProcessName: workspace.foregroundProcessName,
                 status: workspace.status,
+                cliIcon: cliIcon(for: workspace.launchCommand, useAscii: settings.useAsciiIcons),
+                statusEmoji: statusIcon(for: workspace.status, useAscii: settings.useAsciiIcons),
                 createdAt: workspace.createdAt,
+                lastActivityAt: workspace.lastActivityAt,
                 isSystem: workspace.isSystem
             )
+        }
+    }
+
+    private func cliIcon(for command: WorkspaceLaunchCommand, useAscii: Bool) -> String {
+        if useAscii {
+            switch command {
+            case .claude: return "[C]"
+            case .codex: return "[X]"
+            case .gemini: return "[G]"
+            case .zsh, .custom: return "[S]"
+            }
+        } else {
+            return command.cliIcon
+        }
+    }
+
+    private func statusIcon(for status: String, useAscii: Bool) -> String {
+        if useAscii {
+            switch status {
+            case "working": return "[*]"
+            case "idle": return "[-]"
+            case "dead": return "[!]"
+            case "starting", "restarting": return "[>]"
+            default: return "[?]"
+            }
+        } else {
+            switch status {
+            case "working": return "🔨"
+            case "idle": return "💤"
+            case "dead": return "🔴"
+            case "starting", "restarting": return "🔄"
+            default: return ""
+            }
         }
     }
 
@@ -1152,6 +1250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshWorkspaceProcesses() {
+        let now = Date()
         for id in workspaceOrder {
             guard let workspace = managedWorkspaces[id] else { continue }
             let defaultProcessName = workspace.cliGaveUp
@@ -1170,7 +1269,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
 
-            workspace.status = "running"
+            // Determine if working or idle based on last activity (30s threshold)
+            let idleTime = now.timeIntervalSince(workspace.lastActivityAt)
+            if idleTime < 30 {
+                workspace.status = "working"
+            } else {
+                workspace.status = "idle"
+            }
+            
             workspace.foregroundProcessName = defaultProcessName
         }
 
@@ -1369,6 +1475,7 @@ private final class ManagedWorkspace {
     var isSystem: Bool
     var restartCount: Int = 0
     var lastLaunchTime: Date?
+    var lastActivityAt: Date
     var cliGaveUp: Bool = false
 
     init(
@@ -1392,6 +1499,7 @@ private final class ManagedWorkspace {
         self.baselineChildPIDs = baselineChildPIDs
         self.foregroundProcessName = launchCommand.displayTitle(customCommand: customCommand)
         self.status = "starting"
+        self.lastActivityAt = createdAt
         self.isSystem = isSystem
     }
 }

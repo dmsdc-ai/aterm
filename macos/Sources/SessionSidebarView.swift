@@ -53,6 +53,19 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
             return title
         }
     }
+
+    var cliIcon: String {
+        switch self {
+        case .claude:
+            return "🤖"
+        case .codex:
+            return "🦊"
+        case .gemini:
+            return "💎"
+        case .zsh, .custom:
+            return "🐚"
+        }
+    }
 }
 
 struct SidebarWorkspace: Identifiable, Equatable {
@@ -63,7 +76,10 @@ struct SidebarWorkspace: Identifiable, Equatable {
     var customCommand: String
     var foregroundProcessName: String
     var status: String
+    var cliIcon: String
+    var statusEmoji: String
     var createdAt: Date
+    var lastActivityAt: Date
     var isSystem: Bool = false
 }
 
@@ -415,17 +431,30 @@ struct WorkspaceRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 6, height: 6)
+                if AtermSettings.shared.showStatusEmoji {
+                    Text(workspace.cliIcon)
+                        .font(.system(size: 11))
+                } else {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 6, height: 6)
+                }
+                
                 Text(workspace.name)
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
                     .lineLimit(1)
+                
                 Spacer()
-                Text(workspace.status)
-                    .font(.system(size: 9))
-                    .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                
+                if AtermSettings.shared.showStatusEmoji {
+                    Text(workspace.statusEmoji)
+                        .font(.system(size: 11))
+                } else {
+                    Text(workspace.status)
+                        .font(.system(size: 9))
+                        .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                }
             }
 
             HStack(spacing: 6) {
@@ -478,12 +507,14 @@ struct WorkspaceRowView: View {
 
     private var statusColor: Color {
         switch workspace.status {
-        case "running":
+        case "working":
             return Color(nsColor: AtermTheme.statusSuccess)
+        case "idle":
+            return Color(nsColor: AtermTheme.statusWarning)
         case "dead":
             return Color(nsColor: AtermTheme.statusDanger)
-        case "failed":
-            return Color(nsColor: AtermTheme.accent)
+        case "starting":
+            return Color(nsColor: AtermTheme.statusWarning)
         case "restarting":
             return Color(nsColor: AtermTheme.statusWarning)
         default:

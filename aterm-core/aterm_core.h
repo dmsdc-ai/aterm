@@ -109,6 +109,22 @@ void aterm_core_sync_pty(struct AtermCore *core);
 
 void aterm_core_set_theme_mode(struct AtermCore *core, uint8_t mode);
 
+/**
+ * Set color scheme: 0=Dark, 1=Light, 2=SolarizedDark, 3=SolarizedLight,
+ * 4=Monokai, 5=Dracula, 6=Nord, 7=TokyoNight
+ */
+void aterm_core_set_color_scheme(struct AtermCore *core, uint8_t scheme);
+
+/**
+ * Set font size in pixels (clamped to 8..32)
+ */
+void aterm_core_set_font_size(struct AtermCore *core, float size);
+
+/**
+ * Set line height in pixels (clamped to 12..64)
+ */
+void aterm_core_set_line_height(struct AtermCore *core, float height);
+
 void aterm_core_scroll(struct AtermCore *core, int32_t delta);
 
 void aterm_core_selection_start(struct AtermCore *core, uint32_t col, int32_t line, uint8_t side);

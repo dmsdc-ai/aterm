@@ -5,6 +5,19 @@ set -euo pipefail
 
 ATERM_IPC_SOCKET="${ATERM_IPC_SOCKET:-}"
 
+detect_ui_lang() {
+    local raw="${ATERM_UI_LANG:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}"
+    raw="${raw,,}"
+    if [[ "$raw" == ko* || "$raw" == *"ko_"* || "$raw" == *"ko-"* ]]; then
+        echo "ko"
+    else
+        echo "en"
+    fi
+}
+
+ATERM_UI_LANG="$(detect_ui_lang)"
+export ATERM_UI_LANG
+
 # State directory for task board and lessons
 STATE_DIR="${PWD}/state"
 
@@ -26,29 +39,175 @@ ensure_lessons_file() {
 }
 
 print_ecosystem_status() {
-    cat <<'STATUS'
+    if [[ "$ATERM_UI_LANG" == "ko" ]]; then
+        cat <<'STATUS'
+brain: ✅ 설치됨
+telepty: ✅ 설치됨
+deliberation: ✅ 설치됨
+devkit: ✅ 설치됨
+STATUS
+    else
+        cat <<'STATUS'
 brain: ✅ installed
 telepty: ✅ installed
 deliberation: ✅ installed
 devkit: ✅ installed
 STATUS
+    fi
+}
+
+show_help() {
+    if [[ "$ATERM_UI_LANG" == "ko" ]]; then
+        cat <<'HELP'
+# aterm — AI 네이티브 터미널 세션 통신
+
+## 명령어
+
+| 명령어 | 설명 |
+|--------|------|
+| `aterm list` | 워크스페이스 목록 표시 (`이름`, `CLI`, `경로`, `터미널`) |
+| `aterm inject <workspace> <text>` | 워크스페이스에 텍스트 전송 |
+| `aterm status` | 번들된 에코시스템 상태 표시 |
+| `aterm status <workspace>` | 워크스페이스 상태 확인 |
+| `aterm focus <workspace>` | 워크스페이스 탭으로 포커스 이동 |
+| `aterm create <name> --cli <cli> --cwd <path>` | 새 워크스페이스 생성 |
+| `aterm restart <workspace>` | 죽은 세션 재시작 |
+| `aterm kill <workspace>` | 워크스페이스 종료 |
+| `aterm restart-all` | 죽은 세션 전체 재시작 |
+| `aterm tasks` | 대기 중인 태스크 목록 표시 |
+| `aterm tasks add '<description>'` | 새 태스크 추가 |
+| `aterm tasks done <id>` | 태스크 완료 처리 |
+| `aterm lessons` | 기록된 교훈 표시 |
+| `aterm lessons add '<lesson>'` | 교훈 추가 (`invariant`) |
+| `aterm lessons add '<lesson>' --type failed` | 실패 패턴 추가 |
+| `aterm dispatch <task-id>` | 태스크 분해 → 서브세션 생성 → 실행 → 수집 → 정리 |
+| `aterm dispatch --plan '<desc>'` | 자유 텍스트 태스크 → 동일한 dispatch 흐름 |
+| `aterm help` | 이 도움말 표시 |
+
+## 에코시스템
+
+✅ brain (AI 프로필 관리) — 이미 설치됨  
+✅ telepty (터미널 간 통신) — 이미 설치됨  
+✅ deliberation (멀티 AI 토론) — 이미 설치됨  
+✅ devkit (워크스페이스 부트스트랩) — 이미 설치됨
+
+## 자연어 → 명령어 매핑
+
+### 내부 세션 (같은 aterm, `$ATERM_IPC_SOCKET` 설정됨)
+| English request | 한국어 요청 | 명령어 |
+|----------------|------------|--------|
+| `list sessions` | `세션 목록 보여줘` | `aterm list` |
+| `send build to ghostty` | `ghostty에 빌드 실행해줘` | `aterm inject ghostty 'make build'` |
+| `check cmux status` | `cmux 세션 상태 확인해줘` | `aterm status cmux` |
+| `show tasks` | `태스크 목록 보여줘` | `aterm tasks` |
+| `add task: implement API` | `태스크 추가해줘: API 구현` | `aterm tasks add 'API 구현'` |
+| `task 42 done` | `태스크 42 완료` | `aterm tasks done 42` |
+| `show lessons` | `레슨 보여줘` | `aterm lessons` |
+| `add lesson: this pattern failed` | `레슨 추가` | `aterm lessons add 'this pattern failed'` |
+
+### 외부 세션 (다른 터미널/머신, `$ATERM_IPC_SOCKET` 미설정)
+| English request | 한국어 요청 | 명령어 |
+|----------------|------------|--------|
+| `list external sessions` | `외부 세션 목록` | `telepty list` |
+| `message deliberation session` | `deliberation 세션에 메시지 보내줘` | `telepty inject aigentry-deliberation-claude 'message'` |
+
+## 세션 탐지 우선순위
+1. `aterm list` — 내부 세션 (프로젝트 이름 + `terminal=aterm`)
+2. `telepty list` — 외부 세션 (프로젝트 이름 + 터미널 타입)
+3. `ps aux | grep` 를 주 탐지 수단으로 사용하지 말 것 (프로젝트 이름과 터미널 정보가 없음)
+
+## 탐지 규칙
+- `$ATERM_IPC_SOCKET` 이 설정되어 있으면 aterm 내부입니다. `aterm` 명령을 사용합니다.
+- `$ATERM_IPC_SOCKET` 이 비어 있으면 aterm 외부입니다. `telepty` 명령을 사용합니다.
+- `aterm` 은 `list`/`inject`/`status` 에서 자동으로 `telepty` 로 폴백합니다.
+HELP
+    else
+        cat <<'HELP'
+# aterm — AI-native terminal session communication
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `aterm list` | List workspaces (`NAME`, `CLI`, `CWD`, `TERMINAL`) |
+| `aterm inject <workspace> <text>` | Send text to a workspace |
+| `aterm status` | Show bundled ecosystem health |
+| `aterm status <workspace>` | Check workspace status |
+| `aterm focus <workspace>` | Focus a workspace tab |
+| `aterm create <name> --cli <cli> --cwd <path>` | Create a new workspace |
+| `aterm restart <workspace>` | Restart a dead session |
+| `aterm kill <workspace>` | Close a workspace |
+| `aterm restart-all` | Restart all dead sessions |
+| `aterm tasks` | List pending tasks |
+| `aterm tasks add '<description>'` | Add a new task |
+| `aterm tasks done <id>` | Mark a task as completed |
+| `aterm lessons` | List recorded lessons |
+| `aterm lessons add '<lesson>'` | Add a lesson (`invariant`) |
+| `aterm lessons add '<lesson>' --type failed` | Add a failed pattern |
+| `aterm dispatch <task-id>` | Break down task -> create sub-sessions -> execute -> collect -> cleanup |
+| `aterm dispatch --plan '<desc>'` | Free-text task -> same dispatch flow |
+| `aterm help` | Show this help |
+
+## Ecosystem
+
+✅ brain (AI profile management) — already installed  
+✅ telepty (cross-terminal communication) — already installed  
+✅ deliberation (multi-AI discussions) — already installed  
+✅ devkit (workspace bootstrapping) — already installed
+
+## Natural Language -> Command Mapping
+
+### Internal sessions (same aterm, `$ATERM_IPC_SOCKET` set)
+| English request | Korean request | Command |
+|----------------|----------------|---------|
+| `list sessions` | `세션 목록 보여줘` | `aterm list` |
+| `send build to ghostty` | `ghostty에 빌드 실행해줘` | `aterm inject ghostty 'make build'` |
+| `check cmux status` | `cmux 세션 상태 확인해줘` | `aterm status cmux` |
+| `show tasks` | `태스크 목록 보여줘` | `aterm tasks` |
+| `add task: implement API` | `태스크 추가해줘: API 구현` | `aterm tasks add 'API 구현'` |
+| `task 42 done` | `태스크 42 완료` | `aterm tasks done 42` |
+| `show lessons` | `레슨 보여줘` | `aterm lessons` |
+| `add lesson: this pattern failed` | `레슨 추가` | `aterm lessons add 'this pattern failed'` |
+
+### External sessions (other terminal or machine, `$ATERM_IPC_SOCKET` unset)
+| English request | Korean request | Command |
+|----------------|----------------|---------|
+| `list external sessions` | `외부 세션 목록` | `telepty list` |
+| `message deliberation session` | `deliberation 세션에 메시지 보내줘` | `telepty inject aigentry-deliberation-claude 'message'` |
+
+## Session Detection Priority
+1. `aterm list` — internal sessions (project names + `terminal=aterm`)
+2. `telepty list` — external sessions (project names + terminal type)
+3. Never use `ps aux | grep` as the primary detection method (no project names, no terminal info)
+
+## Detection Rules
+- `$ATERM_IPC_SOCKET` set -> inside aterm. Use `aterm` commands.
+- `$ATERM_IPC_SOCKET` unset -> outside aterm. Use `telepty` commands.
+- `aterm` automatically falls back to `telepty` for `list`, `inject`, and `status`.
+HELP
+    fi
 }
 
 aterm_ipc() {
     python3 -c '
-import socket, sys, json
+import os, socket, sys, json
 
 sock_path = sys.argv[1]
 action = sys.argv[2]
 args = sys.argv[3:]
+lang = os.environ.get("ATERM_UI_LANG", "en")
 
 payloads = {
-    "list":   lambda: {"action": "ListWorkspaces"},
-    "inject": lambda: {"action": "Inject", "workspace": args[0],
-                        "text": " ".join(args[1:]),
-                        "from": __import__("os").environ.get("ATERM_WORKSPACE_NAME")},
-    "status": lambda: {"action": "WorkspaceStatus", "workspace": args[0]},
-    "focus":  lambda: {"action": "FocusWorkspace", "workspace": args[0]},
+    "list":        lambda: {"action": "ListWorkspaces"},
+    "inject":      lambda: {"action": "Inject", "workspace": args[0],
+                            "text": " ".join(args[1:]),
+                            "from": __import__("os").environ.get("ATERM_WORKSPACE_NAME")},
+    "status":      lambda: {"action": "WorkspaceStatus", "workspace": args[0]},
+    "focus":       lambda: {"action": "FocusWorkspace", "workspace": args[0]},
+    "create":      lambda: {"action": "CreateWorkspace", "name": args[0], "cli": args[1], "cwd": args[2]},
+    "kill":        lambda: {"action": "CloseWorkspace", "workspace": args[0]},
+    "restart":     lambda: {"action": "RestartWorkspace", "workspace": args[0]},
+    "restart-all": lambda: {"action": "RestartAllWorkspaces"},
 }
 
 payload = json.dumps(payloads[action]()) + "\n"
@@ -78,7 +237,7 @@ try:
         else:
             sessions = resp.get("data", [])
             if not sessions:
-                print("(no workspaces)")
+                print("(워크스페이스 없음)" if lang == "ko" else "(no workspaces)")
             else:
                 import os.path
                 rows = []
@@ -88,7 +247,7 @@ try:
                     cwd = s.get("cwd", "")
                     terminal = s.get("terminal", "aterm")
                     rows.append((name, cli, cwd, terminal))
-                cols = ["NAME", "CLI", "CWD", "TERMINAL"]
+                cols = ["이름", "CLI", "경로", "터미널"] if lang == "ko" else ["NAME", "CLI", "CWD", "TERMINAL"]
                 widths = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(cols)]
                 fmt = "  ".join(f"{{:<{w}}}" for w in widths)
                 print(fmt.format(*cols))
@@ -159,6 +318,7 @@ print(json.dumps({"sessions": sessions}))
 import json, sys, os, subprocess, os.path
 
 sessions = []
+lang = os.environ.get("ATERM_UI_LANG", "en")
 
 # 1. aterm internal sessions
 sock = os.environ.get("ATERM_IPC_SOCKET", "")
@@ -199,9 +359,9 @@ try:
 except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError): pass
 
 if not sessions:
-    print("(no reachable sessions)")
+    print("(도달 가능한 세션 없음)" if lang == "ko" else "(no reachable sessions)")
 else:
-    cols = ["NAME", "CLI", "CWD", "TERMINAL"]
+    cols = ["이름", "CLI", "경로", "터미널"] if lang == "ko" else ["NAME", "CLI", "CWD", "TERMINAL"]
     widths = [max(len(c), *(len(r[i]) for r in sessions)) for i, c in enumerate(cols)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*cols))
@@ -210,7 +370,10 @@ else:
         print(fmt.format(*r))
     if all(r[3] == "aterm" for r in sessions):
         print()
-        print("💡 All sessions are aterm-internal. Install telepty for cross-terminal: already included!")
+        if lang == "ko":
+            print("💡 현재 도달 가능한 세션은 모두 aterm 내부 세션입니다. 다른 터미널과 연결하려면 telepty를 사용하세요: 이미 포함되어 있습니다.")
+        else:
+            print("💡 All reachable sessions are internal to aterm. Use telepty for cross-terminal access: it is already included.")
 '
         fi ;;
     inject)
@@ -229,6 +392,32 @@ else:
         [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"focus requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
         [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm focus <workspace>"}' >&2; exit 1; }
         aterm_ipc focus "$2" ;;
+    create)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"create requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        # Parse: aterm create <name> --cli <cli> --cwd <path>
+        shift
+        _name="${1:-}"; shift || true
+        _cli=""; _cwd=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --cli) _cli="$2"; shift 2 ;;
+                --cwd) _cwd="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        [[ -z "$_name" || -z "$_cli" || -z "$_cwd" ]] && { echo '{"error":"usage: aterm create <name> --cli <cli> --cwd <path>"}' >&2; exit 1; }
+        aterm_ipc create "$_name" "$_cli" "$_cwd" ;;
+    restart)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"restart requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm restart <workspace>"}' >&2; exit 1; }
+        aterm_ipc restart "$2" ;;
+    kill)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"kill requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm kill <workspace>"}' >&2; exit 1; }
+        aterm_ipc kill "$2" ;;
+    restart-all)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"restart-all requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        aterm_ipc restart-all ;;
     tasks)
         ensure_tasks_file
         case "${2:-list}" in
@@ -311,64 +500,254 @@ print(json.dumps({"status":"ok","type": ltype}))
 ' "$(lessons_file)" "${@:3}" ;;
             *) echo '{"error":"usage: aterm lessons [list|add]"}' >&2; exit 1 ;;
         esac ;;
+    dispatch)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"dispatch requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        python3 -c '
+import socket
+import subprocess
+import json
+import sys
+import time
+import os
+
+# ── IPC helper ──────────────────────────────────────────────
+
+def ipc_send(sock_path, payload):
+    """Send JSON to aterm IPC socket and return parsed response."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(10)
+        s.connect(sock_path)
+        s.sendall((json.dumps(payload) + "\n").encode())
+        s.shutdown(socket.SHUT_WR)
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        return json.loads(data.decode().strip().split("\n")[0])
+    finally:
+        s.close()
+
+def ipc_create(sock_path, name, cli, cwd):
+    return ipc_send(sock_path, {
+        "action": "CreateWorkspace", "name": name, "cli": cli, "cwd": cwd
+    })
+
+def ipc_inject(sock_path, workspace, text):
+    return ipc_send(sock_path, {
+        "action": "Inject", "workspace": workspace, "text": text,
+        "from": os.environ.get("ATERM_WORKSPACE_NAME")
+    })
+
+def ipc_status(sock_path, workspace):
+    return ipc_send(sock_path, {
+        "action": "WorkspaceStatus", "workspace": workspace
+    })
+
+def ipc_kill(sock_path, workspace):
+    return ipc_send(sock_path, {
+        "action": "CloseWorkspace", "workspace": workspace
+    })
+
+# ── Task breakdown ──────────────────────────────────────────
+
+def breakdown_task(description):
+    """Try aigentry-devkit breakdown; fall back to single subtask."""
+    try:
+        result = subprocess.run(
+            ["aigentry-devkit", "breakdown", description],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
+            subtasks = data if isinstance(data, list) else data.get("subtasks", [])
+            if subtasks:
+                return subtasks
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
+        pass
+    return [{"description": description}]
+
+# ── CLI auto-selection ──────────────────────────────────────
+
+def select_cli(description):
+    """Pick CLI based on keywords in the subtask description."""
+    desc_lower = description.lower()
+    codex_keywords = ["implement", "code", "build", "write", "fix bug", "create file", "add function"]
+    claude_keywords = ["architect", "debug", "analyze", "design", "refactor", "review"]
+    gemini_keywords = ["research", "document", "search", "summarize", "find information"]
+    for kw in codex_keywords:
+        if kw in desc_lower:
+            return "codex"
+    for kw in claude_keywords:
+        if kw in desc_lower:
+            return "claude"
+    for kw in gemini_keywords:
+        if kw in desc_lower:
+            return "gemini"
+    return "claude"
+
+# ── Poll for completion ─────────────────────────────────────
+
+def poll_session(sock_path, name, timeout=300, interval=10):
+    """Poll workspace status until idle or timeout."""
+    elapsed = 0
+    while elapsed < timeout:
+        time.sleep(interval)
+        elapsed += interval
+        try:
+            resp = ipc_status(sock_path, name)
+            status_data = resp.get("data", resp)
+            state = status_data.get("state", "")
+            if state == "idle":
+                return "complete"
+        except Exception:
+            pass
+    return "timeout"
+
+# ── Main ────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"error": "usage: aterm dispatch <task-id> | --plan <description>"}), file=sys.stderr)
+        sys.exit(1)
+
+    sock_path = sys.argv[1]
+    tasks_file = sys.argv[2]
+    args = sys.argv[3:]
+
+    if not args:
+        print(json.dumps({"error": "usage: aterm dispatch <task-id> | --plan <description>"}), file=sys.stderr)
+        sys.exit(1)
+
+    # Parse: --plan or task-id
+    task_id = None
+    description = None
+
+    if args[0] == "--plan":
+        if len(args) < 2:
+            print(json.dumps({"error": "usage: aterm dispatch --plan <description>"}), file=sys.stderr)
+            sys.exit(1)
+        description = " ".join(args[1:])
+        task_id = "plan"
+    else:
+        task_id = args[0]
+        try:
+            tid = int(task_id)
+        except ValueError:
+            print(json.dumps({"error": f"invalid task-id: {task_id}"}), file=sys.stderr)
+            sys.exit(1)
+        # Read from task-queue.json
+        try:
+            with open(tasks_file) as f:
+                data = json.load(f)
+            found = None
+            for t in data.get("tasks", []):
+                if isinstance(t, dict) and t.get("id") == tid:
+                    found = t
+                    break
+            if not found:
+                print(json.dumps({"error": f"task {tid} not found in {tasks_file}"}), file=sys.stderr)
+                sys.exit(1)
+            description = found.get("description", "")
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(json.dumps({"error": f"cannot read tasks file: {e}"}), file=sys.stderr)
+            sys.exit(1)
+
+    # Breakdown
+    subtasks = breakdown_task(description)
+
+    # Subagent vs subsession judgment
+    if len(subtasks) == 1:
+        desc = subtasks[0].get("description", subtasks[0]) if isinstance(subtasks[0], dict) else str(subtasks[0])
+        # Check if description mentions a single file
+        single_file_hints = [".rs", ".ts", ".js", ".py", ".swift", ".go", ".java", ".c", ".cpp", ".h", ".md"]
+        if any(hint in desc for hint in single_file_hints):
+            print(json.dumps({
+                "recommendation": "subagent",
+                "reason": "single file, simple task",
+                "task_id": task_id,
+                "description": desc
+            }))
+            sys.exit(0)
+
+    # Create sub-sessions, inject, poll, collect, kill
+    cwd = os.getcwd()
+    sessions_created = []
+    reports = []
+
+    for i, st in enumerate(subtasks):
+        desc = st.get("description", st) if isinstance(st, dict) else str(st)
+        cli = select_cli(desc)
+        name = f"dispatch-{task_id}-sub{i}"
+
+        # Create session
+        try:
+            ipc_create(sock_path, name, cli, cwd)
+            sessions_created.append(name)
+        except Exception as e:
+            reports.append({"name": name, "status": "create_failed", "cli": cli, "error": str(e)})
+            continue
+
+        # Wait for session to start
+        time.sleep(2)
+
+        # Inject task description
+        try:
+            ipc_inject(sock_path, name, desc)
+        except Exception as e:
+            reports.append({"name": name, "status": "inject_failed", "cli": cli, "error": str(e)})
+            continue
+
+    # Poll all sessions for completion
+    for name in sessions_created:
+        # Skip sessions that already failed
+        if any(r["name"] == name for r in reports):
+            continue
+        cli = "unknown"
+        for i, st in enumerate(subtasks):
+            if f"dispatch-{task_id}-sub{i}" == name:
+                desc = st.get("description", st) if isinstance(st, dict) else str(st)
+                cli = select_cli(desc)
+                break
+        status = poll_session(sock_path, name)
+        reports.append({"name": name, "status": status, "cli": cli})
+
+    # Kill all sub-sessions
+    for name in sessions_created:
+        try:
+            ipc_kill(sock_path, name)
+        except Exception:
+            pass
+
+    # Determine overall status
+    statuses = [r["status"] for r in reports]
+    if all(s == "complete" for s in statuses):
+        overall = "all_complete"
+    elif all(s == "timeout" for s in statuses):
+        overall = "all_timeout"
+    elif any(s == "complete" for s in statuses):
+        overall = "partial_complete"
+    else:
+        overall = "failed"
+
+    result = {
+        "task_id": task_id if task_id == "plan" else int(task_id),
+        "subtasks": len(subtasks),
+        "sessions_created": sessions_created,
+        "status": overall,
+        "reports": reports
+    }
+    print(json.dumps(result, indent=2))
+
+main()
+' "$ATERM_IPC_SOCKET" "$(tasks_file)" "${@:2}"
+        ;;
     help|--help|-h)
-        cat <<'HELP'
-# aterm — AI-native terminal session communication
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `aterm list` | List workspaces (NAME, CLI, CWD, TERMINAL) |
-| `aterm inject <workspace> <text>` | Send text to a workspace |
-| `aterm status` | Show bundled ecosystem health |
-| `aterm status <workspace>` | Check workspace status |
-| `aterm focus <workspace>` | Focus a workspace tab |
-| `aterm tasks` | List pending tasks |
-| `aterm tasks add '<description>'` | Add a new task |
-| `aterm tasks done <id>` | Mark task as completed |
-| `aterm lessons` | List recorded lessons |
-| `aterm lessons add '<lesson>'` | Add a lesson (invariant) |
-| `aterm lessons add '<lesson>' --type failed` | Add a failed pattern |
-| `aterm help` | Show this help |
-
-## Ecosystem
-
-✅ brain (AI profile management) — already installed  
-✅ telepty (cross-terminal communication) — already installed  
-✅ deliberation (multi-AI discussions) — already installed  
-✅ devkit (workspace bootstrapping) — already installed
-
-## Natural Language → Command Mapping
-
-### Internal sessions (same aterm, $ATERM_IPC_SOCKET set)
-| Natural language | Command |
-|-----------------|---------|
-| 'list sessions' / '세션 목록 보여줘' | `aterm list` |
-| 'send build to ghostty' / 'ghostty에 빌드 실행해줘' | `aterm inject ghostty 'make build'` |
-| 'check cmux status' / 'cmux 세션 상태 확인해줘' | `aterm status cmux` |
-| 'show tasks' / '태스크 목록 보여줘' | `aterm tasks` |
-| 'add task: implement API' / '태스크 추가해줘: API 구현' | `aterm tasks add 'API 구현'` |
-| 'task 42 done' / '태스크 42 완료' | `aterm tasks done 42` |
-| 'show lessons' / '레슨 보여줘' | `aterm lessons` |
-| 'add lesson: this pattern failed' / '레슨 추가' | `aterm lessons add 'this pattern failed'` |
-
-### External sessions (other terminal/machine, $ATERM_IPC_SOCKET unset)
-| Natural language | Command |
-|-----------------|---------|
-| 'list external sessions' / '외부 세션 목록' | `telepty list` |
-| 'message deliberation session' | `telepty inject aigentry-deliberation-claude 'message'` |
-
-## Session Detection Priority
-1. `aterm list` — internal sessions (project names + terminal=aterm)
-2. `telepty list` — external sessions (project names + terminal type)
-3. NEVER use `ps aux | grep` as primary (no project names, no terminal info)
-
-## Detection Rules
-- `$ATERM_IPC_SOCKET` set → inside aterm. Use `aterm` commands.
-- `$ATERM_IPC_SOCKET` unset → outside aterm. Use `telepty` commands.
-- `aterm` falls back to `telepty` automatically for list/inject/status.
-HELP
+        show_help
         ;;
     *) echo "{\"error\":\"unknown command: $1\"}" >&2; exit 1 ;;
 esac

@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use crate::pty::{PtyManager, PtyOutputSignal};
-use crate::renderer::{TerminalGridRenderer, TerminalThemeMode};
+use crate::renderer::{ColorScheme, TerminalGridRenderer, TerminalThemeMode};
 use crate::terminal::TerminalState;
 
 // -- Named key codes --
@@ -341,6 +341,24 @@ impl AtermCore {
         }
     }
 
+    fn set_color_scheme(&mut self, scheme: ColorScheme) {
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.set_color_scheme(scheme);
+        }
+    }
+
+    fn set_font_size(&mut self, size: f32) {
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.set_font_size(size);
+        }
+    }
+
+    fn set_line_height(&mut self, height: f32) {
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.set_line_height(height);
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -615,6 +633,45 @@ pub unsafe extern "C" fn aterm_core_set_theme_mode(core: *mut AtermCore, mode: u
         TerminalThemeMode::Dark
     };
     (*core).set_theme_mode(theme_mode);
+}
+
+/// Set color scheme: 0=Dark, 1=Light, 2=SolarizedDark, 3=SolarizedLight,
+/// 4=Monokai, 5=Dracula, 6=Nord, 7=TokyoNight
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_set_color_scheme(core: *mut AtermCore, scheme: u8) {
+    if core.is_null() {
+        return;
+    }
+    let s = match scheme {
+        0 => ColorScheme::Dark,
+        1 => ColorScheme::Light,
+        2 => ColorScheme::SolarizedDark,
+        3 => ColorScheme::SolarizedLight,
+        4 => ColorScheme::Monokai,
+        5 => ColorScheme::Dracula,
+        6 => ColorScheme::Nord,
+        7 => ColorScheme::TokyoNight,
+        _ => return,
+    };
+    (*core).set_color_scheme(s);
+}
+
+/// Set font size in pixels (clamped to 8..32)
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_set_font_size(core: *mut AtermCore, size: f32) {
+    if core.is_null() {
+        return;
+    }
+    (*core).set_font_size(size);
+}
+
+/// Set line height in pixels (clamped to 12..64)
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_set_line_height(core: *mut AtermCore, height: f32) {
+    if core.is_null() {
+        return;
+    }
+    (*core).set_line_height(height);
 }
 
 #[no_mangle]

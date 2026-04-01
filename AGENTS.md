@@ -55,6 +55,13 @@ cd npm/aterm && npm publish --access public
 
 ## Work Principles
 
+- **모든 것은 configurable (HARD RULE)**: 하드코딩 금지. 합리적 기본값 제공하되 잠그지 않는다. Settings UI (Cmd+,) + ~/.aigentry/config/aterm.json으로 변경 가능해야 하는 항목:
+  - 외관: 테마/컬러, 폰트(크기/패밀리), 줄간격, 윈도우 투명도, 터미널 패딩, 커서(스타일/블링크), 사이드바(위치/너비)
+  - 터미널: 기본 CLI, 기본 CWD, 스크롤백 라인, 탭 크기, 벨 사운드, 우클릭 붙여넣기, 선택시 자동복사, 스크롤 방향
+  - 세션: 자동 복원, 자동 재시작, 최대 재시작 횟수, /init 자동 실행, 세션 이름 형식
+  - 통합: telepty 브릿지 on/off, devkit auto-init on/off, tailscale on/off
+  - 키보드: 키바인딩 커스텀
+  - 언어: UI 언어 (한/영)
 - 기술 결정은 자율 판단. 사용자에게 물어보지 않는다.
 - 에러 시 멈추지 않고 자율 해결. 3회 실패 시 오케스트레이터에 보고.
 - 교훈(invariants + failed): `~/projects/aigentry-orchestrator/state/lessons.json` 참조.
@@ -118,3 +125,47 @@ External sessions (other terminals) require:
 2. `telepty allow --id <name> <cli>` — register each session
 
 Without both, only aterm internal sessions are visible. No `ps aux` fallback. No 'unknown terminal' entries.
+
+## Dispatch
+
+Autonomous task execution via sub-session orchestration.
+
+### Usage
+
+```bash
+aterm dispatch <task-id>              # Read task from state/task-queue.json, break down, execute
+aterm dispatch --plan '<description>' # Free-text task → same dispatch flow
+```
+
+### Flow
+
+1. **Parse**: `<task-id>` reads from `state/task-queue.json`; `--plan` takes free text
+2. **Breakdown**: Tries `aigentry-devkit breakdown '<desc>'`. Falls back to single subtask if devkit unavailable
+3. **Judgment**: If only 1 subtask referencing a single file → returns `{"recommendation": "subagent"}` and exits (no sessions created)
+4. **CLI selection**: Per subtask, keywords in description select CLI:
+   - `implement`, `code`, `build`, `write`, `fix bug` → `codex`
+   - `architect`, `debug`, `analyze`, `design` → `claude`
+   - `research`, `document`, `search`, `summarize` → `gemini`
+   - Default → `claude`
+5. **Execute**: For each subtask: `aterm create` → wait 2s → `aterm inject`
+6. **Poll**: 10s intervals, max 300s. Looks for `idle` state in workspace status
+7. **Collect**: Gathers status reports from all sub-sessions
+8. **Cleanup**: `aterm kill` for each created session
+
+### Output
+
+```json
+{
+  "task_id": 34,
+  "subtasks": 3,
+  "sessions_created": ["dispatch-34-sub0", "dispatch-34-sub1", "dispatch-34-sub2"],
+  "status": "all_complete",
+  "reports": [{"name": "...", "status": "complete", "cli": "..."}, ...]
+}
+```
+
+### Requirements
+
+- `$ATERM_IPC_SOCKET` must be set (runs inside aterm only)
+- Python 3 available
+- Optional: `aigentry-devkit` for intelligent task breakdown

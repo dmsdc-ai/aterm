@@ -4,6 +4,7 @@ use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
 use alacritty_terminal::event::EventListener;
@@ -43,6 +44,20 @@ const SYSTEM_MONOSPACE_FAMILY_PREFERENCES: &[&str] = &[
 pub enum TerminalThemeMode {
     Dark,
     Light,
+}
+
+/// Named color schemes — each provides a full 16-color ANSI palette + bg/fg/cursor.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ColorScheme {
+    Dark = 0,
+    Light = 1,
+    SolarizedDark = 2,
+    SolarizedLight = 3,
+    Monokai = 4,
+    Dracula = 5,
+    Nord = 6,
+    TokyoNight = 7,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -106,6 +121,134 @@ const LIGHT_ANSI: [ThemeRgb; 16] = [
     ThemeRgb::new(0x6e, 0x77, 0x81),
 ];
 
+// --- Solarized Dark ---
+const SOLARIZED_DARK_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x07, 0x36, 0x42), ThemeRgb::new(0xdc, 0x32, 0x2f),
+    ThemeRgb::new(0x85, 0x99, 0x00), ThemeRgb::new(0xb5, 0x89, 0x00),
+    ThemeRgb::new(0x26, 0x8b, 0xd2), ThemeRgb::new(0xd3, 0x36, 0x82),
+    ThemeRgb::new(0x2a, 0xa1, 0x98), ThemeRgb::new(0xee, 0xe8, 0xd5),
+    ThemeRgb::new(0x00, 0x2b, 0x36), ThemeRgb::new(0xcb, 0x4b, 0x16),
+    ThemeRgb::new(0x58, 0x6e, 0x75), ThemeRgb::new(0x65, 0x7b, 0x83),
+    ThemeRgb::new(0x83, 0x94, 0x96), ThemeRgb::new(0x6c, 0x71, 0xc4),
+    ThemeRgb::new(0x93, 0xa1, 0xa1), ThemeRgb::new(0xfd, 0xf6, 0xe3),
+];
+
+// --- Solarized Light ---
+// Normal black/white swapped vs dark so text contrasts with cream bg
+const SOLARIZED_LIGHT_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x07, 0x36, 0x42), ThemeRgb::new(0xdc, 0x32, 0x2f),
+    ThemeRgb::new(0x85, 0x99, 0x00), ThemeRgb::new(0xb5, 0x89, 0x00),
+    ThemeRgb::new(0x26, 0x8b, 0xd2), ThemeRgb::new(0xd3, 0x36, 0x82),
+    ThemeRgb::new(0x2a, 0xa1, 0x98), ThemeRgb::new(0xee, 0xe8, 0xd5),
+    ThemeRgb::new(0x00, 0x2b, 0x36), ThemeRgb::new(0xcb, 0x4b, 0x16),
+    ThemeRgb::new(0x58, 0x6e, 0x75), ThemeRgb::new(0x65, 0x7b, 0x83),
+    ThemeRgb::new(0x83, 0x94, 0x96), ThemeRgb::new(0x6c, 0x71, 0xc4),
+    ThemeRgb::new(0x93, 0xa1, 0xa1), ThemeRgb::new(0xfd, 0xf6, 0xe3),
+];
+
+// --- Monokai ---
+const MONOKAI_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x27, 0x28, 0x22), ThemeRgb::new(0xf9, 0x26, 0x72),
+    ThemeRgb::new(0xa6, 0xe2, 0x2e), ThemeRgb::new(0xf4, 0xbf, 0x75),
+    ThemeRgb::new(0x66, 0xd9, 0xef), ThemeRgb::new(0xae, 0x81, 0xff),
+    ThemeRgb::new(0xa1, 0xef, 0xe4), ThemeRgb::new(0xf8, 0xf8, 0xf2),
+    ThemeRgb::new(0x75, 0x71, 0x5e), ThemeRgb::new(0xf9, 0x26, 0x72),
+    ThemeRgb::new(0xa6, 0xe2, 0x2e), ThemeRgb::new(0xf4, 0xbf, 0x75),
+    ThemeRgb::new(0x66, 0xd9, 0xef), ThemeRgb::new(0xae, 0x81, 0xff),
+    ThemeRgb::new(0xa1, 0xef, 0xe4), ThemeRgb::new(0xf9, 0xf8, 0xf5),
+];
+
+// --- Dracula ---
+const DRACULA_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x21, 0x22, 0x2c), ThemeRgb::new(0xff, 0x55, 0x55),
+    ThemeRgb::new(0x50, 0xfa, 0x7b), ThemeRgb::new(0xf1, 0xfa, 0x8c),
+    ThemeRgb::new(0xbd, 0x93, 0xf9), ThemeRgb::new(0xff, 0x79, 0xc6),
+    ThemeRgb::new(0x8b, 0xe9, 0xfd), ThemeRgb::new(0xf8, 0xf8, 0xf2),
+    ThemeRgb::new(0x62, 0x72, 0xa4), ThemeRgb::new(0xff, 0x6e, 0x6e),
+    ThemeRgb::new(0x69, 0xff, 0x94), ThemeRgb::new(0xff, 0xff, 0xa5),
+    ThemeRgb::new(0xd6, 0xac, 0xff), ThemeRgb::new(0xff, 0x92, 0xdf),
+    ThemeRgb::new(0xa4, 0xff, 0xff), ThemeRgb::new(0xff, 0xff, 0xff),
+];
+
+// --- Nord ---
+const NORD_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x3b, 0x42, 0x52), ThemeRgb::new(0xbf, 0x61, 0x6a),
+    ThemeRgb::new(0xa3, 0xbe, 0x8c), ThemeRgb::new(0xeb, 0xcb, 0x8b),
+    ThemeRgb::new(0x81, 0xa1, 0xc1), ThemeRgb::new(0xb4, 0x8e, 0xad),
+    ThemeRgb::new(0x88, 0xc0, 0xd0), ThemeRgb::new(0xe5, 0xe9, 0xf0),
+    ThemeRgb::new(0x4c, 0x56, 0x6a), ThemeRgb::new(0xbf, 0x61, 0x6a),
+    ThemeRgb::new(0xa3, 0xbe, 0x8c), ThemeRgb::new(0xeb, 0xcb, 0x8b),
+    ThemeRgb::new(0x81, 0xa1, 0xc1), ThemeRgb::new(0xb4, 0x8e, 0xad),
+    ThemeRgb::new(0x8f, 0xbc, 0xbb), ThemeRgb::new(0xec, 0xef, 0xf4),
+];
+
+// --- Tokyo Night ---
+const TOKYO_NIGHT_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x15, 0x16, 0x1e), ThemeRgb::new(0xf7, 0x76, 0x8e),
+    ThemeRgb::new(0x9e, 0xce, 0x6a), ThemeRgb::new(0xe0, 0xaf, 0x68),
+    ThemeRgb::new(0x7a, 0xa2, 0xf7), ThemeRgb::new(0xbb, 0x9a, 0xf7),
+    ThemeRgb::new(0x7d, 0xcf, 0xff), ThemeRgb::new(0xa9, 0xb1, 0xd6),
+    ThemeRgb::new(0x41, 0x48, 0x68), ThemeRgb::new(0xf7, 0x76, 0x8e),
+    ThemeRgb::new(0x9e, 0xce, 0x6a), ThemeRgb::new(0xe0, 0xaf, 0x68),
+    ThemeRgb::new(0x7a, 0xa2, 0xf7), ThemeRgb::new(0xbb, 0x9a, 0xf7),
+    ThemeRgb::new(0x7d, 0xcf, 0xff), ThemeRgb::new(0xc0, 0xca, 0xf5),
+];
+
+fn scheme_palette(scheme: ColorScheme) -> ThemePalette {
+    match scheme {
+        ColorScheme::Dark => theme_palette(TerminalThemeMode::Dark),
+        ColorScheme::Light => theme_palette(TerminalThemeMode::Light),
+        ColorScheme::SolarizedDark => ThemePalette {
+            background: ThemeRgb::new(0x00, 0x2b, 0x36),
+            foreground: ThemeRgb::new(0x83, 0x94, 0x96),
+            cursor: ThemeRgb::new(0x93, 0xa1, 0xa1),
+            selection_fg: ThemeRgb::new(0xfd, 0xf6, 0xe3),
+            selection_bg: [0.07, 0.54, 0.82, 0.3],
+            ansi: SOLARIZED_DARK_ANSI,
+        },
+        ColorScheme::SolarizedLight => ThemePalette {
+            background: ThemeRgb::new(0xfd, 0xf6, 0xe3),
+            foreground: ThemeRgb::new(0x65, 0x7b, 0x83),
+            cursor: ThemeRgb::new(0x58, 0x6e, 0x75),
+            selection_fg: ThemeRgb::new(0x00, 0x2b, 0x36),
+            selection_bg: [0.07, 0.54, 0.82, 0.15],
+            ansi: SOLARIZED_LIGHT_ANSI,
+        },
+        ColorScheme::Monokai => ThemePalette {
+            background: ThemeRgb::new(0x27, 0x28, 0x22),
+            foreground: ThemeRgb::new(0xf8, 0xf8, 0xf2),
+            cursor: ThemeRgb::new(0xf8, 0xf8, 0xf0),
+            selection_fg: ThemeRgb::new(0xff, 0xff, 0xff),
+            selection_bg: [0.58, 0.44, 0.08, 0.3],
+            ansi: MONOKAI_ANSI,
+        },
+        ColorScheme::Dracula => ThemePalette {
+            background: ThemeRgb::new(0x28, 0x2a, 0x36),
+            foreground: ThemeRgb::new(0xf8, 0xf8, 0xf2),
+            cursor: ThemeRgb::new(0xf8, 0xf8, 0xf2),
+            selection_fg: ThemeRgb::new(0xff, 0xff, 0xff),
+            selection_bg: [0.27, 0.28, 0.35, 0.5],
+            ansi: DRACULA_ANSI,
+        },
+        ColorScheme::Nord => ThemePalette {
+            background: ThemeRgb::new(0x2e, 0x34, 0x40),
+            foreground: ThemeRgb::new(0xd8, 0xde, 0xe9),
+            cursor: ThemeRgb::new(0xd8, 0xde, 0xe9),
+            selection_fg: ThemeRgb::new(0xec, 0xef, 0xf4),
+            selection_bg: [0.26, 0.30, 0.37, 0.5],
+            ansi: NORD_ANSI,
+        },
+        ColorScheme::TokyoNight => ThemePalette {
+            background: ThemeRgb::new(0x1a, 0x1b, 0x26),
+            foreground: ThemeRgb::new(0xa9, 0xb1, 0xd6),
+            cursor: ThemeRgb::new(0xc0, 0xca, 0xf5),
+            selection_fg: ThemeRgb::new(0xc0, 0xca, 0xf5),
+            selection_bg: [0.18, 0.20, 0.36, 0.5],
+            ansi: TOKYO_NIGHT_ANSI,
+        },
+    }
+}
+
 fn theme_palette(mode: TerminalThemeMode) -> ThemePalette {
     match mode {
         TerminalThemeMode::Dark => ThemePalette {
@@ -114,10 +257,10 @@ fn theme_palette(mode: TerminalThemeMode) -> ThemePalette {
             cursor: ThemeRgb::new(0xd4, 0xa5, 0x74),
             selection_fg: ThemeRgb::new(0xff, 0xff, 0xff),
             selection_bg: [
-                0x2a as f32 / 255.0,
-                0x3a as f32 / 255.0,
-                0x50 as f32 / 255.0,
-                1.0,
+                0x33 as f32 / 255.0,
+                0x66 as f32 / 255.0,
+                0xff as f32 / 255.0,
+                0.3,
             ],
             ansi: DARK_ANSI,
         },
@@ -303,7 +446,8 @@ pub struct TerminalGridRenderer {
     viewport: Viewport,
     font_size: f32,
     line_height: f32,
-    cells: Vec<RenderCell>,
+    grid: Vec<GridCell>,
+    glyph_cache: HashMap<GlyphCacheKey, Buffer>,
     cursor_buffer: Buffer,
     cursor_text: String,
     cursor_width_cells: u8,
@@ -312,14 +456,19 @@ pub struct TerminalGridRenderer {
     last_font_size: f32,
     last_line_height: f32,
     theme_mode: TerminalThemeMode,
+    color_scheme: Option<ColorScheme>,
 }
 
-struct RenderCell {
-    buffer: Buffer,
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct GlyphCacheKey {
+    text: String,
+    width_cells: u8,
+}
+
+struct GridCell {
     text: String,
     fg: GlyphonColor,
     width_cells: u8,
-    has_non_ascii: bool,
     active: bool,
 }
 
@@ -355,7 +504,8 @@ impl TerminalGridRenderer {
             viewport,
             font_size,
             line_height,
-            cells: Vec::new(),
+            grid: Vec::new(),
+            glyph_cache: HashMap::new(),
             cursor_buffer,
             cursor_text: String::new(),
             cursor_width_cells: 0,
@@ -364,6 +514,7 @@ impl TerminalGridRenderer {
             last_font_size: -1.0,
             last_line_height: -1.0,
             theme_mode,
+            color_scheme: None,
         }
     }
 
@@ -373,6 +524,34 @@ impl TerminalGridRenderer {
         }
         self.theme_mode = theme_mode;
         self.last_cursor_color = None;
+    }
+
+    pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
+        self.color_scheme = Some(scheme);
+        self.last_cursor_color = None;
+    }
+
+    pub fn set_font_size(&mut self, size: f32) {
+        let size = size.clamp(8.0, 32.0);
+        if (self.font_size - size).abs() < 0.01 {
+            return;
+        }
+        self.font_size = size;
+    }
+
+    pub fn set_line_height(&mut self, height: f32) {
+        let height = height.clamp(12.0, 64.0);
+        if (self.line_height - height).abs() < 0.01 {
+            return;
+        }
+        self.line_height = height;
+    }
+
+    fn active_palette(&self) -> ThemePalette {
+        match self.color_scheme {
+            Some(scheme) => scheme_palette(scheme),
+            None => theme_palette(self.theme_mode),
+        }
     }
 
     pub fn cell_width(&self) -> f32 {
@@ -401,15 +580,15 @@ impl TerminalGridRenderer {
         height: u32,
     ) {
         let render_start = std::time::Instant::now();
-        let palette = theme_palette(self.theme_mode);
+        let palette = self.active_palette();
         self.viewport.update(queue, Resolution { width, height });
 
         let (cols_u16, rows_u16) = self.grid_size(width as f32, height as f32);
         let cols = cols_u16 as usize;
         let rows = rows_u16 as usize;
-        self.ensure_cell_buffers(cols, rows);
+        self.ensure_grid(cols, rows);
 
-        for cell in &mut self.cells {
+        for cell in &mut self.grid {
             cell.active = false;
         }
 
@@ -520,23 +699,71 @@ impl TerminalGridRenderer {
             self.update_cursor_buffer(cursor_width_cells);
         }
 
+        // Populate glyph cache with any new glyphs needed this frame
+        {
+            let mut needed: Vec<(String, u8)> = Vec::new();
+            for cell in self.grid.iter() {
+                if cell.active && !cell.text.is_empty() {
+                    let key = GlyphCacheKey {
+                        text: cell.text.clone(),
+                        width_cells: cell.width_cells,
+                    };
+                    if !self.glyph_cache.contains_key(&key) {
+                        needed.push((cell.text.clone(), cell.width_cells));
+                    }
+                }
+            }
+            let metrics = Metrics::new(self.font_size, self.line_height);
+            for (text, width_cells) in needed {
+                let key = GlyphCacheKey {
+                    text: text.clone(),
+                    width_cells,
+                };
+                if self.glyph_cache.contains_key(&key) {
+                    continue;
+                }
+                let width = cw * width_cells as f32;
+                let shaping = if text.is_ascii() {
+                    Shaping::Basic
+                } else {
+                    Shaping::Advanced
+                };
+                let mut buffer = Buffer::new(&mut self.font_system, metrics);
+                buffer.set_size(&mut self.font_system, Some(width), Some(lh));
+                buffer.set_monospace_width(&mut self.font_system, Some(cw));
+                buffer.set_text(
+                    &mut self.font_system,
+                    &text,
+                    Attrs::new().family(Family::Monospace),
+                    shaping,
+                );
+                self.glyph_cache.insert(key, buffer);
+            }
+        }
+
+        // Build text areas: each cell rendered at exact grid position
         let mut text_areas = Vec::with_capacity(active_cells + usize::from(cursor_visible));
         for row in 0..rows {
             for col in 0..cols {
-                let cell = &self.cells[row * cols + col];
-                if !cell.active {
+                let cell = &self.grid[row * cols + col];
+                if !cell.active || cell.text.is_empty() {
                     continue;
                 }
-
-                text_areas.push(TextArea {
-                    buffer: &cell.buffer,
-                    left: 4.0 + col as f32 * cw,
-                    top: 4.0 + row as f32 * lh,
-                    scale: 1.0,
-                    bounds,
-                    default_color: glyphon_from_rgb(palette.foreground),
-                    custom_glyphs: &[],
-                });
+                let key = GlyphCacheKey {
+                    text: cell.text.clone(),
+                    width_cells: cell.width_cells,
+                };
+                if let Some(buffer) = self.glyph_cache.get(&key) {
+                    text_areas.push(TextArea {
+                        buffer,
+                        left: 4.0 + col as f32 * cw,
+                        top: 4.0 + row as f32 * lh,
+                        scale: 1.0,
+                        bounds,
+                        default_color: cell.fg,
+                        custom_glyphs: &[],
+                    });
+                }
             }
         }
 
@@ -620,34 +847,23 @@ impl TerminalGridRenderer {
         }
     }
 
-    fn ensure_cell_buffers(&mut self, cols: usize, rows: usize) {
+    fn ensure_grid(&mut self, cols: usize, rows: usize) {
         let target = cols * rows;
-        let cw = self.cell_width();
-        let metrics = Metrics::new(self.font_size, self.line_height);
+        let default_fg = glyphon_from_rgb(self.active_palette().foreground);
 
-        while self.cells.len() < target {
-            let mut buffer = Buffer::new(&mut self.font_system, metrics);
-            buffer.set_size(&mut self.font_system, Some(cw), Some(self.line_height));
-            buffer.set_monospace_width(&mut self.font_system, Some(cw));
-            self.cells.push(RenderCell {
-                buffer,
-                text: String::new(),
-                fg: glyphon_from_rgb(theme_palette(self.theme_mode).foreground),
-                width_cells: 1,
-                has_non_ascii: false,
-                active: false,
-            });
-        }
-        self.cells.truncate(target);
+        self.grid.resize_with(target, || GridCell {
+            text: String::new(),
+            fg: default_fg,
+            width_cells: 1,
+            active: false,
+        });
+        self.grid.truncate(target);
 
         if self.font_size != self.last_font_size || self.line_height != self.last_line_height {
-            for cell in &mut self.cells {
-                cell.buffer.set_metrics(&mut self.font_system, metrics);
-                cell.buffer
-                    .set_size(&mut self.font_system, Some(cw), Some(self.line_height));
-                cell.buffer
-                    .set_monospace_width(&mut self.font_system, Some(cw));
-            }
+            self.glyph_cache.clear();
+
+            let metrics = Metrics::new(self.font_size, self.line_height);
+            let cw = self.cell_width();
 
             self.cursor_buffer
                 .set_metrics(&mut self.font_system, metrics);
@@ -663,38 +879,17 @@ impl TerminalGridRenderer {
     }
 
     fn update_cell(&mut self, slot: usize, text: &str, fg: GlyphonColor, width_cells: u8) -> bool {
-        let cw = self.cell_width();
-        let width = cw * width_cells as f32;
-        let metrics = Metrics::new(self.font_size, self.line_height);
-        let shaping = if text.is_ascii() {
-            Shaping::Basic
-        } else {
-            Shaping::Advanced
-        };
-        let cell = &mut self.cells[slot];
+        let cell = &mut self.grid[slot];
         cell.active = true;
 
         if cell.text == text && cell.fg == fg && cell.width_cells == width_cells {
             return false;
         }
 
-        cell.buffer.set_metrics(&mut self.font_system, metrics);
-        cell.buffer
-            .set_size(&mut self.font_system, Some(width), Some(self.line_height));
-        cell.buffer
-            .set_monospace_width(&mut self.font_system, Some(cw));
-        cell.buffer.set_text(
-            &mut self.font_system,
-            text,
-            Attrs::new().family(Family::Monospace).color(fg),
-            shaping,
-        );
-
         cell.text.clear();
         cell.text.push_str(text);
         cell.fg = fg;
         cell.width_cells = width_cells;
-        cell.has_non_ascii = !text.is_ascii();
         true
     }
 
@@ -703,7 +898,7 @@ impl TerminalGridRenderer {
         let cw = self.cell_width();
         let width = cw * width_cells as f32;
         let text = if width_cells == 2 { "██" } else { "█" };
-        let palette = theme_palette(self.theme_mode);
+        let palette = self.active_palette();
         let cursor_color = glyphon_from_rgb(palette.cursor);
 
         self.cursor_buffer.set_metrics(

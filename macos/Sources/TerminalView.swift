@@ -9,6 +9,7 @@ class TerminalView: NSView, NSTextInputClient {
         guard shellSpawned, let core = core else { return false }
         return aterm_core_workspace_is_alive(core) != 0
     }
+    var onActivity: (() -> Void)?
     var onShellSpawned: ((Int32) -> Void)?
     var workspaceName: String = "main"
     var spawnCommand: String?  // nil = default shell, "claude" = run claude directly
@@ -20,6 +21,7 @@ class TerminalView: NSView, NSTextInputClient {
     private var shellSpawned = false
     private var lastAppliedThemeMode: AtermThemeMode?
     private var isDraggingSelection = false
+    private var dragStartGridPoint: (col: UInt32, row: Int32)?
 
     // Ghostty pattern: set to non-nil during keyDown to accumulate insertText contents
     private var keyTextAccumulator: [String]?
@@ -88,6 +90,7 @@ class TerminalView: NSView, NSTextInputClient {
             guard let userdata = userdata else { return }
             let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
             DispatchQueue.main.async {
+                view.onActivity?()
                 view.needsDisplay = true
             }
         }, ud)
@@ -399,23 +402,27 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func mouseDown(with event: NSEvent) {
         guard let core = core else { return }
-        
+
         // Reset focus
         window?.makeFirstResponder(self)
 
-        if let pt = gridPoint(for: event) {
-            aterm_core_selection_start(core, pt.col, pt.row, 0) // side 0 = Left
-            isDraggingSelection = true
-            aterm_core_render(core)
-        } else {
-            aterm_core_selection_clear(core)
-            aterm_core_render(core)
-        }
+        // Click to deselect: clear any existing selection immediately
+        aterm_core_selection_clear(core)
+        isDraggingSelection = false
+        dragStartGridPoint = gridPoint(for: event)
+        aterm_core_render(core)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let core = core, isDraggingSelection else { return }
-        if let pt = gridPoint(for: event) {
+        guard let core = core else { return }
+
+        // Start selection on first drag from the mouseDown point
+        if !isDraggingSelection, let start = dragStartGridPoint {
+            aterm_core_selection_start(core, start.col, start.row, 0)
+            isDraggingSelection = true
+        }
+
+        if isDraggingSelection, let pt = gridPoint(for: event) {
             aterm_core_selection_update(core, pt.col, pt.row, 0)
             aterm_core_render(core)
         }
@@ -423,6 +430,7 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func mouseUp(with event: NSEvent) {
         isDraggingSelection = false
+        dragStartGridPoint = nil
     }
 
     // MARK: - Scroll
@@ -524,7 +532,10 @@ class TerminalView: NSView, NSTextInputClient {
             aterm_core_set_dirty_callback(core, { userdata in
                 guard let userdata = userdata else { return }
                 let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
-                DispatchQueue.main.async { view.needsDisplay = true }
+                DispatchQueue.main.async {
+                    view.onActivity?()
+                    view.needsDisplay = true
+                }
             }, ud)
 
             startDisplayLink()
@@ -593,28 +604,14 @@ class TerminalView: NSView, NSTextInputClient {
             return true
         case 9: // Cmd+V → paste from clipboard
             let pb = NSPasteboard.general
-            
-            // Check for image first
-            if let image = pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage {
-                if let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
-                    if let pngData = bitmap.representation(using: .png, properties: [:]) {
-                        let uuid = UUID().uuidString
-                        let tempPath = "/tmp/aterm-paste-\(uuid).png"
-                        do {
-                            try pngData.write(to: URL(fileURLWithPath: tempPath))
-                            // "Pass file path to PTY as input — CLI's native image paste format"
-                            tempPath.withCString { ptr in
-                                aterm_core_write_pty(core, ptr, tempPath.utf8.count)
-                            }
-                            return true
-                        } catch {
-                            NSLog("[aterm] Failed to write temp image: \(error)")
-                        }
-                    }
-                }
+
+            // Image in clipboard: don't intercept — let CLI read clipboard directly
+            if pb.canReadObject(forClasses: [NSImage.self], options: nil),
+               pb.string(forType: .string) == nil {
+                return true
             }
-            
-            // Fallback to text
+
+            // Text paste
             if let text = pb.string(forType: .string) {
                 text.withCString { ptr in
                     aterm_core_write_pty(core, ptr, text.utf8.count)
