@@ -1,8 +1,8 @@
 //! wgpu + glyphon terminal grid renderer.
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution,
-    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use wgpu::util::DeviceExt;
 
@@ -10,9 +10,8 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::term::{cell::Cell, cell::Flags, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
-const DEFAULT_FG: GlyphonColor = GlyphonColor::rgb(0xe8, 0xe4, 0xe0);
-const DEFAULT_BG: GlyphonColor = GlyphonColor::rgb(0x00, 0x00, 0x00);
-const CURSOR_FG: GlyphonColor = GlyphonColor::rgb(0xff, 0xff, 0xff);
+const TERMINAL_FONT_SIZE_PX: f32 = 18.0;
+const TERMINAL_LINE_HEIGHT_PX: f32 = 26.0;
 const NERD_FONT_FAMILY_PREFERENCES: &[&str] = &[
     "JetBrainsMono Nerd Font Mono",
     "JetBrainsMono Nerd Font",
@@ -31,8 +30,7 @@ const NERD_FONT_FAMILY_PREFERENCES: &[&str] = &[
     "Symbols Nerd Font",
 ];
 #[cfg(target_os = "macos")]
-const SYSTEM_MONOSPACE_FAMILY_PREFERENCES: &[&str] =
-    &["SF Mono", "Menlo", "Monaco", "Courier New"];
+const SYSTEM_MONOSPACE_FAMILY_PREFERENCES: &[&str] = &["SF Mono", "Menlo", "Monaco", "Courier New"];
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_MONOSPACE_FAMILY_PREFERENCES: &[&str] = &[
     "DejaVu Sans Mono",
@@ -40,6 +38,104 @@ const SYSTEM_MONOSPACE_FAMILY_PREFERENCES: &[&str] = &[
     "Liberation Mono",
     "Courier New",
 ];
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TerminalThemeMode {
+    Dark,
+    Light,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ThemeRgb {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+impl ThemeRgb {
+    const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct ThemePalette {
+    background: ThemeRgb,
+    foreground: ThemeRgb,
+    cursor: ThemeRgb,
+    selection_fg: ThemeRgb,
+    selection_bg: [f32; 4],
+    ansi: [ThemeRgb; 16],
+}
+
+const DARK_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x48, 0x4f, 0x58),
+    ThemeRgb::new(0xf8, 0x53, 0x49),
+    ThemeRgb::new(0x3f, 0xb9, 0x50),
+    ThemeRgb::new(0xd4, 0xa5, 0x74),
+    ThemeRgb::new(0x8b, 0x5c, 0xf6),
+    ThemeRgb::new(0xec, 0x48, 0x99),
+    ThemeRgb::new(0x06, 0xb6, 0xd4),
+    ThemeRgb::new(0xb1, 0xba, 0xc4),
+    ThemeRgb::new(0x6e, 0x76, 0x81),
+    ThemeRgb::new(0xff, 0x7b, 0x72),
+    ThemeRgb::new(0x56, 0xd3, 0x64),
+    ThemeRgb::new(0xe3, 0xc1, 0x9c),
+    ThemeRgb::new(0xa7, 0x8b, 0xfa),
+    ThemeRgb::new(0xf4, 0x72, 0xb6),
+    ThemeRgb::new(0x22, 0xd3, 0xee),
+    ThemeRgb::new(0xf0, 0xf6, 0xfc),
+];
+
+const LIGHT_ANSI: [ThemeRgb; 16] = [
+    ThemeRgb::new(0x24, 0x29, 0x2f),
+    ThemeRgb::new(0xcf, 0x22, 0x2e),
+    ThemeRgb::new(0x1a, 0x7f, 0x37),
+    ThemeRgb::new(0x93, 0x57, 0x0a),
+    ThemeRgb::new(0x6d, 0x28, 0xd9),
+    ThemeRgb::new(0xbf, 0x39, 0x89),
+    ThemeRgb::new(0x0e, 0x74, 0x90),
+    ThemeRgb::new(0x8b, 0x94, 0x9e),
+    ThemeRgb::new(0x57, 0x60, 0x6a),
+    ThemeRgb::new(0xd5, 0x53, 0x4a),
+    ThemeRgb::new(0x2e, 0xa4, 0x4f),
+    ThemeRgb::new(0xb4, 0x53, 0x09),
+    ThemeRgb::new(0x8b, 0x5c, 0xf6),
+    ThemeRgb::new(0xec, 0x48, 0x99),
+    ThemeRgb::new(0x06, 0xb6, 0xd4),
+    ThemeRgb::new(0x6e, 0x77, 0x81),
+];
+
+fn theme_palette(mode: TerminalThemeMode) -> ThemePalette {
+    match mode {
+        TerminalThemeMode::Dark => ThemePalette {
+            background: ThemeRgb::new(0x0d, 0x11, 0x17),
+            foreground: ThemeRgb::new(0xc9, 0xd1, 0xd9),
+            cursor: ThemeRgb::new(0xd4, 0xa5, 0x74),
+            selection_fg: ThemeRgb::new(0xff, 0xff, 0xff),
+            selection_bg: [
+                0x2a as f32 / 255.0,
+                0x3a as f32 / 255.0,
+                0x50 as f32 / 255.0,
+                1.0,
+            ],
+            ansi: DARK_ANSI,
+        },
+        TerminalThemeMode::Light => ThemePalette {
+            background: ThemeRgb::new(0xfa, 0xf6, 0xf0),
+            foreground: ThemeRgb::new(0x24, 0x29, 0x2f),
+            cursor: ThemeRgb::new(0xb4, 0x53, 0x09),
+            selection_fg: ThemeRgb::new(0x24, 0x29, 0x2f),
+            selection_bg: [
+                0xd4 as f32 / 255.0,
+                0xa5 as f32 / 255.0,
+                0x74 as f32 / 255.0,
+                0.15,
+            ],
+            ansi: LIGHT_ANSI,
+        },
+    }
+}
 
 // --- wgpu colored-rectangle pipeline for selection/background rendering ---
 
@@ -132,34 +228,46 @@ impl RectRenderer {
             multiview: None,
             cache: None,
         });
-        Self { pipeline, vertices: Vec::new() }
+        Self {
+            pipeline,
+            vertices: Vec::new(),
+        }
     }
 
     fn clear(&mut self) {
         self.vertices.clear();
     }
 
-    fn push_rect(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        vp_w: f32,
-        vp_h: f32,
-        color: [f32; 4],
-    ) {
+    fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, vp_w: f32, vp_h: f32, color: [f32; 4]) {
         let x0 = x / vp_w * 2.0 - 1.0;
         let y0 = 1.0 - y / vp_h * 2.0;
         let x1 = (x + w) / vp_w * 2.0 - 1.0;
         let y1 = 1.0 - (y + h) / vp_h * 2.0;
         self.vertices.extend_from_slice(&[
-            RectVertex { position: [x0, y0], color },
-            RectVertex { position: [x1, y0], color },
-            RectVertex { position: [x0, y1], color },
-            RectVertex { position: [x1, y0], color },
-            RectVertex { position: [x1, y1], color },
-            RectVertex { position: [x0, y1], color },
+            RectVertex {
+                position: [x0, y0],
+                color,
+            },
+            RectVertex {
+                position: [x1, y0],
+                color,
+            },
+            RectVertex {
+                position: [x0, y1],
+                color,
+            },
+            RectVertex {
+                position: [x1, y0],
+                color,
+            },
+            RectVertex {
+                position: [x1, y1],
+                color,
+            },
+            RectVertex {
+                position: [x0, y1],
+                color,
+            },
         ]);
     }
 
@@ -175,11 +283,13 @@ impl RectRenderer {
             )
         };
 
-        Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rect_vertices"),
-            contents: bytes,
-            usage: wgpu::BufferUsages::VERTEX,
-        }))
+        Some(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rect_vertices"),
+                contents: bytes,
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+        )
     }
 }
 
@@ -197,9 +307,11 @@ pub struct TerminalGridRenderer {
     cursor_buffer: Buffer,
     cursor_text: String,
     cursor_width_cells: u8,
+    last_cursor_color: Option<ThemeRgb>,
     rect_renderer: RectRenderer,
     last_font_size: f32,
     last_line_height: f32,
+    theme_mode: TerminalThemeMode,
 }
 
 struct RenderCell {
@@ -216,10 +328,11 @@ impl TerminalGridRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-        scale_factor: f32,
+        theme_mode: TerminalThemeMode,
+        _scale_factor: f32,
     ) -> Self {
-        let font_size = 13.0 * scale_factor;
-        let line_height = 19.0 * scale_factor;
+        let font_size = TERMINAL_FONT_SIZE_PX;
+        let line_height = TERMINAL_LINE_HEIGHT_PX;
         let mut font_system = FontSystem::new();
         configure_terminal_font_system(&mut font_system);
         let swash_cache = SwashCache::new();
@@ -230,13 +343,8 @@ impl TerminalGridRenderer {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let rect_renderer = RectRenderer::new(device, format);
 
-        let mut cursor_buffer =
-            Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        cursor_buffer.set_size(
-            &mut font_system,
-            Some(font_size * 0.6),
-            Some(line_height),
-        );
+        let mut cursor_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        cursor_buffer.set_size(&mut font_system, Some(font_size * 0.6), Some(line_height));
         cursor_buffer.set_monospace_width(&mut font_system, Some(font_size * 0.6));
 
         Self {
@@ -251,10 +359,20 @@ impl TerminalGridRenderer {
             cursor_buffer,
             cursor_text: String::new(),
             cursor_width_cells: 0,
+            last_cursor_color: None,
             rect_renderer,
             last_font_size: -1.0,
             last_line_height: -1.0,
+            theme_mode,
         }
+    }
+
+    pub fn set_theme_mode(&mut self, theme_mode: TerminalThemeMode) {
+        if self.theme_mode == theme_mode {
+            return;
+        }
+        self.theme_mode = theme_mode;
+        self.last_cursor_color = None;
     }
 
     pub fn cell_width(&self) -> f32 {
@@ -283,6 +401,7 @@ impl TerminalGridRenderer {
         height: u32,
     ) {
         let render_start = std::time::Instant::now();
+        let palette = theme_palette(self.theme_mode);
         self.viewport.update(queue, Resolution { width, height });
 
         let (cols_u16, rows_u16) = self.grid_size(width as f32, height as f32);
@@ -342,7 +461,7 @@ impl TerminalGridRenderer {
             let cell = indexed.cell;
             let is_selected = selection.as_ref().map_or(false, |sel| sel.contains(point));
 
-            if let Some(bg) = cell_background_rgba(cell, is_selected) {
+            if let Some(bg) = cell_background_rgba(cell, is_selected, &palette) {
                 self.rect_renderer.push_rect(
                     4.0 + col as f32 * cw,
                     4.0 + row_index as f32 * lh,
@@ -373,7 +492,7 @@ impl TerminalGridRenderer {
                 continue;
             }
 
-            let fg = cell_foreground(cell, is_selected);
+            let fg = cell_foreground(cell, is_selected, &palette);
             let width_cells = if cell.flags.contains(Flags::WIDE_CHAR) && col + 1 < cols {
                 2
             } else {
@@ -415,13 +534,14 @@ impl TerminalGridRenderer {
                     top: 4.0 + row as f32 * lh,
                     scale: 1.0,
                     bounds,
-                    default_color: DEFAULT_FG,
+                    default_color: glyphon_from_rgb(palette.foreground),
                     custom_glyphs: &[],
                 });
             }
         }
 
         if cursor_visible {
+            let cursor_color = glyphon_from_rgb(palette.cursor);
             if let Some(cursor_row) = cursor_row {
                 text_areas.push(TextArea {
                     buffer: &self.cursor_buffer,
@@ -429,7 +549,7 @@ impl TerminalGridRenderer {
                     top: 4.0 + cursor_row as f32 * lh,
                     scale: 1.0,
                     bounds,
-                    default_color: CURSOR_FG,
+                    default_color: cursor_color,
                     custom_glyphs: &[],
                 });
             }
@@ -461,9 +581,9 @@ impl TerminalGridRenderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
+                            r: palette.background.r as f64 / 255.0,
+                            g: palette.background.g as f64 / 255.0,
+                            b: palette.background.b as f64 / 255.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -512,7 +632,7 @@ impl TerminalGridRenderer {
             self.cells.push(RenderCell {
                 buffer,
                 text: String::new(),
-                fg: DEFAULT_FG,
+                fg: glyphon_from_rgb(theme_palette(self.theme_mode).foreground),
                 width_cells: 1,
                 has_non_ascii: false,
                 active: false,
@@ -529,7 +649,8 @@ impl TerminalGridRenderer {
                     .set_monospace_width(&mut self.font_system, Some(cw));
             }
 
-            self.cursor_buffer.set_metrics(&mut self.font_system, metrics);
+            self.cursor_buffer
+                .set_metrics(&mut self.font_system, metrics);
             self.cursor_buffer
                 .set_size(&mut self.font_system, Some(cw), Some(self.line_height));
             self.cursor_buffer
@@ -541,13 +662,7 @@ impl TerminalGridRenderer {
         }
     }
 
-    fn update_cell(
-        &mut self,
-        slot: usize,
-        text: &str,
-        fg: GlyphonColor,
-        width_cells: u8,
-    ) -> bool {
+    fn update_cell(&mut self, slot: usize, text: &str, fg: GlyphonColor, width_cells: u8) -> bool {
         let cw = self.cell_width();
         let width = cw * width_cells as f32;
         let metrics = Metrics::new(self.font_size, self.line_height);
@@ -588,6 +703,8 @@ impl TerminalGridRenderer {
         let cw = self.cell_width();
         let width = cw * width_cells as f32;
         let text = if width_cells == 2 { "██" } else { "█" };
+        let palette = theme_palette(self.theme_mode);
+        let cursor_color = glyphon_from_rgb(palette.cursor);
 
         self.cursor_buffer.set_metrics(
             &mut self.font_system,
@@ -598,18 +715,20 @@ impl TerminalGridRenderer {
         self.cursor_buffer
             .set_monospace_width(&mut self.font_system, Some(cw));
 
-        if self.cursor_width_cells != width_cells || self.cursor_text != text {
+        if self.cursor_width_cells != width_cells
+            || self.cursor_text != text
+            || self.last_cursor_color != Some(palette.cursor)
+        {
             self.cursor_buffer.set_text(
                 &mut self.font_system,
                 text,
-                Attrs::new()
-                    .family(Family::Monospace)
-                    .color(CURSOR_FG),
+                Attrs::new().family(Family::Monospace).color(cursor_color),
                 Shaping::Basic,
             );
             self.cursor_text.clear();
             self.cursor_text.push_str(text);
             self.cursor_width_cells = width_cells;
+            self.last_cursor_color = Some(palette.cursor);
         }
     }
 }
@@ -638,33 +757,35 @@ fn cell_text(cell: &Cell) -> String {
     text
 }
 
-fn cell_foreground(cell: &Cell, is_selected: bool) -> GlyphonColor {
+fn cell_foreground(cell: &Cell, is_selected: bool, palette: &ThemePalette) -> GlyphonColor {
     if is_selected {
-        return CURSOR_FG;
+        return glyphon_from_rgb(palette.selection_fg);
     }
 
     if cell.flags.contains(Flags::INVERSE) {
-        return ansi_to_glyphon(&cell.bg);
+        return ansi_to_glyphon(&cell.bg, palette);
     }
 
-    ansi_to_glyphon(&cell.fg)
+    ansi_to_glyphon(&cell.fg, palette)
 }
 
-fn cell_background_rgba(cell: &Cell, is_selected: bool) -> Option<[f32; 4]> {
+fn cell_background_rgba(
+    cell: &Cell,
+    is_selected: bool,
+    palette: &ThemePalette,
+) -> Option<[f32; 4]> {
     if is_selected {
-        return Some([0.2, 0.4, 0.8, 0.7]);
+        return Some(palette.selection_bg);
     }
 
     if cell.flags.contains(Flags::INVERSE) {
-        return Some(color_to_rect_rgba(ansi_to_glyphon(&cell.fg)));
+        return Some(color_to_rect_rgba(ansi_to_glyphon(&cell.fg, palette)));
     }
 
-    // Force a pure black terminal background for all normal cells. This avoids
-    // CLI-specific ANSI background fills (for example Gemini's gray panel) from
-    // overriding the app-level black canvas. Selection and inverse are handled
-    // above as explicit overlays.
-    let _ = cell;
-    None
+    match cell.bg {
+        AnsiColor::Named(NamedColor::Background) => None,
+        _ => Some(color_to_rect_rgba(ansi_to_glyphon(&cell.bg, palette))),
+    }
 }
 
 fn color_to_rect_rgba(color: GlyphonColor) -> [f32; 4] {
@@ -676,65 +797,65 @@ fn color_to_rect_rgba(color: GlyphonColor) -> [f32; 4] {
     ]
 }
 
-fn ansi_to_glyphon(color: &AnsiColor) -> GlyphonColor {
+fn glyphon_from_rgb(rgb: ThemeRgb) -> GlyphonColor {
+    GlyphonColor::rgb(rgb.r, rgb.g, rgb.b)
+}
+
+fn ansi_to_glyphon(color: &AnsiColor, palette: &ThemePalette) -> GlyphonColor {
     match color {
-        AnsiColor::Named(named) => named_to_glyphon(*named),
+        AnsiColor::Named(named) => named_to_glyphon(*named, palette),
         AnsiColor::Spec(rgb) => GlyphonColor::rgb(rgb.r, rgb.g, rgb.b),
-        AnsiColor::Indexed(idx) => indexed_to_glyphon(*idx),
+        AnsiColor::Indexed(idx) => indexed_to_glyphon(*idx, palette),
     }
 }
 
-fn named_to_glyphon(named: NamedColor) -> GlyphonColor {
+fn named_to_glyphon(named: NamedColor, palette: &ThemePalette) -> GlyphonColor {
     match named {
-        NamedColor::Black => GlyphonColor::rgb(0x1a, 0x1a, 0x2e),
-        NamedColor::Red => GlyphonColor::rgb(0xcc, 0x33, 0x33),
-        NamedColor::Green => GlyphonColor::rgb(0x4e, 0x9a, 0x06),
-        NamedColor::Yellow => GlyphonColor::rgb(0xc4, 0xa0, 0x00),
-        NamedColor::Blue => GlyphonColor::rgb(0x34, 0x65, 0xa4),
-        NamedColor::Magenta => GlyphonColor::rgb(0x75, 0x50, 0x7b),
-        NamedColor::Cyan => GlyphonColor::rgb(0x06, 0x98, 0x9a),
-        NamedColor::White => GlyphonColor::rgb(0xd3, 0xd7, 0xcf),
-        NamedColor::BrightBlack => GlyphonColor::rgb(0x55, 0x57, 0x53),
-        NamedColor::BrightRed => GlyphonColor::rgb(0xef, 0x29, 0x29),
-        NamedColor::BrightGreen => GlyphonColor::rgb(0x8a, 0xe2, 0x34),
-        NamedColor::BrightYellow => GlyphonColor::rgb(0xfc, 0xe9, 0x4f),
-        NamedColor::BrightBlue => GlyphonColor::rgb(0x72, 0x9f, 0xcf),
-        NamedColor::BrightMagenta => GlyphonColor::rgb(0xad, 0x7f, 0xa8),
-        NamedColor::BrightCyan => GlyphonColor::rgb(0x34, 0xe2, 0xe2),
-        NamedColor::BrightWhite => GlyphonColor::rgb(0xee, 0xee, 0xec),
-        NamedColor::Foreground => DEFAULT_FG,
-        NamedColor::Background => DEFAULT_BG,
-        _ => DEFAULT_FG,
+        NamedColor::Black => glyphon_from_rgb(palette.ansi[0]),
+        NamedColor::Red => glyphon_from_rgb(palette.ansi[1]),
+        NamedColor::Green => glyphon_from_rgb(palette.ansi[2]),
+        NamedColor::Yellow => glyphon_from_rgb(palette.ansi[3]),
+        NamedColor::Blue => glyphon_from_rgb(palette.ansi[4]),
+        NamedColor::Magenta => glyphon_from_rgb(palette.ansi[5]),
+        NamedColor::Cyan => glyphon_from_rgb(palette.ansi[6]),
+        NamedColor::White => glyphon_from_rgb(palette.ansi[7]),
+        NamedColor::BrightBlack => glyphon_from_rgb(palette.ansi[8]),
+        NamedColor::BrightRed => glyphon_from_rgb(palette.ansi[9]),
+        NamedColor::BrightGreen => glyphon_from_rgb(palette.ansi[10]),
+        NamedColor::BrightYellow => glyphon_from_rgb(palette.ansi[11]),
+        NamedColor::BrightBlue => glyphon_from_rgb(palette.ansi[12]),
+        NamedColor::BrightMagenta => glyphon_from_rgb(palette.ansi[13]),
+        NamedColor::BrightCyan => glyphon_from_rgb(palette.ansi[14]),
+        NamedColor::BrightWhite => glyphon_from_rgb(palette.ansi[15]),
+        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
+            glyphon_from_rgb(palette.foreground)
+        }
+        NamedColor::Background => glyphon_from_rgb(palette.background),
+        NamedColor::Cursor => glyphon_from_rgb(palette.cursor),
+        NamedColor::DimBlack => glyphon_from_rgb(palette.ansi[0]),
+        NamedColor::DimRed => glyphon_from_rgb(palette.ansi[1]),
+        NamedColor::DimGreen => glyphon_from_rgb(palette.ansi[2]),
+        NamedColor::DimYellow => glyphon_from_rgb(palette.ansi[3]),
+        NamedColor::DimBlue => glyphon_from_rgb(palette.ansi[4]),
+        NamedColor::DimMagenta => glyphon_from_rgb(palette.ansi[5]),
+        NamedColor::DimCyan => glyphon_from_rgb(palette.ansi[6]),
+        NamedColor::DimWhite => glyphon_from_rgb(palette.ansi[7]),
     }
 }
 
-fn indexed_to_glyphon(idx: u8) -> GlyphonColor {
+fn indexed_to_glyphon(idx: u8, palette: &ThemePalette) -> GlyphonColor {
     if idx < 16 {
-        return named_to_glyphon(match idx {
-            0 => NamedColor::Black,
-            1 => NamedColor::Red,
-            2 => NamedColor::Green,
-            3 => NamedColor::Yellow,
-            4 => NamedColor::Blue,
-            5 => NamedColor::Magenta,
-            6 => NamedColor::Cyan,
-            7 => NamedColor::White,
-            8 => NamedColor::BrightBlack,
-            9 => NamedColor::BrightRed,
-            10 => NamedColor::BrightGreen,
-            11 => NamedColor::BrightYellow,
-            12 => NamedColor::BrightBlue,
-            13 => NamedColor::BrightMagenta,
-            14 => NamedColor::BrightCyan,
-            15 => NamedColor::BrightWhite,
-            _ => unreachable!(),
-        });
+        return glyphon_from_rgb(palette.ansi[idx as usize]);
     }
 
     if idx < 232 {
         let i = idx - 16;
         let r = if i / 36 > 0 { (i / 36) * 40 + 55 } else { 0 };
-        let g = if (i % 36) / 6 > 0 { ((i % 36) / 6) * 40 + 55 } else { 0 };
+        let g = if (i % 36) / 6 > 0 {
+            ((i % 36) / 6) * 40 + 55
+        } else {
+            0
+        };
         let b = if i % 6 > 0 { (i % 6) * 40 + 55 } else { 0 };
         return GlyphonColor::rgb(r, g, b);
     }
@@ -770,7 +891,8 @@ fn detect_nerd_font_family(font_system: &FontSystem) -> Option<String> {
         .filter(|family| is_nerd_font_family_name(family))
         .collect();
 
-    fallback_candidates.sort_by(|left, right| nerd_font_sort_key(left).cmp(&nerd_font_sort_key(right)));
+    fallback_candidates
+        .sort_by(|left, right| nerd_font_sort_key(left).cmp(&nerd_font_sort_key(right)));
     fallback_candidates.dedup();
     fallback_candidates.into_iter().next()
 }

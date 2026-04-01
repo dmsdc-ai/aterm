@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use crate::pty::{PtyManager, PtyOutputSignal};
-use crate::renderer::TerminalGridRenderer;
+use crate::renderer::{TerminalGridRenderer, TerminalThemeMode};
 use crate::terminal::TerminalState;
 
 // -- Named key codes --
@@ -60,6 +60,7 @@ pub struct AtermCore {
     dirty: Arc<AtomicBool>,
     dirty_callback: Option<DirtyCallback>,
     dirty_userdata: *mut c_void,
+    theme_mode: TerminalThemeMode,
 }
 
 // SAFETY: The raw pointer dirty_userdata is only used from the main thread callback
@@ -79,6 +80,7 @@ impl AtermCore {
             dirty: Arc::new(AtomicBool::new(false)),
             dirty_callback: None,
             dirty_userdata: std::ptr::null_mut(),
+            theme_mode: TerminalThemeMode::Dark,
         }
     }
 
@@ -163,7 +165,8 @@ impl AtermCore {
         };
         surface.configure(&device, &config);
 
-        let renderer = TerminalGridRenderer::new(&device, &queue, format, scale.max(1.0));
+        let renderer =
+            TerminalGridRenderer::new(&device, &queue, format, self.theme_mode, scale.max(1.0));
         let (cols, rows) = renderer.grid_size(width as f32, height as f32);
         let terminal = TerminalState::new(cols as usize, rows as usize);
 
@@ -179,7 +182,14 @@ impl AtermCore {
         0 // success
     }
 
-    fn spawn_shell(&mut self, name: &str, cwd: &str, command: Option<&str>, cols: u16, rows: u16) -> i32 {
+    fn spawn_shell(
+        &mut self,
+        name: &str,
+        cwd: &str,
+        command: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> i32 {
         // Parse command string into program + args directly.
         // augmented_path_env() and resolve_command_binary() handle PATH resolution.
         let (cmd, args) = match command {
@@ -187,7 +197,14 @@ impl AtermCore {
                 let parts: Vec<&str> = s.split_whitespace().collect();
                 let program = parts[0].to_string();
                 let cmd_args: Vec<String> = parts[1..].iter().map(|a| a.to_string()).collect();
-                (Some(program), if cmd_args.is_empty() { None } else { Some(cmd_args) })
+                (
+                    Some(program),
+                    if cmd_args.is_empty() {
+                        None
+                    } else {
+                        Some(cmd_args)
+                    },
+                )
             }
             _ => (None, None),
         };
@@ -317,6 +334,13 @@ impl AtermCore {
         output.present();
     }
 
+    fn set_theme_mode(&mut self, theme_mode: TerminalThemeMode) {
+        self.theme_mode = theme_mode;
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.set_theme_mode(theme_mode);
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -405,6 +429,16 @@ pub unsafe extern "C" fn aterm_core_free(core: *mut AtermCore) {
     }
 }
 
+/// Stop the PTY output signal callback. Must be called BEFORE aterm_core_free
+/// to prevent use-after-free when the host view is deallocated.
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_stop(core: *mut AtermCore) {
+    if core.is_null() {
+        return;
+    }
+    (*core).pty_signal.stop();
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_init_gpu(
     core: *mut AtermCore,
@@ -431,9 +465,17 @@ pub unsafe extern "C" fn aterm_core_spawn_shell(
     if core.is_null() || cwd.is_null() {
         return -1;
     }
-    let name_str = if name.is_null() { "main".into() } else { CStr::from_ptr(name).to_string_lossy() };
+    let name_str = if name.is_null() {
+        "main".into()
+    } else {
+        CStr::from_ptr(name).to_string_lossy()
+    };
     let cwd_str = CStr::from_ptr(cwd).to_string_lossy();
-    let cmd = if command.is_null() { None } else { Some(CStr::from_ptr(command).to_string_lossy()) };
+    let cmd = if command.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(command).to_string_lossy())
+    };
     (*core).spawn_shell(&name_str, &cwd_str, cmd.as_deref(), cols, rows)
 }
 
@@ -507,6 +549,25 @@ pub unsafe extern "C" fn aterm_core_grid_size(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn aterm_core_cell_size(
+    core: *const AtermCore,
+    out_width: *mut f32,
+    out_height: *mut f32,
+) {
+    if core.is_null() {
+        return;
+    }
+    if let Some(ref renderer) = (*core).renderer {
+        if !out_width.is_null() {
+            *out_width = renderer.cell_width();
+        }
+        if !out_height.is_null() {
+            *out_height = renderer.cell_height();
+        }
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn aterm_core_take_dirty(core: *mut AtermCore) -> i32 {
     if core.is_null() {
         return 0;
@@ -541,6 +602,19 @@ pub unsafe extern "C" fn aterm_core_sync_pty(core: *mut AtermCore) {
         return;
     }
     (*core).sync_pty();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_set_theme_mode(core: *mut AtermCore, mode: u8) {
+    if core.is_null() {
+        return;
+    }
+    let theme_mode = if mode == 1 {
+        TerminalThemeMode::Light
+    } else {
+        TerminalThemeMode::Dark
+    };
+    (*core).set_theme_mode(theme_mode);
 }
 
 #[no_mangle]
@@ -730,7 +804,7 @@ fn config_dir_exists(config_dir_name: &str) -> bool {
 
 // -- Session persistence FFI --
 
-use crate::session::{SessionEntryFFI, SessionStore, sessions_path};
+use crate::session::{sessions_path, SessionEntryFFI, SessionStore};
 
 #[no_mangle]
 pub unsafe extern "C" fn aterm_session_count(_core: *const AtermCore) -> u32 {
@@ -812,7 +886,8 @@ fn global_app() -> &'static Arc<std::sync::Mutex<AtermApp>> {
 #[repr(C)]
 pub struct AtermHostCallbacks {
     pub userdata: *mut c_void,
-    pub create_workspace_view: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    pub create_workspace_view:
+        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
     pub close_workspace_view: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub focus_workspace: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub list_workspaces: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_char>,
@@ -924,23 +999,28 @@ pub unsafe extern "C" fn aterm_dispatch(
         Err(e) => aterm_session::action::ActionResponse::error(e.to_string()),
     };
 
-    let json = serde_json::to_string(&response).unwrap_or_else(|_| {
-        r#"{"status":"Error","message":"serialize failed"}"#.to_string()
-    });
+    let json = serde_json::to_string(&response)
+        .unwrap_or_else(|_| r#"{"status":"Error","message":"serialize failed"}"#.to_string());
     ipc_to_c_string(&json)
 }
 
 /// Get the IPC socket path. Caller must free with aterm_core_free_string.
 #[no_mangle]
 pub extern "C" fn aterm_ipc_socket_path() -> *mut c_char {
-    let path = global_app().lock().map(|app| app.socket_path().to_string()).unwrap_or_default();
+    let path = global_app()
+        .lock()
+        .map(|app| app.socket_path().to_string())
+        .unwrap_or_default();
     ipc_to_c_string(&path)
 }
 
 /// Get the IPC auth token. Caller must free with aterm_core_free_string.
 #[no_mangle]
 pub extern "C" fn aterm_ipc_token() -> *mut c_char {
-    let token = global_app().lock().map(|app| app.token().to_string()).unwrap_or_default();
+    let token = global_app()
+        .lock()
+        .map(|app| app.token().to_string())
+        .unwrap_or_default();
     ipc_to_c_string(&token)
 }
 

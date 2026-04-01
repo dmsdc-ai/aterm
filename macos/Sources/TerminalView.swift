@@ -18,9 +18,14 @@ class TerminalView: NSView, NSTextInputClient {
     private var inputContext_: NSTextInputContext?
     private var hasInitializedCore = false
     private var shellSpawned = false
+    private var lastAppliedThemeMode: AtermThemeMode?
+    private var isDraggingSelection = false
 
     // Ghostty pattern: set to non-nil during keyDown to accumulate insertText contents
     private var keyTextAccumulator: [String]?
+
+    // Scroll: accumulate fractional trackpad deltas before converting to lines
+    private var scrollAccumulator: CGFloat = 0.0
 
     // MARK: - Init
 
@@ -40,14 +45,15 @@ class TerminalView: NSView, NSTextInputClient {
         metalLayer.device = MTLCreateSystemDefaultDevice()
         metalLayer.pixelFormat = .bgra8Unorm_srgb
         metalLayer.framebufferOnly = true
-        metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         layer = metalLayer
+        syncMetalLayerBacking()
 
         // Create core
         core = aterm_core_new()
 
         // Custom NSTextInputContext for CAMetalLayer-based view
         inputContext_ = NSTextInputContext(client: self)
+        applyTheme()
     }
 
     override var inputContext: NSTextInputContext? {
@@ -56,9 +62,10 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        applyTheme()
         guard !hasInitializedCore else { return }
-        guard let window = self.window, let core = core else { return }
-        hasInitializedCore = true
+        guard self.window != nil, let core = core else { return }
+        syncMetalLayerBacking()
 
         // Init GPU with this view's pointer
         let viewPtr = Unmanaged.passUnretained(self).toOpaque()
@@ -66,12 +73,14 @@ class TerminalView: NSView, NSTextInputClient {
         let w = UInt32(size.width)
         let h = UInt32(size.height)
 
-        let scale = Float(window.backingScaleFactor)
+        let scale = Float(currentBackingScaleFactor())
         let result = aterm_core_init_gpu(core, viewPtr, w, h, scale)
         if result != 0 {
             NSLog("[aterm] GPU init failed: %d", result)
-            return
+            return // hasInitializedCore stays false — allows retry when view becomes visible
         }
+
+        hasInitializedCore = true
 
         // Set dirty callback — wakes the display link
         let ud = Unmanaged.passUnretained(self).toOpaque()
@@ -86,7 +95,7 @@ class TerminalView: NSView, NSTextInputClient {
         // Start display link for rendering
         startDisplayLink()
 
-        window.makeFirstResponder(self)
+        window?.makeFirstResponder(self)
 
         DispatchQueue.main.async { [weak self] in
             self?.spawnShellIfNeeded()
@@ -94,6 +103,9 @@ class TerminalView: NSView, NSTextInputClient {
     }
 
     deinit {
+        if let core = core {
+            aterm_core_stop(core)
+        }
         stopDisplayLink()
         if let core = core {
             aterm_core_free(core)
@@ -152,16 +164,33 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
+        syncMetalLayerBacking()
         guard let core = core else { return }
 
         let backingSize = convertToBacking(NSRect(origin: .zero, size: newSize)).size
         let w = UInt32(backingSize.width)
         let h = UInt32(backingSize.height)
 
-        (layer as? CAMetalLayer)?.drawableSize = backingSize
         aterm_core_resize(core, w, h)
         spawnShellIfNeeded()
         aterm_core_render(core)
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        syncMetalLayerBacking()
+        guard hasInitializedCore, let core = core else { return }
+
+        let backingSize = convertToBacking(bounds).size
+        let w = UInt32(backingSize.width)
+        let h = UInt32(backingSize.height)
+        aterm_core_resize(core, w, h)
+        aterm_core_render(core)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTheme()
     }
 
     // MARK: - Keyboard Input
@@ -342,70 +371,88 @@ class TerminalView: NSView, NSTextInputClient {
 
     // MARK: - Mouse Selection
 
-    /// Convert view pixel coordinates to terminal cell (col, line)
-    private func pixelToCell(_ point: NSPoint) -> (col: UInt32, line: Int32) {
-        guard let core = core else { return (0, 0) }
-        var cols: UInt16 = 0
-        var rows: UInt16 = 0
+    private func gridPoint(for event: NSEvent) -> (col: UInt32, row: Int32)? {
+        guard let core = core else { return nil }
+        let location = convert(event.locationInWindow, from: nil)
+        
+        // Convert to backing pixels
+        let backingPoint = convertToBacking(NSRect(origin: location, size: .zero)).origin
         let backingSize = convertToBacking(bounds).size
-        aterm_core_grid_size(core, Float(backingSize.width), Float(backingSize.height), &cols, &rows)
-
-        let backingPoint = convertToBacking(point)
-        // Cell size in backing pixels
-        let cellW = backingSize.width / CGFloat(cols)
-        let cellH = backingSize.height / CGFloat(rows)
-
-        let col = UInt32(max(0, min(Int(backingPoint.x / cellW), Int(cols) - 1)))
-        // NSView Y is bottom-up, terminal Y is top-down
-        let flippedY = backingSize.height - backingPoint.y
-        let line = Int32(max(0, min(Int(flippedY / cellH), Int(rows) - 1)))
-
-        return (col, line)
+        
+        // y is flipped in macOS NSView coordinate system (origin bottom-left)
+        // aterm renderer uses origin top-left (4.0 padding)
+        let x = Float(backingPoint.x)
+        let y = Float(backingSize.height - backingPoint.y)
+        
+        var cw: Float = 0
+        var ch: Float = 0
+        aterm_core_cell_size(core, &cw, &ch)
+        
+        guard cw > 0 && ch > 0 else { return nil }
+        
+        // Clamp to grid
+        let col = max(0, Int32((x - 4.0) / cw))
+        let row = max(0, Int32((y - 4.0) / ch))
+        
+        return (col: UInt32(col), row: row)
     }
 
     override func mouseDown(with event: NSEvent) {
         guard let core = core else { return }
-        let loc = convert(event.locationInWindow, from: nil)
-        let cell = pixelToCell(loc)
-        let side: UInt8 = 0 // Left side
+        
+        // Reset focus
+        window?.makeFirstResponder(self)
 
-        // Clear previous selection, start new
-        aterm_core_selection_clear(core)
-        aterm_core_selection_start(core, cell.col, cell.line, side)
-        aterm_core_render(core)
+        if let pt = gridPoint(for: event) {
+            aterm_core_selection_start(core, pt.col, pt.row, 0) // side 0 = Left
+            isDraggingSelection = true
+            aterm_core_render(core)
+        } else {
+            aterm_core_selection_clear(core)
+            aterm_core_render(core)
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let core = core else { return }
-        let loc = convert(event.locationInWindow, from: nil)
-        let cell = pixelToCell(loc)
-        let side: UInt8 = 1 // Right side for drag
-
-        aterm_core_selection_update(core, cell.col, cell.line, side)
-        aterm_core_render(core)
+        guard let core = core, isDraggingSelection else { return }
+        if let pt = gridPoint(for: event) {
+            aterm_core_selection_update(core, pt.col, pt.row, 0)
+            aterm_core_render(core)
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
-        // Selection complete — keep it visible until next click or text input
+        isDraggingSelection = false
     }
 
     // MARK: - Scroll
 
     override func scrollWheel(with event: NSEvent) {
         guard let core = core else { return }
-        // Accumulate scroll delta — positive = scroll up (show history), negative = scroll down
-        let delta: Int32
+
         if event.hasPreciseScrollingDeltas {
-            // Trackpad: smooth scrolling, accumulate fractional lines
-            delta = Int32(-event.scrollingDeltaY / 3.0)
+            // Trackpad: accumulate pixel deltas, convert to terminal lines
+            scrollAccumulator += event.scrollingDeltaY
+            let pixelsPerLine: CGFloat = 3.0
+            let lines = Int32(scrollAccumulator / pixelsPerLine)
+            if lines != 0 {
+                aterm_core_scroll(core, lines)
+                scrollAccumulator -= CGFloat(lines) * pixelsPerLine
+            }
         } else {
-            // Mouse wheel: discrete steps
-            delta = Int32(-event.scrollingDeltaY)
+            // Mouse wheel: discrete steps, 3 lines per notch
+            let delta = Int32(event.scrollingDeltaY * 3.0)
+            if delta != 0 {
+                aterm_core_scroll(core, delta)
+            }
         }
-        if delta != 0 {
-            aterm_core_scroll(core, delta)
-            aterm_core_render(core)
+
+        // Reset accumulator at gesture boundary
+        if event.phase == .ended || event.phase == .cancelled {
+            scrollAccumulator = 0.0
         }
+
+        aterm_core_render(core)
     }
 
     // MARK: - Special Keys (arrows, function keys)
@@ -451,6 +498,76 @@ class TerminalView: NSView, NSTextInputClient {
         onShellSpawned?(result)
     }
 
+    /// Retry GPU init + shell spawn for views that were hidden during initial setup.
+    /// Called by AppDelegate.selectWorkspace when a previously-hidden view becomes visible.
+    func retrySpawnIfNeeded() {
+        guard !shellSpawned else { return }
+
+        if !hasInitializedCore {
+            guard self.window != nil, let core = core else { return }
+            syncMetalLayerBacking()
+
+            let viewPtr = Unmanaged.passUnretained(self).toOpaque()
+            let size = self.convertToBacking(bounds).size
+            let w = UInt32(size.width)
+            let h = UInt32(size.height)
+            let scale = Float(currentBackingScaleFactor())
+            let result = aterm_core_init_gpu(core, viewPtr, w, h, scale)
+            if result != 0 {
+                NSLog("[aterm] GPU init retry failed: %d", result)
+                return
+            }
+
+            hasInitializedCore = true
+
+            let ud = Unmanaged.passUnretained(self).toOpaque()
+            aterm_core_set_dirty_callback(core, { userdata in
+                guard let userdata = userdata else { return }
+                let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
+                DispatchQueue.main.async { view.needsDisplay = true }
+            }, ud)
+
+            startDisplayLink()
+        }
+
+        spawnShellIfNeeded()
+    }
+
+    private func currentBackingScaleFactor() -> CGFloat {
+        return window?.backingScaleFactor
+            ?? window?.screen?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2.0
+    }
+
+    private func applyTheme() {
+        let mode = AtermTheme.mode(for: effectiveAppearance)
+        if lastAppliedThemeMode == mode, let metalLayer = layer as? CAMetalLayer {
+            metalLayer.backgroundColor = AtermTheme.terminalBackground
+                .atermResolvedCGColor(with: effectiveAppearance)
+            return
+        }
+
+        lastAppliedThemeMode = mode
+        if let metalLayer = layer as? CAMetalLayer {
+            metalLayer.backgroundColor = AtermTheme.terminalBackground
+                .atermResolvedCGColor(with: effectiveAppearance)
+        }
+        if let core {
+            aterm_core_set_theme_mode(core, mode.rawValue)
+            needsDisplay = true
+            if hasInitializedCore {
+                aterm_core_render(core)
+            }
+        }
+    }
+
+    private func syncMetalLayerBacking() {
+        guard let metalLayer = layer as? CAMetalLayer else { return }
+        metalLayer.contentsScale = currentBackingScaleFactor()
+        metalLayer.drawableSize = convertToBacking(bounds).size
+    }
+
     // Capture Cmd+key that bypass keyDown
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return false }
@@ -475,7 +592,30 @@ class TerminalView: NSView, NSTextInputClient {
             aterm_core_write_pty(core, "\u{03}", 1)
             return true
         case 9: // Cmd+V → paste from clipboard
-            if let text = NSPasteboard.general.string(forType: .string) {
+            let pb = NSPasteboard.general
+            
+            // Check for image first
+            if let image = pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage {
+                if let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
+                    if let pngData = bitmap.representation(using: .png, properties: [:]) {
+                        let uuid = UUID().uuidString
+                        let tempPath = "/tmp/aterm-paste-\(uuid).png"
+                        do {
+                            try pngData.write(to: URL(fileURLWithPath: tempPath))
+                            // "Pass file path to PTY as input — CLI's native image paste format"
+                            tempPath.withCString { ptr in
+                                aterm_core_write_pty(core, ptr, tempPath.utf8.count)
+                            }
+                            return true
+                        } catch {
+                            NSLog("[aterm] Failed to write temp image: \(error)")
+                        }
+                    }
+                }
+            }
+            
+            // Fallback to text
+            if let text = pb.string(forType: .string) {
                 text.withCString { ptr in
                     aterm_core_write_pty(core, ptr, text.utf8.count)
                 }
@@ -542,9 +682,27 @@ class TerminalView: NSView, NSTextInputClient {
         case #selector(moveToEndOfDocument(_:)):
             aterm_core_named_key(core, UInt32(ATERM_KEY_END))
         case #selector(scrollPageUp(_:)):
-            aterm_core_named_key(core, UInt32(ATERM_KEY_PAGE_UP))
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                var cols: UInt16 = 0
+                var rows: UInt16 = 0
+                let backingSize = convertToBacking(bounds).size
+                aterm_core_grid_size(core, Float(backingSize.width), Float(backingSize.height), &cols, &rows)
+                aterm_core_scroll(core, Int32(max(rows, 2) - 1))
+                aterm_core_render(core)
+            } else {
+                aterm_core_named_key(core, UInt32(ATERM_KEY_PAGE_UP))
+            }
         case #selector(scrollPageDown(_:)):
-            aterm_core_named_key(core, UInt32(ATERM_KEY_PAGE_DOWN))
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                var cols: UInt16 = 0
+                var rows: UInt16 = 0
+                let backingSize = convertToBacking(bounds).size
+                aterm_core_grid_size(core, Float(backingSize.width), Float(backingSize.height), &cols, &rows)
+                aterm_core_scroll(core, -Int32(max(rows, 2) - 1))
+                aterm_core_render(core)
+            } else {
+                aterm_core_named_key(core, UInt32(ATERM_KEY_PAGE_DOWN))
+            }
         default:
             // no-op — prevents NSBeep for unhandled selectors
             break

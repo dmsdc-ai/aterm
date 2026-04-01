@@ -133,12 +133,18 @@ async function cmdReadScreen() {
 async function cmdListWorkspaces() {
   const res = await sendRequest({ cmd: 'list-workspaces' });
   if (res.error) { console.error('Error:', res.error); process.exit(1); }
-  const workspaces = (res.workspaces ?? []).map(w => ({ ...w, created: formatDate(w.created) }));
+  const workspaces = (res.workspaces ?? []).map(w => ({
+    ...w,
+    name: w.name || (w.cwd ? path.basename(w.cwd) : w.id ?? ''),
+    terminal: w.terminal ?? 'aterm',
+    created: formatDate(w.created),
+  }));
   printTable(workspaces, [
-    { key: 'id',      label: 'ID'      },
-    { key: 'cwd',     label: 'CWD'     },
-    { key: 'status',  label: 'STATUS'  },
-    { key: 'created', label: 'CREATED' },
+    { key: 'name',     label: 'NAME'     },
+    { key: 'id',       label: 'ID'       },
+    { key: 'cwd',      label: 'CWD'      },
+    { key: 'terminal', label: 'TERMINAL' },
+    { key: 'created',  label: 'CREATED'  },
   ]);
 }
 

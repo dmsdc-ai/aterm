@@ -18,7 +18,11 @@ pub const PRESETS: &[CliPreset] = &[
         id: "codex",
         label: "Codex",
         command: "codex",
-        args: &["resume", "--last", "--dangerously-bypass-approvals-and-sandbox"],
+        args: &[
+            "resume",
+            "--last",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ],
         icon: "\u{2318}",
     },
     CliPreset {

@@ -55,7 +55,11 @@ impl TeleptyClient {
             let Ok(output) = run_list(args) else {
                 continue;
             };
-            if !output.status.success() && args.len() == 2 && args[0] == "list" && args[1] == "--json" {
+            if !output.status.success()
+                && args.len() == 2
+                && args[0] == "list"
+                && args[1] == "--json"
+            {
                 continue;
             }
 

@@ -61,3 +61,60 @@ cd npm/aterm && npm publish --access public
 - 태스크 현황: `~/projects/aigentry-orchestrator/state/task-queue.json` 참조.
 - 보고: `telepty inject --from {session-id} aigentry-orchestrator-claude "report"`
 - 헌법: `~/projects/aigentry/docs/CONSTITUTION.md`
+
+## Session Detection
+
+CLI/AI가 세션을 탐지할 때 아래 우선순위를 반드시 따른다.
+
+### Priority 1: aterm internal sessions (`$ATERM_IPC_SOCKET` set)
+```bash
+aterm list
+```
+Output format: `NAME | CLI | CWD | TERMINAL`
+```
+orchestrator | claude | ~/projects/aigentry-orchestrator | aterm
+alpasim      | claude | ~/projects/alpasim              | aterm
+```
+- TERMINAL column is always `aterm` for internal sessions
+- NAME is the workspace/project name (not TTY like s013)
+
+### Priority 2: telepty external sessions (`telepty` installed)
+```bash
+telepty list
+```
+Output format: `NAME | CLI | CWD | TERMINAL`
+```
+aigentry-brain-claude | claude | ~/projects/brain | ghostty
+deliberation-claude   | claude | ~/projects/delib | kitty
+```
+- Shows sessions in OTHER terminals (ghostty, kitty, etc.)
+- Requires BOTH: telepty installed + sessions registered via `telepty allow`
+- Only used when `$ATERM_IPC_SOCKET` is not available, or to discover non-aterm sessions
+
+### Priority 3: NEVER use as primary
+```bash
+# DO NOT USE: ps aux | grep claude
+# DO NOT USE: who / w / TTY detection
+```
+- `ps aux` shows ALL system processes — no project names, no terminal info
+- TTY names (s003, s013, s016) are meaningless identifiers
+- NEVER acceptable — removed from detection chain entirely
+
+### Detection Rules for AI/CLI
+1. **FIRST**: `aterm list` — returns project names + terminal=aterm
+2. **SECOND**: `telepty list` — returns project names + terminal type
+3. **NEVER primary**: `ps aux | grep` — no project names, no terminal info
+
+### Session Inject Rules
+- `terminal=aterm` → `aterm inject <workspace> 'message'` (direct IPC, no telepty needed)
+- `terminal=other` → `telepty inject <session> 'message'` (requires telepty)
+- If telepty not installed → only aterm internal sessions are reachable
+
+### Reachable Sessions Only
+Session list only shows reachable sessions. If you can't inject to it, don't show it.
+
+External sessions (other terminals) require:
+1. `npm i -g @dmsdc-ai/aigentry-telepty` — install telepty
+2. `telepty allow --id <name> <cli>` — register each session
+
+Without both, only aterm internal sessions are visible. No `ps aux` fallback. No 'unknown terminal' entries.

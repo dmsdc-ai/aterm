@@ -25,6 +25,7 @@ typedef void (*AtermDirtyCallback)(void* userdata);
 
 // Lifecycle
 AtermCore* aterm_core_new(void);
+void aterm_core_stop(AtermCore* core);
 void aterm_core_free(AtermCore* core);
 
 // GPU init — pass NSView pointer
@@ -40,11 +41,13 @@ void aterm_core_named_key(AtermCore* core, uint32_t key_code);
 void aterm_core_render(AtermCore* core);
 void aterm_core_resize(AtermCore* core, uint32_t width, uint32_t height);
 void aterm_core_grid_size(const AtermCore* core, float width, float height, uint16_t* out_cols, uint16_t* out_rows);
+void aterm_core_cell_size(const AtermCore* core, float* out_width, float* out_height);
 
 // Dirty state
 int32_t aterm_core_take_dirty(AtermCore* core);
 void aterm_core_set_dirty_callback(AtermCore* core, AtermDirtyCallback callback, void* userdata);
 void aterm_core_sync_pty(AtermCore* core);
+void aterm_core_set_theme_mode(AtermCore* core, uint8_t mode);
 
 // Scroll
 void aterm_core_scroll(AtermCore* core, int32_t delta);

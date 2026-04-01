@@ -15,15 +15,15 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
     var accent: Color {
         switch self {
         case .zsh:
-            return .gray
+            return Color(nsColor: AtermTheme.textSecondary)
         case .claude:
-            return .orange
+            return Color(nsColor: AtermTheme.accent)
         case .codex:
-            return .cyan
+            return Color(nsColor: AtermTheme.info)
         case .gemini:
-            return .blue
+            return Color(nsColor: AtermTheme.gemini)
         case .custom:
-            return .gray
+            return Color(nsColor: AtermTheme.textSecondary)
         }
     }
 
@@ -143,17 +143,17 @@ struct SessionSidebarView: View {
             HStack {
                 Text("Sessions")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
                 Spacer()
                 Circle()
-                    .fill(busClient.connected ? Color.green : Color.red)
+                    .fill(busClient.connected ? Color(nsColor: AtermTheme.statusSuccess) : Color(nsColor: AtermTheme.statusDanger))
                     .frame(width: 8, height: 8)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color(nsColor: NSColor(white: 0.15, alpha: 1.0)))
+            .background(Color(nsColor: AtermTheme.sidebarHeaderBackground))
 
-            Divider()
+            Divider().overlay(Color(nsColor: AtermTheme.border))
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -162,7 +162,7 @@ struct SessionSidebarView: View {
                     if workspaceModel.workspaces.isEmpty {
                         Text("No workspaces")
                             .font(.system(size: 11))
-                            .foregroundColor(.gray)
+                            .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     } else {
@@ -189,10 +189,10 @@ struct SessionSidebarView: View {
                         }
                     }
 
-                    if !busClient.sessions.isEmpty {
+                    if !externalSessions.isEmpty {
                         sectionHeader("External Sessions")
 
-                        ForEach(busClient.sessions) { session in
+                        ForEach(externalSessions) { session in
                             SessionRowView(session: session)
                         }
                     }
@@ -200,7 +200,7 @@ struct SessionSidebarView: View {
                 .padding(.vertical, 4)
             }
         }
-        .background(Color(nsColor: NSColor(white: 0.1, alpha: 1.0)))
+        .background(Color(nsColor: AtermTheme.sidebarBackground))
         .sheet(
             isPresented: Binding(
                 get: { workspaceModel.isCreateSheetPresented },
@@ -240,11 +240,16 @@ struct SessionSidebarView: View {
         }
     }
 
+    private var externalSessions: [TeleptySession] {
+        let ownWorkspaceIDs = Set(workspaceModel.workspaces.map(\.name))
+        return busClient.sessions.filter { !ownWorkspaceIDs.contains($0.id) }
+    }
+
     private var workspaceHeader: some View {
         HStack(spacing: 8) {
             Text("My Workspaces")
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.gray)
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
                 .textCase(.uppercase)
             Spacer()
             Button {
@@ -252,9 +257,9 @@ struct SessionSidebarView: View {
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
                     .frame(width: 18, height: 18)
-                    .background(Color.white.opacity(0.08))
+                    .background(Color(nsColor: AtermTheme.panelInsetBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             }
             .buttonStyle(.plain)
@@ -267,7 +272,7 @@ struct SessionSidebarView: View {
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
             .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(.gray)
+            .foregroundColor(Color(nsColor: AtermTheme.textMuted))
             .textCase(.uppercase)
             .padding(.horizontal, 12)
             .padding(.top, 10)
@@ -285,6 +290,7 @@ private struct WorkspaceCreateSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(drafts.count == 1 ? "New Workspace" : "New Workspaces")
                 .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -295,14 +301,14 @@ private struct WorkspaceCreateSheet: View {
                                     .font(.system(size: 13, weight: .semibold))
                                 Text(draft.cwd)
                                     .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                                     .lineLimit(2)
                             }
 
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("Name")
                                     .font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                                 TextField("Optional custom name", text: $draft.name)
                                     .textFieldStyle(.roundedBorder)
                             }
@@ -310,7 +316,7 @@ private struct WorkspaceCreateSheet: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Command")
                                     .font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                                 Picker("Command", selection: $draft.command) {
                                     ForEach(WorkspaceLaunchCommand.allCases) { command in
                                         Text(command.title).tag(command)
@@ -325,13 +331,13 @@ private struct WorkspaceCreateSheet: View {
                                 } else {
                                     Text(draft.command.bootstrapCommand(customCommand: draft.customCommand) ?? "zsh")
                                         .font(.system(size: 11, design: .monospaced))
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                                         .lineLimit(2)
                                 }
                             }
                         }
                         .padding(12)
-                        .background(Color(nsColor: NSColor.controlBackgroundColor))
+                        .background(Color(nsColor: AtermTheme.panelInsetBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                 }
@@ -349,6 +355,7 @@ private struct WorkspaceCreateSheet: View {
         }
         .padding(20)
         .frame(width: 460, height: min(CGFloat(220 + drafts.count * 110), CGFloat(560)))
+        .background(Color(nsColor: AtermTheme.panelBackground))
     }
 
     private var canCreate: Bool {
@@ -372,10 +379,11 @@ private struct WorkspaceRenameSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Rename Workspace")
                 .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             Text(workspaceName)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
 
             TextField("Workspace name", text: $renameText)
                 .textFieldStyle(.roundedBorder)
@@ -392,6 +400,7 @@ private struct WorkspaceRenameSheet: View {
         }
         .padding(20)
         .frame(width: 320, height: 180)
+        .background(Color(nsColor: AtermTheme.panelBackground))
     }
 }
 
@@ -411,22 +420,22 @@ struct WorkspaceRowView: View {
                     .frame(width: 6, height: 6)
                 Text(workspace.name)
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundColor(.white)
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
                     .lineLimit(1)
                 Spacer()
                 Text(workspace.status)
                     .font(.system(size: 9))
-                    .foregroundColor(.gray)
+                    .foregroundColor(Color(nsColor: AtermTheme.textMuted))
             }
 
             HStack(spacing: 6) {
                 Text(shortSidebarPath(workspace.cwd))
                     .font(.system(size: 10))
-                    .foregroundColor(.gray)
+                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                     .lineLimit(1)
                 Text("·")
                     .font(.system(size: 10))
-                    .foregroundColor(.gray.opacity(0.6))
+                    .foregroundColor(Color(nsColor: AtermTheme.textMuted))
                 Text(workspace.foregroundProcessName)
                     .font(.system(size: 10))
                     .foregroundColor(workspace.launchCommand.accent.opacity(0.85))
@@ -435,14 +444,23 @@ struct WorkspaceRowView: View {
 
             Text(relativeSidebarTime(workspace.createdAt))
                 .font(.system(size: 9))
-                .foregroundColor(.gray)
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(isSelected ? Color.white.opacity(0.08) : Color.white.opacity(0.03))
+        .background(
+            isSelected
+                ? Color(nsColor: AtermTheme.selectedRowBackground)
+                : Color(nsColor: AtermTheme.secondaryRowBackground)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 4)
-                .stroke(isSelected ? Color.white.opacity(0.18) : Color.clear, lineWidth: 1)
+                .stroke(
+                    isSelected
+                        ? Color(nsColor: AtermTheme.selectedRowStroke)
+                        : Color(nsColor: AtermTheme.border).opacity(0.35),
+                    lineWidth: 1
+                )
         )
         .cornerRadius(4)
         .padding(.horizontal, 4)
@@ -461,15 +479,15 @@ struct WorkspaceRowView: View {
     private var statusColor: Color {
         switch workspace.status {
         case "running":
-            return .green
+            return Color(nsColor: AtermTheme.statusSuccess)
         case "dead":
-            return .red
+            return Color(nsColor: AtermTheme.statusDanger)
         case "failed":
-            return .orange
+            return Color(nsColor: AtermTheme.accent)
         case "restarting":
-            return .yellow
+            return Color(nsColor: AtermTheme.statusWarning)
         default:
-            return .yellow
+            return Color(nsColor: AtermTheme.statusWarning)
         }
     }
 }
@@ -487,7 +505,7 @@ struct SessionRowView: View {
 
                 Text(session.id)
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundColor(.white)
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
                     .lineLimit(1)
                     .truncationMode(.middle)
 
@@ -509,12 +527,12 @@ struct SessionRowView: View {
                 if let project = session.project {
                     Text(project)
                         .font(.system(size: 10))
-                        .foregroundColor(.cyan.opacity(0.8))
+                        .foregroundColor(Color(nsColor: AtermTheme.info).opacity(0.9))
                 }
                 if let command = session.command {
                     Text(command)
                         .font(.system(size: 10))
-                        .foregroundColor(.gray)
+                        .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 }
             }
 
@@ -522,7 +540,7 @@ struct SessionRowView: View {
             if let task = session.currentTask {
                 Text(task)
                     .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.7))
+                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                     .lineLimit(2)
             }
 
@@ -531,10 +549,10 @@ struct SessionRowView: View {
                 HStack(spacing: 3) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 8))
-                        .foregroundColor(.orange)
+                        .foregroundColor(Color(nsColor: AtermTheme.accent))
                     Text(blocker)
                         .font(.system(size: 9))
-                        .foregroundColor(.orange.opacity(0.9))
+                        .foregroundColor(Color(nsColor: AtermTheme.accent))
                         .lineLimit(1)
                 }
             }
@@ -544,36 +562,36 @@ struct SessionRowView: View {
                 HStack(spacing: 3) {
                     Image(systemName: "keyboard")
                         .font(.system(size: 8))
-                        .foregroundColor(.yellow)
+                        .foregroundColor(Color(nsColor: AtermTheme.statusWarning))
                     Text("Needs input")
                         .font(.system(size: 9))
-                        .foregroundColor(.yellow.opacity(0.9))
+                        .foregroundColor(Color(nsColor: AtermTheme.statusWarning))
                 }
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color.white.opacity(0.03))
+        .background(Color(nsColor: AtermTheme.secondaryRowBackground))
         .cornerRadius(4)
         .padding(.horizontal, 4)
     }
 
     private var statusColor: Color {
         switch session.status {
-        case "running", "active": return .green
-        case "idle": return .yellow
-        case "blocked", "error": return .orange
-        case "dead": return .red
-        default: return .gray
+        case "running", "active": return Color(nsColor: AtermTheme.statusSuccess)
+        case "idle": return Color(nsColor: AtermTheme.statusWarning)
+        case "blocked", "error": return Color(nsColor: AtermTheme.accent)
+        case "dead": return Color(nsColor: AtermTheme.statusDanger)
+        default: return Color(nsColor: AtermTheme.textMuted)
         }
     }
 
     private func phaseColor(_ phase: TaskPhase) -> Color {
         switch phase {
-        case .implementing: return .blue
-        case .blocked: return .orange
-        case .testing: return .purple
-        case .idle: return .gray
+        case .implementing: return Color(nsColor: AtermTheme.info)
+        case .blocked: return Color(nsColor: AtermTheme.accent)
+        case .testing: return Color(nsColor: AtermTheme.gemini)
+        case .idle: return Color(nsColor: AtermTheme.textMuted)
         }
     }
 }

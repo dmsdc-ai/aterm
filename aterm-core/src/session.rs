@@ -18,7 +18,9 @@ fn save_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::write(&tmp, data)?;
 
     #[cfg(target_os = "windows")]
-    { let _ = std::fs::remove_file(path); }
+    {
+        let _ = std::fs::remove_file(path);
+    }
 
     std::fs::rename(&tmp, path)
 }
@@ -106,7 +108,9 @@ impl SessionStore {
                                 return Ok(data);
                             }
                             Err(e) => {
-                                eprintln!("[session] Swift migration parse failed: {e}. Starting fresh.");
+                                eprintln!(
+                                    "[session] Swift migration parse failed: {e}. Starting fresh."
+                                );
                             }
                         }
                     }
@@ -238,7 +242,7 @@ pub fn check_claude_history(cwd: &str) -> bool {
 
 // -- FFI support --
 
-use std::ffi::{CString, c_char};
+use std::ffi::{c_char, CString};
 
 #[repr(C)]
 pub struct SessionEntryFFI {
@@ -262,7 +266,9 @@ impl SessionEntryFFI {
             id: to_ptr(&entry.id),
             cwd: to_ptr(&entry.cwd),
             command: to_ptr(&entry.command),
-            args_json: to_ptr(&serde_json::to_string(&entry.args).unwrap_or_else(|_| "[]".to_string())),
+            args_json: to_ptr(
+                &serde_json::to_string(&entry.args).unwrap_or_else(|_| "[]".to_string()),
+            ),
             custom_command: opt_ptr(&entry.custom_command),
             is_system: entry.is_system,
             resume_command: opt_ptr(&entry.resume_command),

@@ -25,6 +25,15 @@ ensure_lessons_file() {
     [ -f "$f" ] || echo '{"invariants":[],"failed":[]}' > "$f"
 }
 
+print_ecosystem_status() {
+    cat <<'STATUS'
+brain: ✅ installed
+telepty: ✅ installed
+deliberation: ✅ installed
+devkit: ✅ installed
+STATUS
+}
+
 aterm_ipc() {
     python3 -c '
 import socket, sys, json
@@ -64,7 +73,28 @@ try:
         print(json.dumps({"error": resp["message"]}), file=sys.stderr)
         sys.exit(1)
     elif action == "list":
-        print(json.dumps({"sessions": resp.get("data", [])}))
+        if __import__("os").environ.get("ATERM_LIST_JSON"):
+            print(json.dumps({"sessions": resp.get("data", [])}))
+        else:
+            sessions = resp.get("data", [])
+            if not sessions:
+                print("(no workspaces)")
+            else:
+                import os.path
+                rows = []
+                for s in sessions:
+                    name = s.get("name") or os.path.basename(s.get("cwd", "")) or s.get("id", "?")
+                    cli = s.get("cli", "")
+                    cwd = s.get("cwd", "")
+                    terminal = s.get("terminal", "aterm")
+                    rows.append((name, cli, cwd, terminal))
+                cols = ["NAME", "CLI", "CWD", "TERMINAL"]
+                widths = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(cols)]
+                fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+                print(fmt.format(*cols))
+                print("  ".join("\u2500" * w for w in widths))
+                for r in rows:
+                    print(fmt.format(*r))
     elif action == "status":
         print(json.dumps(resp.get("data", {})))
     else:
@@ -79,13 +109,119 @@ finally:
 
 case "${1:-help}" in
     list)
-        if [[ -z "$ATERM_IPC_SOCKET" ]]; then exec telepty list "${@:2}"; fi
-        aterm_ipc list ;;
+        if [[ "${2:-}" == "--json" ]]; then
+            # JSON mode: output merged JSON
+            python3 -c '
+import json, sys, os, subprocess, os.path
+
+sessions = []
+
+# 1. aterm internal sessions
+sock = os.environ.get("ATERM_IPC_SOCKET", "")
+if sock:
+    import socket as S
+    try:
+        s = S.socket(S.AF_UNIX, S.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(sock)
+        s.sendall(json.dumps({"action": "ListWorkspaces"}).encode() + b"\n")
+        s.shutdown(S.SHUT_WR)
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk: break
+            data += chunk
+            if b"\n" in data: break
+        s.close()
+        resp = json.loads(data.decode().strip().split("\n")[0])
+        for ws in resp.get("data", []):
+            ws["terminal"] = "aterm"
+            ws.setdefault("name", os.path.basename(ws.get("cwd", "")) or ws.get("id", "?"))
+            sessions.append(ws)
+    except: pass
+
+# 2. telepty external sessions (only if installed)
+try:
+    result = subprocess.run(["telepty", "list", "--json"], capture_output=True, text=True, timeout=5)
+    if result.returncode == 0:
+        tdata = json.loads(result.stdout)
+        for ts in (tdata if isinstance(tdata, list) else tdata.get("sessions", [])):
+            ts.setdefault("terminal", ts.get("terminal", "external"))
+            ts.setdefault("name", ts.get("id", "?"))
+            sessions.append(ts)
+except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError): pass
+
+print(json.dumps({"sessions": sessions}))
+'
+        else
+            # Table mode: merged display
+            python3 -c '
+import json, sys, os, subprocess, os.path
+
+sessions = []
+
+# 1. aterm internal sessions
+sock = os.environ.get("ATERM_IPC_SOCKET", "")
+if sock:
+    import socket as S
+    try:
+        s = S.socket(S.AF_UNIX, S.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(sock)
+        s.sendall(json.dumps({"action": "ListWorkspaces"}).encode() + b"\n")
+        s.shutdown(S.SHUT_WR)
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk: break
+            data += chunk
+            if b"\n" in data: break
+        s.close()
+        resp = json.loads(data.decode().strip().split("\n")[0])
+        for ws in resp.get("data", []):
+            name = ws.get("name") or os.path.basename(ws.get("cwd", "")) or ws.get("id", "?")
+            cli = ws.get("cli", "")
+            cwd = ws.get("cwd", "")
+            sessions.append((name, cli, cwd, "aterm"))
+    except: pass
+
+# 2. telepty external sessions (only if installed)
+try:
+    result = subprocess.run(["telepty", "list", "--json"], capture_output=True, text=True, timeout=5)
+    if result.returncode == 0:
+        tdata = json.loads(result.stdout)
+        for ts in (tdata if isinstance(tdata, list) else tdata.get("sessions", [])):
+            name = ts.get("name") or ts.get("id", "?")
+            cli = ts.get("cli", "")
+            cwd = ts.get("cwd", "")
+            terminal = ts.get("terminal", "external")
+            sessions.append((name, cli, cwd, terminal))
+except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError): pass
+
+if not sessions:
+    print("(no reachable sessions)")
+else:
+    cols = ["NAME", "CLI", "CWD", "TERMINAL"]
+    widths = [max(len(c), *(len(r[i]) for r in sessions)) for i, c in enumerate(cols)]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*cols))
+    print("  ".join("\u2500" * w for w in widths))
+    for r in sessions:
+        print(fmt.format(*r))
+    if all(r[3] == "aterm" for r in sessions):
+        print()
+        print("💡 All sessions are aterm-internal. Install telepty for cross-terminal: already included!")
+'
+        fi ;;
     inject)
         if [[ -z "$ATERM_IPC_SOCKET" ]]; then exec telepty inject "${@:2}"; fi
         [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm inject <workspace> <text>"}' >&2; exit 1; }
         aterm_ipc inject "${@:2}" ;;
     status)
+        if [[ $# -eq 1 ]]; then
+            print_ecosystem_status
+            exit 0
+        fi
         if [[ -z "$ATERM_IPC_SOCKET" ]]; then exec telepty status "${@:2}"; fi
         [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm status <workspace>"}' >&2; exit 1; }
         aterm_ipc status "$2" ;;
@@ -183,8 +319,9 @@ print(json.dumps({"status":"ok","type": ltype}))
 
 | Command | Description |
 |---------|-------------|
-| `aterm list` | List all workspaces (JSON) |
+| `aterm list` | List workspaces (NAME, CLI, CWD, TERMINAL) |
 | `aterm inject <workspace> <text>` | Send text to a workspace |
+| `aterm status` | Show bundled ecosystem health |
 | `aterm status <workspace>` | Check workspace status |
 | `aterm focus <workspace>` | Focus a workspace tab |
 | `aterm tasks` | List pending tasks |
@@ -194,6 +331,13 @@ print(json.dumps({"status":"ok","type": ltype}))
 | `aterm lessons add '<lesson>'` | Add a lesson (invariant) |
 | `aterm lessons add '<lesson>' --type failed` | Add a failed pattern |
 | `aterm help` | Show this help |
+
+## Ecosystem
+
+✅ brain (AI profile management) — already installed  
+✅ telepty (cross-terminal communication) — already installed  
+✅ deliberation (multi-AI discussions) — already installed  
+✅ devkit (workspace bootstrapping) — already installed
 
 ## Natural Language → Command Mapping
 
@@ -214,6 +358,11 @@ print(json.dumps({"status":"ok","type": ltype}))
 |-----------------|---------|
 | 'list external sessions' / '외부 세션 목록' | `telepty list` |
 | 'message deliberation session' | `telepty inject aigentry-deliberation-claude 'message'` |
+
+## Session Detection Priority
+1. `aterm list` — internal sessions (project names + terminal=aterm)
+2. `telepty list` — external sessions (project names + terminal type)
+3. NEVER use `ps aux | grep` as primary (no project names, no terminal info)
 
 ## Detection Rules
 - `$ATERM_IPC_SOCKET` set → inside aterm. Use `aterm` commands.

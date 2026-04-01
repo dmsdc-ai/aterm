@@ -59,13 +59,22 @@ impl AtermApp {
     }
 
     /// Register a workspace's inject queue so IPC can route to it.
-    pub fn register_workspace(&mut self, name: &str, queue: SharedInjectQueue, command: &str, cwd: &str) {
+    pub fn register_workspace(
+        &mut self,
+        name: &str,
+        queue: SharedInjectQueue,
+        command: &str,
+        cwd: &str,
+    ) {
         self.inject_queues.insert(name.to_string(), queue);
-        self.workspace_meta.insert(name.to_string(), WorkspaceMeta {
-            name: name.to_string(),
-            command: command.to_string(),
-            cwd: cwd.to_string(),
-        });
+        self.workspace_meta.insert(
+            name.to_string(),
+            WorkspaceMeta {
+                name: name.to_string(),
+                command: command.to_string(),
+                cwd: cwd.to_string(),
+            },
+        );
         if let Some(ref bridge) = self.telepty_bridge {
             bridge.register(name, name, command, cwd, &self.socket_path);
         }
@@ -114,7 +123,11 @@ impl AtermApp {
     /// Dispatch a SessionAction and return a response.
     pub fn dispatch(&mut self, action: SessionAction) -> ActionResponse {
         match action {
-            SessionAction::Inject { workspace, text, from } => {
+            SessionAction::Inject {
+                workspace,
+                text,
+                from,
+            } => {
                 if let Some(queue) = self.inject_queues.get(&workspace) {
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -140,13 +153,17 @@ impl AtermApp {
                     let list = host.list_workspaces();
                     ActionResponse::data(serde_json::to_value(list).unwrap_or_default())
                 } else {
-                    let infos: Vec<WorkspaceInfo> = self.workspace_meta.values().map(|m| WorkspaceInfo {
-                        id: m.name.clone(),
-                        name: m.name.clone(),
-                        cli: m.command.clone(),
-                        cwd: m.cwd.clone(),
-                        status: "running".to_string(),
-                    }).collect();
+                    let infos: Vec<WorkspaceInfo> = self
+                        .workspace_meta
+                        .values()
+                        .map(|m| WorkspaceInfo {
+                            id: m.name.clone(),
+                            name: m.name.clone(),
+                            cli: m.command.clone(),
+                            cwd: m.cwd.clone(),
+                            status: "running".to_string(),
+                        })
+                        .collect();
                     ActionResponse::data(serde_json::to_value(infos).unwrap_or_default())
                 }
             }
@@ -186,10 +203,13 @@ impl AtermApp {
             }
             SessionAction::ListTasks { workspace } => {
                 if let Some(meta) = self.workspace_meta.get(&workspace) {
-                    let file_path = std::path::Path::new(&meta.cwd).join("state").join("task-queue.json");
+                    let file_path = std::path::Path::new(&meta.cwd)
+                        .join("state")
+                        .join("task-queue.json");
                     let data = if file_path.exists() {
                         match std::fs::read_to_string(&file_path) {
-                            Ok(content) => serde_json::from_str(&content).unwrap_or(serde_json::json!({"tasks":[],"completed":[]})),
+                            Ok(content) => serde_json::from_str(&content)
+                                .unwrap_or(serde_json::json!({"tasks":[],"completed":[]})),
                             Err(_) => serde_json::json!({"tasks":[],"completed":[]}),
                         }
                     } else {
@@ -202,10 +222,13 @@ impl AtermApp {
             }
             SessionAction::ListLessons { workspace } => {
                 if let Some(meta) = self.workspace_meta.get(&workspace) {
-                    let file_path = std::path::Path::new(&meta.cwd).join("state").join("lessons.json");
+                    let file_path = std::path::Path::new(&meta.cwd)
+                        .join("state")
+                        .join("lessons.json");
                     let data = if file_path.exists() {
                         match std::fs::read_to_string(&file_path) {
-                            Ok(content) => serde_json::from_str(&content).unwrap_or(serde_json::json!({"invariants":[],"failed":[]})),
+                            Ok(content) => serde_json::from_str(&content)
+                                .unwrap_or(serde_json::json!({"invariants":[],"failed":[]})),
                             Err(_) => serde_json::json!({"invariants":[],"failed":[]}),
                         }
                     } else {
@@ -216,9 +239,10 @@ impl AtermApp {
                     ActionResponse::error(format!("workspace '{}' not found", workspace))
                 }
             }
-            SessionAction::ReadScreenText { workspace: _, max_bytes: _ } => {
-                ActionResponse::unsupported()
-            }
+            SessionAction::ReadScreenText {
+                workspace: _,
+                max_bytes: _,
+            } => ActionResponse::unsupported(),
         }
     }
 }

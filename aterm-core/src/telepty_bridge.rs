@@ -15,8 +15,16 @@ impl TeleptyBridge {
 
         // Quick health check
         let output = Command::new("curl")
-            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "1",
-                   &format!("{}/api/sessions", bridge.daemon_url)])
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--max-time",
+                "1",
+                &format!("{}/api/sessions", bridge.daemon_url),
+            ])
             .output();
 
         match output {
@@ -26,7 +34,10 @@ impl TeleptyBridge {
                     eprintln!("[telepty-bridge] connected to daemon");
                     Some(bridge)
                 } else {
-                    eprintln!("[telepty-bridge] daemon returned {}, running standalone", code);
+                    eprintln!(
+                        "[telepty-bridge] daemon returned {}, running standalone",
+                        code
+                    );
                     None
                 }
             }
@@ -38,7 +49,14 @@ impl TeleptyBridge {
     }
 
     /// Register an aterm workspace with telepty. Fire-and-forget.
-    pub fn register(&self, session_id: &str, alias: &str, command: &str, cwd: &str, socket_path: &str) {
+    pub fn register(
+        &self,
+        session_id: &str,
+        alias: &str,
+        command: &str,
+        cwd: &str,
+        socket_path: &str,
+    ) {
         let payload = serde_json::json!({
             "session_id": session_id,
             "alias": alias,
@@ -59,9 +77,18 @@ impl TeleptyBridge {
         // Fire-and-forget in background thread
         std::thread::spawn(move || {
             let _ = Command::new("curl")
-                .args(["-s", "-X", "POST", &url,
-                       "-H", "Content-Type: application/json",
-                       "-d", &body, "--max-time", "2"])
+                .args([
+                    "-s",
+                    "-X",
+                    "POST",
+                    &url,
+                    "-H",
+                    "Content-Type: application/json",
+                    "-d",
+                    &body,
+                    "--max-time",
+                    "2",
+                ])
                 .output();
         });
     }

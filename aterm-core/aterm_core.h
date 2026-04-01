@@ -47,9 +47,28 @@ typedef struct SessionEntryFFI {
   const char *resume_command;
 } SessionEntryFFI;
 
+/**
+ * C callback table for PlatformHost trait.
+ */
+typedef struct AtermHostCallbacks {
+  void *userdata;
+  void (*create_workspace_view)(void*, const char*, const char*);
+  void (*close_workspace_view)(void*, const char*);
+  void (*focus_workspace)(void*, const char*);
+  char *(*list_workspaces)(void*);
+  void (*on_workspace_event)(void*, const char*);
+  void (*request_redraw)(void*);
+} AtermHostCallbacks;
+
 struct AtermCore *aterm_core_new(void);
 
 void aterm_core_free(struct AtermCore *core);
+
+/**
+ * Stop the PTY output signal callback. Must be called BEFORE aterm_core_free
+ * to prevent use-after-free when the host view is deallocated.
+ */
+void aterm_core_stop(struct AtermCore *core);
 
 int32_t aterm_core_init_gpu(struct AtermCore *core,
                             void *ns_view,
@@ -80,11 +99,15 @@ void aterm_core_grid_size(const struct AtermCore *core,
                           uint16_t *out_cols,
                           uint16_t *out_rows);
 
+void aterm_core_cell_size(const struct AtermCore *core, float *out_width, float *out_height);
+
 int32_t aterm_core_take_dirty(struct AtermCore *core);
 
 void aterm_core_set_dirty_callback(struct AtermCore *core, void (*callback)(void*), void *userdata);
 
 void aterm_core_sync_pty(struct AtermCore *core);
+
+void aterm_core_set_theme_mode(struct AtermCore *core, uint8_t mode);
 
 void aterm_core_scroll(struct AtermCore *core, int32_t delta);
 
@@ -130,6 +153,27 @@ void aterm_session_free(struct SessionEntryFFI entry);
 void aterm_sessions_save(struct AtermCore *core);
 
 uint32_t aterm_sessions_restore(struct AtermCore *core);
+
+/**
+ * Register platform host callbacks. Call once at startup.
+ */
+void aterm_set_host(struct AtermHostCallbacks callbacks);
+
+/**
+ * Dispatch a SessionAction (JSON) and return a response (JSON).
+ * Caller must free the returned string with aterm_core_free_string.
+ */
+char *aterm_dispatch(const char *action_json, uintptr_t action_len);
+
+/**
+ * Get the IPC socket path. Caller must free with aterm_core_free_string.
+ */
+char *aterm_ipc_socket_path(void);
+
+/**
+ * Get the IPC auth token. Caller must free with aterm_core_free_string.
+ */
+char *aterm_ipc_token(void);
 
 extern int tailscale_new(void);
 

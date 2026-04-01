@@ -29,6 +29,7 @@ pub struct PtyOutputSignal {
     notify: Arc<Notify>,
     dirty: Arc<AtomicBool>,
     wake_callback: WakeCallback,
+    stopped: Arc<AtomicBool>,
 }
 
 impl Default for PtyOutputSignal {
@@ -37,6 +38,7 @@ impl Default for PtyOutputSignal {
             notify: Arc::new(Notify::new()),
             dirty: Arc::new(AtomicBool::new(false)),
             wake_callback: Arc::new(std::sync::OnceLock::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -55,6 +57,9 @@ impl PtyOutputSignal {
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
         self.notify.notify_one();
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
         if let Some(f) = self.wake_callback.get() {
             f();
         }
@@ -77,6 +82,12 @@ impl PtyOutputSignal {
 
     pub fn poke(&self) {
         self.notify.notify_one();
+    }
+
+    /// Signal that the host view is being deallocated. After this call,
+    /// mark_dirty() will no longer invoke the wake callback.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
     }
 }
 
@@ -254,14 +265,16 @@ impl PtyManager {
             pixel_width: 0,
             pixel_height: 0,
         };
-        let spawned = spawn_workspace_process(&cwd, &shell, &launch_args, clone_size(&size), Some(&id))?;
+        let spawned =
+            spawn_workspace_process(&cwd, &shell, &launch_args, clone_size(&size), Some(&id))?;
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(spawned.writer));
         let inject_queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
         let idle_state: Arc<Mutex<IdleState>> = Arc::new(Mutex::new(IdleState::new()));
         let size = Arc::new(Mutex::new(size));
         let master: Arc<Mutex<Box<dyn MasterPty + Send>>> = Arc::new(Mutex::new(spawned.master));
-        let child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>> = Arc::new(Mutex::new(spawned.child));
+        let child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>> =
+            Arc::new(Mutex::new(spawned.child));
         let buffer: Arc<Mutex<OutputBuffer>> = Arc::new(Mutex::new(OutputBuffer::new()));
         let term_bytes: PtyByteQueue = Arc::new(Mutex::new(Vec::new()));
         let status: Arc<Mutex<String>> = Arc::new(Mutex::new("running".to_string()));
@@ -362,7 +375,18 @@ impl PtyManager {
             Some(entry.command)
         };
 
-        self.create(entry.id, entry.cwd, cmd, args, None, None, false, entry.custom_command, entry.is_system, entry.resume_command)
+        self.create(
+            entry.id,
+            entry.cwd,
+            cmd,
+            args,
+            None,
+            None,
+            false,
+            entry.custom_command,
+            entry.is_system,
+            entry.resume_command,
+        )
     }
 
     pub fn close(&mut self, id: &str) -> Result<(), String> {
@@ -422,7 +446,9 @@ impl PtyManager {
     pub fn read_screen(&self, id: &str, max_bytes: Option<usize>) -> Result<String, String> {
         let ws = self.workspace(id)?;
         let buffer = ws.buffer.lock().map_err(|error| error.to_string())?;
-        let bytes = max_bytes.unwrap_or(DEFAULT_SNAPSHOT_BYTES).min(BUFFER_MAX_BYTES);
+        let bytes = max_bytes
+            .unwrap_or(DEFAULT_SNAPSHOT_BYTES)
+            .min(BUFFER_MAX_BYTES);
         Ok(buffer.snapshot(bytes))
     }
 
@@ -556,7 +582,9 @@ fn spawn_workspace_process(
     workspace_id: Option<&str>,
 ) -> Result<SpawnedWorkspace, String> {
     let pty_system = native_pty_system();
-    let pair = pty_system.openpty(size).map_err(|error| error.to_string())?;
+    let pair = pty_system
+        .openpty(size)
+        .map_err(|error| error.to_string())?;
     let resolved_command = resolve_command_binary(command);
 
     let mut cmd = CommandBuilder::new(resolved_command);
@@ -582,9 +610,18 @@ fn spawn_workspace_process(
     let socket_path = format!("/tmp/aterm-{}.sock", std::process::id());
     cmd.env("ATERM_IPC_SOCKET", &socket_path);
 
-    let child = pair.slave.spawn_command(cmd).map_err(|error| error.to_string())?;
-    let reader = pair.master.try_clone_reader().map_err(|error| error.to_string())?;
-    let writer = pair.master.take_writer().map_err(|error| error.to_string())?;
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|error| error.to_string())?;
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| error.to_string())?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| error.to_string())?;
 
     Ok(SpawnedWorkspace {
         master: pair.master,
@@ -613,12 +650,16 @@ fn try_restart_workspace(
 ) -> bool {
     eprintln!("[PTY] auto-restart: attempting respawn for {}", ws_id);
 
-    let current_size = size.lock().ok().map(|s| clone_size(&*s)).unwrap_or(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    });
+    let current_size = size
+        .lock()
+        .ok()
+        .map(|s| clone_size(&*s))
+        .unwrap_or(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
 
     let spawned = match spawn_workspace_process(cwd, command, args, current_size, Some(ws_id)) {
         Ok(s) => s,
@@ -701,7 +742,12 @@ fn try_restart_workspace(
     let injector_writer = writer.clone();
     let injector_status = status.clone();
     thread::spawn(move || {
-        run_injector_loop(injector_queue, injector_idle, injector_writer, injector_status);
+        run_injector_loop(
+            injector_queue,
+            injector_idle,
+            injector_writer,
+            injector_status,
+        );
     });
 
     signal.mark_dirty();
@@ -795,7 +841,6 @@ fn reader_loop(
                 if let Ok(mut idle) = idle_state.lock() {
                     idle.record_output(has_prompt_pattern(&data));
                 }
-
             }
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::Interrupted {
@@ -816,22 +861,41 @@ fn reader_loop(
     if auto_restart {
         let attempts = restart_count.fetch_add(1, Ordering::SeqCst);
         if attempts >= 3 {
-            eprintln!("[PTY] auto-restart: max retries (3) reached for {}, giving up", ws_id);
+            eprintln!(
+                "[PTY] auto-restart: max retries (3) reached for {}, giving up",
+                ws_id
+            );
             if let Ok(mut current) = status.lock() {
                 *current = "dead".to_string();
             }
             signal.mark_dirty();
         } else {
             // Always strip --continue on retry (graceful degradation for first-run)
-            let retry_args: Vec<String> = args.iter()
+            let retry_args: Vec<String> = args
+                .iter()
                 .filter(|a| a.as_str() != "--continue")
                 .cloned()
                 .collect();
-            eprintln!("[PTY] auto-restart: attempt {}/3 for {} (without --continue)", attempts + 1, ws_id);
+            eprintln!(
+                "[PTY] auto-restart: attempt {}/3 for {} (without --continue)",
+                attempts + 1,
+                ws_id
+            );
             let restarted = try_restart_workspace(
-                &ws_id, &cwd, &command, &retry_args,
-                &size, &master, &writer, &child,
-                &buffer, &term_bytes, &status, &idle_state, &inject_queue, &signal,
+                &ws_id,
+                &cwd,
+                &command,
+                &retry_args,
+                &size,
+                &master,
+                &writer,
+                &child,
+                &buffer,
+                &term_bytes,
+                &status,
+                &idle_state,
+                &inject_queue,
+                &signal,
                 &restart_count,
             );
             if restarted {
@@ -915,6 +979,11 @@ pub fn command_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
 
+    // Prepend app bundle Resources/bin so `aterm` CLI is first in PATH
+    if let Some(resources_bin) = app_resources_bin() {
+        push_unique_path(&mut paths, &mut seen, resources_bin);
+    }
+
     if let Some(path_var) = std::env::var_os("PATH") {
         for entry in std::env::split_paths(&path_var) {
             if !entry.as_os_str().is_empty() {
@@ -952,7 +1021,7 @@ pub fn command_search_paths() -> Vec<PathBuf> {
         "/usr/local/sbin",
         "/usr/bin",
         "/bin",
-        "/Applications/cmux.app/Contents/Resources/bin",
+        "/Applications/aterm.app/Contents/Resources/bin",
     ] {
         push_unique_path(&mut paths, &mut seen, PathBuf::from(path));
     }
@@ -1074,4 +1143,16 @@ fn detect_cli_type(command: &str) -> &'static str {
 
 pub fn augmented_path_env() -> Option<std::ffi::OsString> {
     std::env::join_paths(command_search_paths()).ok()
+}
+
+/// Return the app bundle's Resources/bin directory (e.g. aterm.app/Contents/Resources/bin).
+pub fn app_resources_bin() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // exe: Contents/MacOS/aterm → Contents/ → Contents/Resources/bin
+    let resources_bin = exe.parent()?.parent()?.join("Resources").join("bin");
+    if resources_bin.is_dir() {
+        Some(resources_bin)
+    } else {
+        None
+    }
 }

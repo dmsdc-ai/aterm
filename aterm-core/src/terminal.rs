@@ -100,9 +100,10 @@ impl TerminalState {
         if let Ok(mut term) = self.terminal.lock() {
             self.parser.advance(&mut *term, bytes);
             if was_at_bottom {
-                self.scroll_offset = 0;
                 term.scroll_display(Scroll::Bottom);
             }
+            // Always re-sync from grid to prevent drift after VTE state changes
+            self.scroll_offset = term.grid().display_offset();
         }
     }
 

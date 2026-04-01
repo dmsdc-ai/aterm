@@ -38,6 +38,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "aterm v3"
         window.center()
         window.minSize = NSSize(width: 640, height: 400)
+        window.backgroundColor = AtermTheme.windowBackground
 
         // Create telepty bus client
         busClient = TeleptyBusClient()
@@ -69,6 +70,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let terminalRect = NSRect(x: 0, y: 0, width: rect.width - 240, height: rect.height)
         terminalContainerView = NSView(frame: terminalRect)
         terminalContainerView.autoresizingMask = [.width, .height]
+        terminalContainerView.wantsLayer = true
+        terminalContainerView.layer?.backgroundColor = AtermTheme.terminalBackground.cgColor
 
         // Create split view
         splitView = NSSplitView()
@@ -313,8 +316,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let userSelectedCli = result.defaultCLI != "none"
         let name = userSelectedCli ? "orchestrator" : "main"
-        let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
-        let cwd = FileManager.default.fileExists(atPath: orchestratorDir) ? orchestratorDir : NSHomeDirectory()
+        let requestedDirectory = result.initialProjectDirectory?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cwd: String
+        if let requestedDirectory,
+           !requestedDirectory.isEmpty,
+           FileManager.default.fileExists(atPath: requestedDirectory) {
+            cwd = requestedDirectory
+        } else {
+            cwd = NSHomeDirectory()
+        }
 
         // Pre-create Claude Code trust directory so the trust prompt is skipped
         if command == .claude {
@@ -338,11 +349,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Read defaultCLI from aterm.json (set by TUI wizard)
         let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
         var defaultCLI = "none"
+        var parsedConfig: [String: Any]?
         if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-           let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let ai = config["ai"] as? [String: Any],
-           let cli = ai["defaultCLI"] as? String {
-            defaultCLI = cli
+           let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            parsedConfig = config
+            if let ai = config["ai"] as? [String: Any],
+               let cli = ai["defaultCLI"] as? String {
+                defaultCLI = cli
+            }
         }
 
         // Map defaultCLI to WorkspaceLaunchCommand
@@ -365,11 +379,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             command = .zsh
         }
 
+        let workspace = parsedConfig?["workspace"] as? [String: Any]
+        let configuredCwd = workspace?["defaultCwd"] as? String
+        let cwd: String
+        if let configuredCwd,
+           !configuredCwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           FileManager.default.fileExists(atPath: configuredCwd) {
+            cwd = configuredCwd
+        } else {
+            cwd = NSHomeDirectory()
+        }
+
         // Name is 'orchestrator' if user selected a CLI (even if binary not found)
         let userSelectedCli = defaultCLI != "none"
         let name = userSelectedCli ? "orchestrator" : "main"
-        let orchestratorDir = NSHomeDirectory() + "/projects/aigentry-orchestrator"
-        let cwd = FileManager.default.fileExists(atPath: orchestratorDir) ? orchestratorDir : NSHomeDirectory()
 
         createWorkspace(
             name: name,
@@ -434,6 +457,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var tailscale = config["tailscale"] as? [String: Any] ?? [:]
         tailscale["connect_on_launch"] = result.tailscaleEnabled
         config["tailscale"] = tailscale
+        if let initialProjectDirectory = result.initialProjectDirectory,
+           !initialProjectDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            var workspace = config["workspace"] as? [String: Any] ?? [:]
+            workspace["defaultCwd"] = initialProjectDirectory
+            config["workspace"] = workspace
+        }
         config["setupCompleted"] = true
 
         let dir = (configPath as NSString).deletingLastPathComponent
@@ -459,14 +488,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ),
             cliStatus: cliStatus,
             onComplete: { [weak self] result in
-                self?.saveOnboardingResult(result)
-                self?.createWorkspaceFromOnboarding(result)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.promptForInitialProjectDirectory(using: result) { finalizedResult in
+                        self?.saveOnboardingResult(finalizedResult)
+                        self?.createWorkspaceFromOnboarding(finalizedResult)
+                    }
+                }
             }
         )
 
         let hostingView = NSHostingView(rootView: onboardingView)
         let sheet = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 720),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -474,6 +507,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         sheet.contentView = hostingView
         sheet.title = "Welcome to aterm"
         window.beginSheet(sheet)
+    }
+
+    private func promptForInitialProjectDirectory(
+        using result: OnboardingResult,
+        completion: @escaping (OnboardingResult) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Project Folder"
+        panel.message = "Select a folder for the first workspace. Cancel to use your home directory."
+        panel.prompt = "Use Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = true
+
+        let projectsDirectory = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("projects", isDirectory: true)
+        panel.directoryURL = FileManager.default.fileExists(atPath: projectsDirectory.path)
+            ? projectsDirectory
+            : URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+
+        panel.beginSheetModal(for: window) { response in
+            let selectedDirectory = response == .OK
+                ? panel.url?.path
+                : NSHomeDirectory()
+            completion(
+                OnboardingResult(
+                    defaultCLI: result.defaultCLI,
+                    defaultShell: result.defaultShell,
+                    tailscaleEnabled: result.tailscaleEnabled,
+                    initialProjectDirectory: selectedDirectory
+                )
+            )
+        }
     }
 
     @objc private func showPreferences() {
@@ -838,10 +905,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         isSystem: Bool = false
     ) {
         let workspaceID = UUID()
+        let resolvedName = uniqueWorkspaceName(for: name, cwd: cwd, excluding: nil)
         let bootstrapCommand = command.bootstrapCommand(customCommand: customCommand)
         let baselineChildPIDs: Set<Int32> = []
         let terminalView = TerminalView(frame: terminalContainerView.bounds)
-        terminalView.workspaceName = name
+        terminalView.workspaceName = resolvedName
         terminalView.spawnCommand = bootstrapCommand
         terminalView.initialWorkingDirectory = cwd
         terminalView.autoresizingMask = [.width, .height]
@@ -855,7 +923,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let workspace = ManagedWorkspace(
             id: workspaceID,
-            name: uniqueWorkspaceName(for: name, cwd: cwd, excluding: nil),
+            name: resolvedName,
             cwd: cwd,
             launchCommand: command,
             customCommand: customCommand,
