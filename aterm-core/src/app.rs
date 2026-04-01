@@ -7,6 +7,7 @@ use aterm_session::host::PlatformHost;
 use aterm_session::types::WorkspaceInfo;
 
 use crate::inject::{InjectMessage, SharedInjectQueue};
+use crate::telepty_bridge::TeleptyBridge;
 
 /// App-level singleton that owns the IPC server and routes inject messages.
 /// Workspace PTY processes are owned by per-view AtermCore instances.
@@ -18,6 +19,7 @@ pub struct AtermApp {
     workspace_meta: HashMap<String, WorkspaceMeta>,
     ipc_server: Option<IpcServer>,
     host: Option<Box<dyn PlatformHost>>,
+    telepty_bridge: Option<TeleptyBridge>,
     socket_path: String,
     token: String,
 }
@@ -32,11 +34,13 @@ impl AtermApp {
     pub fn new() -> Self {
         let socket_path = format!("/tmp/aterm-{}.sock", std::process::id());
         let token = generate_token();
+        let telepty_bridge = TeleptyBridge::try_connect();
         Self {
             inject_queues: HashMap::new(),
             workspace_meta: HashMap::new(),
             ipc_server: None,
             host: None,
+            telepty_bridge,
             socket_path,
             token,
         }
@@ -62,6 +66,9 @@ impl AtermApp {
             command: command.to_string(),
             cwd: cwd.to_string(),
         });
+        if let Some(ref bridge) = self.telepty_bridge {
+            bridge.register(name, name, command, cwd, &self.socket_path);
+        }
         eprintln!("[aterm-app] registered workspace: {}", name);
     }
 
@@ -69,6 +76,9 @@ impl AtermApp {
     pub fn deregister_workspace(&mut self, name: &str) {
         self.inject_queues.remove(name);
         self.workspace_meta.remove(name);
+        if let Some(ref bridge) = self.telepty_bridge {
+            bridge.deregister(name);
+        }
         eprintln!("[aterm-app] deregistered workspace: {}", name);
     }
 
@@ -172,6 +182,38 @@ impl AtermApp {
                     ActionResponse::ok()
                 } else {
                     ActionResponse::unsupported()
+                }
+            }
+            SessionAction::ListTasks { workspace } => {
+                if let Some(meta) = self.workspace_meta.get(&workspace) {
+                    let file_path = std::path::Path::new(&meta.cwd).join("state").join("task-queue.json");
+                    let data = if file_path.exists() {
+                        match std::fs::read_to_string(&file_path) {
+                            Ok(content) => serde_json::from_str(&content).unwrap_or(serde_json::json!({"tasks":[],"completed":[]})),
+                            Err(_) => serde_json::json!({"tasks":[],"completed":[]}),
+                        }
+                    } else {
+                        serde_json::json!({"tasks":[],"completed":[]})
+                    };
+                    ActionResponse::data(data)
+                } else {
+                    ActionResponse::error(format!("workspace '{}' not found", workspace))
+                }
+            }
+            SessionAction::ListLessons { workspace } => {
+                if let Some(meta) = self.workspace_meta.get(&workspace) {
+                    let file_path = std::path::Path::new(&meta.cwd).join("state").join("lessons.json");
+                    let data = if file_path.exists() {
+                        match std::fs::read_to_string(&file_path) {
+                            Ok(content) => serde_json::from_str(&content).unwrap_or(serde_json::json!({"invariants":[],"failed":[]})),
+                            Err(_) => serde_json::json!({"invariants":[],"failed":[]}),
+                        }
+                    } else {
+                        serde_json::json!({"invariants":[],"failed":[]})
+                    };
+                    ActionResponse::data(data)
+                } else {
+                    ActionResponse::error(format!("workspace '{}' not found", workspace))
                 }
             }
             SessionAction::ReadScreenText { workspace: _, max_bytes: _ } => {

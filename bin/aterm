@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# aterm — CLI for aterm internal workspace communication
+# Sends NDJSON over $ATERM_IPC_SOCKET. Falls back to telepty outside aterm.
+set -euo pipefail
+
+ATERM_IPC_SOCKET="${ATERM_IPC_SOCKET:-}"
+
+# State directory for task board and lessons
+STATE_DIR="${PWD}/state"
+
+tasks_file() { echo "${STATE_DIR}/task-queue.json"; }
+lessons_file() { echo "${STATE_DIR}/lessons.json"; }
+
+ensure_state_dir() { mkdir -p "$STATE_DIR"; }
+
+ensure_tasks_file() {
+    ensure_state_dir
+    local f; f="$(tasks_file)"
+    [ -f "$f" ] || echo '{"tasks":[],"completed":[]}' > "$f"
+}
+
+ensure_lessons_file() {
+    ensure_state_dir
+    local f; f="$(lessons_file)"
+    [ -f "$f" ] || echo '{"invariants":[],"failed":[]}' > "$f"
+}
+
+aterm_ipc() {
+    python3 -c '
+import socket, sys, json
+
+sock_path = sys.argv[1]
+action = sys.argv[2]
+args = sys.argv[3:]
+
+payloads = {
+    "list":   lambda: {"action": "ListWorkspaces"},
+    "inject": lambda: {"action": "Inject", "workspace": args[0],
+                        "text": " ".join(args[1:]),
+                        "from": __import__("os").environ.get("ATERM_WORKSPACE_NAME")},
+    "status": lambda: {"action": "WorkspaceStatus", "workspace": args[0]},
+    "focus":  lambda: {"action": "FocusWorkspace", "workspace": args[0]},
+}
+
+payload = json.dumps(payloads[action]()) + "\n"
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    sock.settimeout(5)
+    sock.connect(sock_path)
+    sock.sendall(payload.encode())
+    sock.shutdown(socket.SHUT_WR)
+    data = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+        if b"\n" in data:
+            break
+    resp = json.loads(data.decode().strip().split("\n")[0])
+
+    if resp.get("status") == "Error":
+        print(json.dumps({"error": resp["message"]}), file=sys.stderr)
+        sys.exit(1)
+    elif action == "list":
+        print(json.dumps({"sessions": resp.get("data", [])}))
+    elif action == "status":
+        print(json.dumps(resp.get("data", {})))
+    else:
+        print(json.dumps({"status": "ok"}))
+except Exception as e:
+    print(json.dumps({"error": str(e)}), file=sys.stderr)
+    sys.exit(1)
+finally:
+    sock.close()
+' "$ATERM_IPC_SOCKET" "$@"
+}
+
+case "${1:-help}" in
+    list)
+        if [[ -z "$ATERM_IPC_SOCKET" ]]; then exec telepty list "${@:2}"; fi
+        aterm_ipc list ;;
+    inject)
+        if [[ -z "$ATERM_IPC_SOCKET" ]]; then exec telepty inject "${@:2}"; fi
+        [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm inject <workspace> <text>"}' >&2; exit 1; }
+        aterm_ipc inject "${@:2}" ;;
+    status)
+        if [[ -z "$ATERM_IPC_SOCKET" ]]; then exec telepty status "${@:2}"; fi
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm status <workspace>"}' >&2; exit 1; }
+        aterm_ipc status "$2" ;;
+    focus)
+        [[ -z "$ATERM_IPC_SOCKET" ]] && { echo '{"error":"focus requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+        [[ $# -lt 2 ]] && { echo '{"error":"usage: aterm focus <workspace>"}' >&2; exit 1; }
+        aterm_ipc focus "$2" ;;
+    tasks)
+        ensure_tasks_file
+        case "${2:-list}" in
+            list)
+                python3 -c '
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+if not data.get("tasks"):
+    print("No pending tasks.")
+    sys.exit(0)
+for i, t in enumerate(data["tasks"]):
+    tid = t.get("id", i)
+    desc = t.get("description", t) if isinstance(t, dict) else t
+    print(f"  [{tid}] {desc}")
+' "$(tasks_file)" ;;
+            add)
+                [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm tasks add <description>"}' >&2; exit 1; }
+                python3 -c '
+import json, sys, time
+f = sys.argv[1]; desc = " ".join(sys.argv[2:])
+with open(f) as fh: data = json.load(fh)
+tid = int(time.time() * 1000) % 100000
+data["tasks"].append({"id": tid, "description": desc})
+with open(f, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+print(json.dumps({"status":"ok","id": tid}))
+' "$(tasks_file)" "${@:3}" ;;
+            done)
+                [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm tasks done <id>"}' >&2; exit 1; }
+                python3 -c '
+import json, sys
+f = sys.argv[1]; target = int(sys.argv[2])
+with open(f) as fh: data = json.load(fh)
+found = None
+for i, t in enumerate(data["tasks"]):
+    tid = t.get("id", i) if isinstance(t, dict) else i
+    if tid == target:
+        found = data["tasks"].pop(i)
+        break
+if not found:
+    print(json.dumps({"error": f"task {target} not found"}), file=sys.stderr); sys.exit(1)
+data.setdefault("completed", []).append(found)
+with open(f, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+print(json.dumps({"status":"ok","id": target}))
+' "$(tasks_file)" "$3" ;;
+            *) echo '{"error":"usage: aterm tasks [list|add|done]"}' >&2; exit 1 ;;
+        esac ;;
+    lessons)
+        ensure_lessons_file
+        case "${2:-list}" in
+            list)
+                python3 -c '
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+inv = data.get("invariants", [])
+fail = data.get("failed", [])
+if not inv and not fail:
+    print("No lessons recorded.")
+    sys.exit(0)
+if inv:
+    print("Invariants:")
+    for l in inv: print(f"  - {l}")
+if fail:
+    print("Failed patterns:")
+    for l in fail: print(f"  - {l}")
+' "$(lessons_file)" ;;
+            add)
+                [[ $# -lt 3 ]] && { echo '{"error":"usage: aterm lessons add <lesson> [--type invariant|failed]"}' >&2; exit 1; }
+                python3 -c '
+import json, sys
+f = sys.argv[1]; lesson = sys.argv[2]
+ltype = "invariants"
+if "--type" in sys.argv:
+    idx = sys.argv.index("--type")
+    if idx + 1 < len(sys.argv) and sys.argv[idx+1] == "failed":
+        ltype = "failed"
+with open(f) as fh: data = json.load(fh)
+data.setdefault(ltype, []).append(lesson)
+with open(f, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+print(json.dumps({"status":"ok","type": ltype}))
+' "$(lessons_file)" "${@:3}" ;;
+            *) echo '{"error":"usage: aterm lessons [list|add]"}' >&2; exit 1 ;;
+        esac ;;
+    help|--help|-h)
+        cat <<'HELP'
+# aterm — AI-native terminal session communication
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `aterm list` | List all workspaces (JSON) |
+| `aterm inject <workspace> <text>` | Send text to a workspace |
+| `aterm status <workspace>` | Check workspace status |
+| `aterm focus <workspace>` | Focus a workspace tab |
+| `aterm tasks` | List pending tasks |
+| `aterm tasks add '<description>'` | Add a new task |
+| `aterm tasks done <id>` | Mark task as completed |
+| `aterm lessons` | List recorded lessons |
+| `aterm lessons add '<lesson>'` | Add a lesson (invariant) |
+| `aterm lessons add '<lesson>' --type failed` | Add a failed pattern |
+| `aterm help` | Show this help |
+
+## Natural Language → Command Mapping
+
+### Internal sessions (same aterm, $ATERM_IPC_SOCKET set)
+| Natural language | Command |
+|-----------------|---------|
+| 'list sessions' / '세션 목록 보여줘' | `aterm list` |
+| 'send build to ghostty' / 'ghostty에 빌드 실행해줘' | `aterm inject ghostty 'make build'` |
+| 'check cmux status' / 'cmux 세션 상태 확인해줘' | `aterm status cmux` |
+| 'show tasks' / '태스크 목록 보여줘' | `aterm tasks` |
+| 'add task: implement API' / '태스크 추가해줘: API 구현' | `aterm tasks add 'API 구현'` |
+| 'task 42 done' / '태스크 42 완료' | `aterm tasks done 42` |
+| 'show lessons' / '레슨 보여줘' | `aterm lessons` |
+| 'add lesson: this pattern failed' / '레슨 추가' | `aterm lessons add 'this pattern failed'` |
+
+### External sessions (other terminal/machine, $ATERM_IPC_SOCKET unset)
+| Natural language | Command |
+|-----------------|---------|
+| 'list external sessions' / '외부 세션 목록' | `telepty list` |
+| 'message deliberation session' | `telepty inject aigentry-deliberation-claude 'message'` |
+
+## Detection Rules
+- `$ATERM_IPC_SOCKET` set → inside aterm. Use `aterm` commands.
+- `$ATERM_IPC_SOCKET` unset → outside aterm. Use `telepty` commands.
+- `aterm` falls back to `telepty` automatically for list/inject/status.
+HELP
+        ;;
+    *) echo "{\"error\":\"unknown command: $1\"}" >&2; exit 1 ;;
+esac

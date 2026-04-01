@@ -10,6 +10,8 @@ pub enum SessionAction {
     CloseWorkspace { workspace: String },
     CreateWorkspace { name: String, cli: String, cwd: String },
     ReadScreenText { workspace: String, max_bytes: Option<usize> },
+    ListTasks { workspace: String },
+    ListLessons { workspace: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
