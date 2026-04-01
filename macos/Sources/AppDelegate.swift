@@ -3,6 +3,14 @@ import Darwin
 import Foundation
 import SwiftUI
 
+private struct IpcWorkspaceConfig: Decodable {
+    let name: String
+    let cli: String
+    let cwd: String
+    let cols: UInt16?
+    let rows: UInt16?
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var terminalView: TerminalView?
@@ -94,6 +102,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 createDefaultWorkspace()
             }
         }
+        registerHostCallbacks()
         startProcessPolling()
     }
 
@@ -111,6 +120,83 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !tailscaleDisabledEnv && !tailscaleDisabledDefaults {
             aterm_tailscale_shutdown()
         }
+    }
+
+    // MARK: - IPC Host Callbacks
+
+    private func registerHostCallbacks() {
+        let ud = Unmanaged.passUnretained(self).toOpaque()
+        var callbacks = AtermHostCallbacks()
+        callbacks.userdata = ud
+        callbacks.create_workspace_view = { userdata, idPtr, configPtr in
+            guard let userdata, let idPtr else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            let id = String(cString: idPtr)
+            let configJson = configPtr.map { String(cString: $0) } ?? "{}"
+            NSLog("[aterm-ipc] create_workspace_view: %@ config=%@", id, configJson)
+            DispatchQueue.main.async {
+                delegate.handleIpcCreateWorkspace(id: id, configJson: configJson)
+            }
+        }
+        callbacks.close_workspace_view = { userdata, idPtr in
+            guard let userdata, let idPtr else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            let id = String(cString: idPtr)
+            DispatchQueue.main.async {
+                if let uuid = delegate.managedWorkspaces.first(where: { $0.value.name == id })?.key {
+                    delegate.closeWorkspace(id: uuid)
+                }
+            }
+        }
+        callbacks.focus_workspace = { userdata, idPtr in
+            guard let userdata, let idPtr else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            let id = String(cString: idPtr)
+            DispatchQueue.main.async {
+                if let uuid = delegate.managedWorkspaces.first(where: { $0.value.name == id })?.key {
+                    delegate.selectWorkspace(uuid)
+                }
+            }
+        }
+        callbacks.list_workspaces = { userdata in
+            guard let userdata else { return nil }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+            let list = delegate.workspaceOrder.compactMap { id -> [String: String]? in
+                guard let ws = delegate.managedWorkspaces[id] else { return nil }
+                return [
+                    "id": ws.name,
+                    "name": ws.name,
+                    "cli": ws.launchCommand.rawValue,
+                    "cwd": ws.cwd,
+                    "status": "running",
+                ]
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: list),
+                  let str = String(data: data, encoding: .utf8) else { return nil }
+            return strdup(str)
+        }
+        callbacks.on_workspace_event = { _, eventPtr in
+            guard let eventPtr else { return }
+            let event = String(cString: eventPtr)
+            NSLog("[aterm-ipc] workspace_event: %@", event)
+        }
+        callbacks.request_redraw = { _ in
+            // No-op for now — individual TerminalViews handle their own redraw
+        }
+        aterm_set_host(callbacks)
+        NSLog("[aterm-ipc] host callbacks registered")
+    }
+
+    private func handleIpcCreateWorkspace(id: String, configJson: String) {
+        // Parse config and create workspace
+        guard let data = configJson.data(using: .utf8),
+              let config = try? JSONDecoder().decode(IpcWorkspaceConfig.self, from: data) else {
+            NSLog("[aterm-ipc] failed to parse workspace config: %@", configJson)
+            return
+        }
+        let command = WorkspaceLaunchCommand(rawValue: config.cli) ?? .zsh
+        let cwd = config.cwd.isEmpty ? NSHomeDirectory() : config.cwd
+        createWorkspace(name: config.name, command: command, customCommand: "", cwd: cwd, shouldSelect: true)
     }
 
     // MARK: - Workspace Persistence

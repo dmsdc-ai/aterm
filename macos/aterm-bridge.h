@@ -85,4 +85,20 @@ int32_t aterm_tailscale_connect(const char* hostname, const char* control_url, c
 void aterm_tailscale_shutdown(void);
 char* aterm_tailscale_status_json(void);
 
+// IPC Phase 1 — AtermApp singleton
+typedef struct {
+    void* userdata;
+    void (*create_workspace_view)(void* userdata, const char* id, const char* config_json);
+    void (*close_workspace_view)(void* userdata, const char* id);
+    void (*focus_workspace)(void* userdata, const char* id);
+    char* (*list_workspaces)(void* userdata);
+    void (*on_workspace_event)(void* userdata, const char* event_json);
+    void (*request_redraw)(void* userdata);
+} AtermHostCallbacks;
+
+void aterm_set_host(AtermHostCallbacks callbacks);
+char* aterm_dispatch(const char* action_json, size_t action_len);
+char* aterm_ipc_socket_path(void);
+char* aterm_ipc_token(void);
+
 #endif
