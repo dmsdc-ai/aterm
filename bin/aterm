@@ -7,7 +7,7 @@ ATERM_IPC_SOCKET="${ATERM_IPC_SOCKET:-}"
 
 detect_ui_lang() {
     local raw="${ATERM_UI_LANG:-${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}}"
-    raw="${raw,,}"
+    raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
     if [[ "$raw" == ko* || "$raw" == *"ko_"* || "$raw" == *"ko-"* ]]; then
         echo "ko"
     else

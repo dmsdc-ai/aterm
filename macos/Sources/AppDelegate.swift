@@ -129,6 +129,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         saveWorkspaces()
+        // Deregister all workspaces from telepty daemon to prevent ghost sessions
+        deregisterTeleptyWorkspaces()
         sessionSaveTimer?.invalidate()
         sessionSaveTimer = nil
         processPollTimer?.invalidate()
@@ -138,6 +140,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let tailscaleDisabledDefaults = UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil && !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled")
         if !tailscaleDisabledEnv && !tailscaleDisabledDefaults {
             aterm_tailscale_shutdown()
+        }
+    }
+
+    private func deregisterTeleptyWorkspaces() {
+        let port = 3848
+        for (_, workspace) in managedWorkspaces {
+            let name = workspace.name
+            guard !name.isEmpty,
+                  let url = URL(string: "http://localhost:\(port)/api/sessions/\(name)") else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            request.timeoutInterval = 2
+            // Fire synchronously — we're terminating, must complete before exit
+            let semaphore = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: request) { _, _, _ in
+                semaphore.signal()
+            }.resume()
+            _ = semaphore.wait(timeout: .now() + 2)
+            NSLog("[aterm] deregistered workspace '%@' from telepty", name)
         }
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aterm",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "description": "Native aterm launcher package",
   "type": "module",
   "main": "./bin/aterm.js",
