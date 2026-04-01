@@ -886,95 +886,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         saveWorkspaces()
 
-        // Auto-generate AGENTS.md for AI CLIs (universal — Claude, Codex, Gemini)
-        ensureAtermAgentsMd(cwd: cwd)
+        // Delegate MD generation to aigentry-devkit (skip silently if not installed)
+        devkitWorkspaceInit(cli: command.rawValue, cwd: cwd)
     }
 
-    private func ensureAtermAgentsMd(cwd: String) {
-        let marker = "# aterm Session Communication"
-        let agentsPath = (cwd as NSString).appendingPathComponent("AGENTS.md")
-        let snippet = """
-
-        \(marker)
-
-        ## Internal sessions (same aterm, $ATERM_IPC_SOCKET set)
-        | Natural language | Command |
-        |-----------------|---------|
-        | 'list sessions' / '세션 목록 보여줘' | `aterm list` |
-        | 'send to ghostty' / 'ghostty에 전달' | `aterm inject ghostty 'msg'` |
-        | 'check status' / '상태 확인' | `aterm status <workspace>` |
-        | 'show tasks' / '태스크 보여줘' | `aterm tasks` |
-        | 'add task' / '태스크 추가' | `aterm tasks add 'description'` |
-        | 'complete task' / '태스크 완료' | `aterm tasks done <id>` |
-        | 'show lessons' / '레슨 보여줘' | `aterm lessons` |
-        | 'add lesson' / '레슨 추가' | `aterm lessons add 'lesson text'` |
-
-        ## External sessions (other terminal/machine, $ATERM_IPC_SOCKET unset)
-        | Natural language | Command |
-        |-----------------|---------|
-        | 'external sessions' / '외부 세션 목록' | `telepty list` |
-        | 'message to session' / '세션에 메시지' | `telepty inject <session> 'message'` |
-
-        ## Task & Lessons Board
-        - Tasks: `aterm tasks` (list), `aterm tasks add 'desc'`, `aterm tasks done <id>`
-        - Lessons: `aterm lessons` (list), `aterm lessons add 'lesson'`
-        - Files: `$CWD/state/task-queue.json`, `$CWD/state/lessons.json`
-
-        ## Detection rules
-        - `$ATERM_IPC_SOCKET` set → inside aterm → use `aterm` commands
-        - `$ATERM_IPC_SOCKET` unset → outside → use `telepty` commands
-        - `aterm` auto-falls back to `telepty` for list/inject/status
-
-        ## Reporting
-        - On task completion: `aterm inject orchestrator 'REPORT: {summary}'`
-
-        ## Response principles
-        - Critical: always point out weaknesses
-        - Constructive: provide alternatives
-        - Objective: balanced pros and cons
-
-        ## Help
-        - Run `aterm help` for full command reference
-        """
-
-        if FileManager.default.fileExists(atPath: agentsPath) {
-            guard let content = try? String(contentsOfFile: agentsPath, encoding: .utf8),
-                  !content.contains(marker) else { return }
-            if let handle = FileHandle(forWritingAtPath: agentsPath) {
-                handle.seekToEndOfFile()
-                if let data = snippet.data(using: .utf8) {
-                    handle.write(data)
-                }
-                handle.closeFile()
+    private func devkitWorkspaceInit(cli: String, cwd: String) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = ["aigentry-devkit", "workspace-init", "--cli", cli, "--cwd", cwd]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try task.run()
+                task.waitUntilExit()
+            } catch {
+                // aigentry-devkit not installed — standalone mode, skip silently
             }
-        } else {
-            try? snippet.write(toFile: agentsPath, atomically: true, encoding: .utf8)
-        }
-
-        ensureGeminiMd(cwd: cwd)
-    }
-
-    private func ensureGeminiMd(cwd: String) {
-        let geminiPath = (cwd as NSString).appendingPathComponent("GEMINI.md")
-        let marker = "@AGENTS.md"
-        let content = """
-        \(marker)
-
-        See AGENTS.md for aterm session communication commands and natural language mapping.
-        """
-
-        if FileManager.default.fileExists(atPath: geminiPath) {
-            guard let existing = try? String(contentsOfFile: geminiPath, encoding: .utf8),
-                  !existing.contains(marker) else { return }
-            if let handle = FileHandle(forWritingAtPath: geminiPath) {
-                handle.seekToEndOfFile()
-                if let data = content.data(using: .utf8) {
-                    handle.write(data)
-                }
-                handle.closeFile()
-            }
-        } else {
-            try? content.write(toFile: geminiPath, atomically: true, encoding: .utf8)
         }
     }
 

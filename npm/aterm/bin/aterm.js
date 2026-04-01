@@ -40,6 +40,9 @@ const env = { ...process.env };
 env.DYLD_LIBRARY_PATH = [frameworksDir, env.DYLD_LIBRARY_PATH]
   .filter(Boolean)
   .join(':');
+// Expose bundled dependency binaries (aigentry-devkit, etc.) to the native app
+const nodeModulesBin = path.join(packageRoot, 'node_modules', '.bin');
+env.PATH = [nodeModulesBin, env.PATH].filter(Boolean).join(':');
 env.AIGENTRY_CONFIG_JSON = JSON.stringify(resolvedConfig.config);
 env.AIGENTRY_CONFIG_LAYERS = JSON.stringify(resolvedConfig.layers);
 env.AIGENTRY_SYSTEM_ROOT = resolvedConfig.systemRoot;
