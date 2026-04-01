@@ -62,6 +62,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onCloseWorkspace: { [weak self] id in
                 self?.closeWorkspace(id: id)
+            },
+            onAttachExternalSession: { [weak self] sessionID in
+                self?.attachExternalSession(sessionID)
             }
         )
         let sidebarHost = NSHostingView(rootView: sidebarView)
@@ -1184,6 +1187,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         saveWorkspaces()
+    }
+
+    private func attachExternalSession(_ sessionID: String) {
+        // Check if already attached — find existing workspace running telepty attach for this session
+        for id in workspaceOrder {
+            if let ws = managedWorkspaces[id],
+               ws.launchCommand == .custom,
+               ws.customCommand == "telepty attach \(sessionID)" {
+                selectWorkspace(id)
+                return
+            }
+        }
+
+        // Find the session info from busClient for cwd
+        let session = busClient.sessions.first { $0.id == sessionID }
+        let cwd = session?.cwd ?? NSHomeDirectory()
+
+        createWorkspace(
+            name: sessionID,
+            command: .custom,
+            customCommand: "telepty attach \(sessionID)",
+            cwd: cwd,
+            shouldSelect: true
+        )
     }
 
     private func rebuildSidebarState() {

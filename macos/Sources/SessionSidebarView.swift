@@ -141,6 +141,173 @@ final class WorkspaceSidebarModel: ObservableObject {
     }
 }
 
+// MARK: - Task Queue
+
+struct TaskQueueItem: Identifiable, Codable {
+    let id: Int
+    let desc: String
+    let priority: String
+    let status: String
+    let session: String?
+    let note: String?
+}
+
+private struct TaskQueueFile: Codable {
+    let tasks: [TaskQueueItem]
+}
+
+final class TaskQueueLoader: ObservableObject {
+    @Published var tasks: [TaskQueueItem] = []
+
+    private var timer: Timer?
+
+    var activeCount: Int { tasks.filter { $0.status == "in_progress" }.count }
+    var totalCount: Int { tasks.count }
+
+    func startAutoRefresh() {
+        load()
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.load()
+        }
+    }
+
+    private func load() {
+        let knownPath = NSHomeDirectory() + "/projects/aigentry-orchestrator/state/task-queue.json"
+        if loadFrom(path: knownPath) { return }
+
+        let fm = FileManager.default
+        let projectsDir = NSHomeDirectory() + "/projects"
+        if let entries = try? fm.contentsOfDirectory(atPath: projectsDir) {
+            for entry in entries {
+                let candidate = projectsDir + "/" + entry + "/state/task-queue.json"
+                if loadFrom(path: candidate) { return }
+            }
+        }
+    }
+
+    @discardableResult
+    private func loadFrom(path: String) -> Bool {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let file = try? JSONDecoder().decode(TaskQueueFile.self, from: data)
+        else { return false }
+        DispatchQueue.main.async { self.tasks = file.tasks }
+        return true
+    }
+}
+
+// MARK: - Task Row
+
+struct TaskRowView: View {
+    let task: TaskQueueItem
+    @State private var showPopover = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(statusEmoji)
+                .font(.system(size: 11))
+            Text("#\(task.id) \(task.desc)")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+            Text(task.status)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(statusColor)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: AtermTheme.secondaryRowBackground))
+        .cornerRadius(4)
+        .padding(.horizontal, 4)
+        .contentShape(RoundedRectangle(cornerRadius: 4))
+        .onTapGesture { showPopover = true }
+        .popover(isPresented: $showPopover) {
+            taskDetailPopover
+        }
+    }
+
+    private var statusEmoji: String {
+        switch task.status {
+        case "in_progress": return "🔨"
+        case "pending":     return "⏳"
+        case "completed":   return "✅"
+        case "blocked":     return "🚫"
+        case "delegated":   return "📤"
+        default:            return "⏳"
+        }
+    }
+
+    private var statusColor: Color {
+        switch task.status {
+        case "completed":   return Color(nsColor: AtermTheme.statusSuccess)
+        case "in_progress": return Color(nsColor: AtermTheme.statusWarning)
+        case "pending":     return Color(nsColor: AtermTheme.textMuted)
+        case "blocked":     return Color(nsColor: AtermTheme.statusDanger)
+        case "delegated":   return Color(nsColor: AtermTheme.info)
+        default:            return Color(nsColor: AtermTheme.textMuted)
+        }
+    }
+
+    private var taskDetailPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("#\(task.id)")
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                Text(task.priority)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(priorityColor)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(priorityColor.opacity(0.15))
+                    .cornerRadius(4)
+                Spacer()
+                Text(statusEmoji + " " + task.status)
+                    .font(.system(size: 11))
+                    .foregroundColor(statusColor)
+            }
+
+            Text(task.desc)
+                .font(.system(size: 12))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let session = task.session {
+                HStack(spacing: 4) {
+                    Text(AtermLocalization.text(ko: "세션:", en: "Session:"))
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                    Text(session)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(Color(nsColor: AtermTheme.info))
+                }
+            }
+
+            if let note = task.note, !note.isEmpty {
+                Text(note)
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 260, maxWidth: 340)
+        .background(Color(nsColor: AtermTheme.panelBackground))
+    }
+
+    private var priorityColor: Color {
+        switch task.priority {
+        case "P0": return Color(nsColor: AtermTheme.statusDanger)
+        case "P1": return Color(nsColor: AtermTheme.statusWarning)
+        default:   return Color(nsColor: AtermTheme.textMuted)
+        }
+    }
+}
+
+// MARK: - Sidebar
+
 struct SessionSidebarView: View {
     @ObservedObject var busClient: TeleptyBusClient
     @ObservedObject var workspaceModel: WorkspaceSidebarModel
@@ -150,7 +317,9 @@ struct SessionSidebarView: View {
     let onSelectWorkspace: (UUID) -> Void
     let onRenameWorkspace: (UUID, String) -> Void
     let onCloseWorkspace: (UUID) -> Void
+    let onAttachExternalSession: (String) -> Void
 
+    @StateObject private var taskLoader = TaskQueueLoader()
     @State private var renameTarget: SidebarWorkspace?
     @State private var renameText = ""
 
@@ -209,12 +378,19 @@ struct SessionSidebarView: View {
                         sectionHeader("External Sessions")
 
                         ForEach(externalSessions) { session in
-                            SessionRowView(session: session)
+                            SessionRowView(session: session, onAttach: {
+                                onAttachExternalSession(session.id)
+                            })
                         }
+                    }
+
+                    if AtermSettings.shared.showTaskBoard && !taskLoader.tasks.isEmpty {
+                        taskBoardSection
                     }
                 }
                 .padding(.vertical, 4)
             }
+            .onAppear { taskLoader.startAutoRefresh() }
         }
         .background(Color(nsColor: AtermTheme.sidebarBackground))
         .sheet(
@@ -253,6 +429,20 @@ struct SessionSidebarView: View {
                     renameText = ""
                 }
             )
+        }
+    }
+
+    private var taskBoardSection: some View {
+        Group {
+            sectionHeader(
+                AtermLocalization.text(
+                    ko: "태스크 (\(taskLoader.activeCount) 진행 중 / \(taskLoader.totalCount) 전체)",
+                    en: "TASKS (\(taskLoader.activeCount) active / \(taskLoader.totalCount) total)"
+                )
+            )
+            ForEach(taskLoader.tasks) { task in
+                TaskRowView(task: task)
+            }
         }
     }
 
@@ -525,6 +715,7 @@ struct WorkspaceRowView: View {
 
 struct SessionRowView: View {
     let session: TeleptySession
+    let onAttach: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -605,6 +796,11 @@ struct SessionRowView: View {
         .background(Color(nsColor: AtermTheme.secondaryRowBackground))
         .cornerRadius(4)
         .padding(.horizontal, 4)
+        .contentShape(RoundedRectangle(cornerRadius: 4))
+        .onTapGesture(perform: onAttach)
+        .contextMenu {
+            Button("Attach") { onAttach() }
+        }
     }
 
     private var statusColor: Color {

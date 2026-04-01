@@ -27,6 +27,9 @@ class AtermSettings: ObservableObject {
     @Published var autoRestartDead: Bool = false
     @Published var maxRestartAttempts: Int = 3
 
+    // Sidebar
+    @Published var showTaskBoard: Bool = true
+
     static let colorSchemes = [
         "Dark", "Light", "Solarized Dark", "Solarized Light",
         "Monokai", "Dracula", "Nord", "Tokyo Night",
@@ -91,6 +94,9 @@ class AtermSettings: ObservableObject {
         if let s = session?["autoRestore"] as? Bool { autoRestoreSessions = s }
         if let s = session?["autoRestartDead"] as? Bool { autoRestartDead = s }
         if let s = session?["maxRestartAttempts"] as? Int { maxRestartAttempts = s }
+
+        let sidebar = config["sidebar"] as? [String: Any]
+        if let s = sidebar?["showTaskBoard"] as? Bool { showTaskBoard = s }
     }
 
     func save() {
@@ -125,6 +131,10 @@ class AtermSettings: ObservableObject {
             "autoRestore": autoRestoreSessions,
             "autoRestartDead": autoRestartDead,
             "maxRestartAttempts": maxRestartAttempts,
+        ] as [String: Any]
+
+        config["sidebar"] = [
+            "showTaskBoard": showTaskBoard,
         ] as [String: Any]
 
         do {
@@ -249,6 +259,7 @@ struct SettingsView: View {
         settings.autoRestoreSessions = true
         settings.autoRestartDead = false
         settings.maxRestartAttempts = 3
+        settings.showTaskBoard = true
         settings.save()
         onApply()
     }
@@ -516,6 +527,16 @@ struct SessionSettingsView: View {
             }
             .opacity(settings.autoRestartDead ? 1.0 : 0.4)
             .disabled(!settings.autoRestartDead)
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            Text(AtermLocalization.text(ko: "사이드바", en: "Sidebar"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            Toggle(AtermLocalization.text(ko: "태스크 보드 표시", en: "Show Task Board"), isOn: $settings.showTaskBoard)
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                .onChange(of: settings.showTaskBoard) { settings.save() }
         }
         .padding(20)
     }
