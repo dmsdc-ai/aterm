@@ -8,6 +8,9 @@ publish = false
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
+aterm-ipc = { path = "../aterm-ipc" }
+aterm-session = { path = "../aterm-session" }
+libc = "0.2"
 alacritty_terminal = "0.26.0-rc1"
 dirs = "6"
 glyphon = "0.7"

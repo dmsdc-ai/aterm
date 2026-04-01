@@ -189,9 +189,12 @@ name = "aterm-core"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "aterm-ipc",
+ "aterm-session",
  "cbindgen",
  "dirs",
  "glyphon",
+ "libc",
  "pollster",
  "portable-pty",
  "raw-window-handle",
