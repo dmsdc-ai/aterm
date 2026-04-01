@@ -277,8 +277,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func saveWorkspaces() {
         let entries: [[String: Any]] = workspaceOrder.compactMap { id in
             guard let ws = managedWorkspaces[id] else { return nil }
+            let effectiveName = ws.name.isEmpty
+                ? URL(fileURLWithPath: ws.cwd).lastPathComponent
+                : ws.name
+            guard !effectiveName.isEmpty else { return nil }
             return [
-                "id": ws.name,
+                "id": effectiveName,
                 "cwd": ws.cwd,
                 "command": ws.launchCommand.rawValue,
                 "args": [] as [String],
@@ -330,7 +334,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let count = Int(aterm_session_count(nil))
         if count == 0 { return 0 }
 
-        var restored = 0
+        // Collect all entries FIRST before creating any workspaces.
+        // createWorkspace() calls saveWorkspaces() which overwrites sessions.json,
+        // and aterm_session_get() re-reads from disk each call — so the file would
+        // be truncated to 1 entry after the first workspace is created.
+        struct RestoredEntry {
+            let name: String
+            let cwd: String
+            let command: String
+            let customCommand: String
+            let isSystem: Bool
+        }
+        var entries: [RestoredEntry] = []
         for i in 0..<count {
             let entry = aterm_session_get(nil, UInt32(i))
             defer { aterm_session_free(entry) }
@@ -344,24 +359,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let commandStr = entry.command.map { String(cString: $0) } ?? ""
             let custom = entry.custom_command.map { String(cString: $0) } ?? ""
 
-            let effectiveCwd = FileManager.default.fileExists(atPath: cwd) ? cwd : NSHomeDirectory()
-            let requestedCommand = WorkspaceLaunchCommand(rawValue: commandStr) ?? .zsh
+            let effectiveName = name.isEmpty
+                ? URL(fileURLWithPath: cwd).lastPathComponent
+                : name
+            if effectiveName.isEmpty { continue }
+
+            entries.append(RestoredEntry(
+                name: effectiveName,
+                cwd: cwd,
+                command: commandStr,
+                customCommand: custom,
+                isSystem: entry.is_system
+            ))
+        }
+
+        // Now create workspaces from collected data (skipSave until the end)
+        for (i, se) in entries.enumerated() {
+            let effectiveCwd = FileManager.default.fileExists(atPath: se.cwd) ? se.cwd : NSHomeDirectory()
+            let requestedCommand = WorkspaceLaunchCommand(rawValue: se.command) ?? .zsh
             let command = cliAvailable(for: requestedCommand) ? requestedCommand : .zsh
 
             createWorkspace(
-                name: name,
+                name: se.name,
                 command: command,
-                customCommand: custom,
+                customCommand: se.customCommand,
                 cwd: effectiveCwd,
-                shouldSelect: i == count - 1,
-                isSystem: entry.is_system
+                shouldSelect: i == entries.count - 1,
+                isSystem: se.isSystem,
+                skipSave: true
             )
-            restored += 1
         }
-        if restored > 0 {
-            NSLog("[aterm] restored %d workspaces", restored)
+
+        if !entries.isEmpty {
+            saveWorkspaces()
+            NSLog("[aterm] restored %d workspaces", entries.count)
         }
-        return restored
+        return entries.count
     }
 
     private func cliAvailable(for command: WorkspaceLaunchCommand) -> Bool {
@@ -1006,7 +1039,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         customCommand: String,
         cwd: String,
         shouldSelect: Bool,
-        isSystem: Bool = false
+        isSystem: Bool = false,
+        skipSave: Bool = false
     ) {
         let workspaceID = UUID()
         let resolvedName = uniqueWorkspaceName(for: name, cwd: cwd, excluding: nil)
@@ -1062,7 +1096,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshWorkspaceProcesses()
         }
 
-        saveWorkspaces()
+        if !skipSave {
+            saveWorkspaces()
+        }
 
         // Delegate MD generation to aigentry-devkit (skip silently if not installed)
         devkitWorkspaceInit(cli: command.rawValue, cwd: cwd, workspaceID: workspaceID)
