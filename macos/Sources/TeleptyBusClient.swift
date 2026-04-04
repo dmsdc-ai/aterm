@@ -126,7 +126,7 @@ class TeleptyBusClient: ObservableObject {
     private static let maxBackoffMs: Double = 5000.0     // 5s cap
     private static let highFailureThreshold: Int = 50
 
-    init(host: String = "127.0.0.1", port: Int = 3848) {
+    init(host: String = "127.0.0.1", port: Int = Int(ProcessInfo.processInfo.environment["ATERM_TELEPTY_PORT"] ?? "") ?? 3848) {
         self.busURL = URL(string: "ws://\(host):\(port)/api/bus")!
         self.webSocketSession = URLSession(configuration: .default)
         loadInitialSessions()

@@ -166,7 +166,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func deregisterTeleptyWorkspaces() {
-    let port = 3848
+    let port = Int(ProcessInfo.processInfo.environment["ATERM_TELEPTY_PORT"] ?? "") ?? 3848
     for (_, workspace) in managedWorkspaces {
       let name = workspace.name
       guard !name.isEmpty,
@@ -1028,7 +1028,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   private func ensureTeleptyDaemon() {
     DispatchQueue.global(qos: .utility).async {
       // Check if telepty daemon is already running
-      guard let url = URL(string: "http://127.0.0.1:3848/api/sessions") else { return }
+      let teleptyPort = Int(ProcessInfo.processInfo.environment["ATERM_TELEPTY_PORT"] ?? "") ?? 3848
+      guard let url = URL(string: "http://127.0.0.1:\(teleptyPort)/api/sessions") else { return }
       var request = URLRequest(url: url)
       request.timeoutInterval = 2.0
 

@@ -12,8 +12,12 @@ impl TeleptyBridge {
     /// Try to connect to telepty daemon. Returns None if unavailable.
     /// Retries up to 3 times with 500ms between attempts.
     pub fn try_connect() -> Option<Self> {
+        let port = std::env::var("ATERM_TELEPTY_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(3848);
         let bridge = Self {
-            daemon_url: "http://127.0.0.1:3848".to_string(),
+            daemon_url: format!("http://127.0.0.1:{}", port),
         };
 
         for attempt in 1..=3 {
