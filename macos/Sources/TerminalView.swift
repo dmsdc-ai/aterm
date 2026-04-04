@@ -101,11 +101,16 @@ class TerminalView: NSView, NSTextInputClient {
         // updating lastDrawableSize without calling aterm_core_resize.
         aterm_core_resize(core, w, h)
 
-        // Set dirty callback — notifies activity (rendering handled by CVDisplayLink)
+        // Set dirty callback — immediate render + activity notification (Fix #153).
+        // Ghostty pattern: IO wakeup IMMEDIATELY triggers renderer, bypassing
+        // CVDisplayLink's ~8ms average latency. try_render is thread-safe and
+        // skips if another thread is already rendering.
         let ud = Unmanaged.passUnretained(self).toOpaque()
         aterm_core_set_dirty_callback(core, { userdata in
             guard let userdata = userdata else { return }
             let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
+            // Immediate render from PTY thread — 0ms latency vs 8.3ms avg CVDisplayLink
+            aterm_core_try_render(view.core)
             DispatchQueue.main.async {
                 view.onActivity?()
             }
@@ -152,8 +157,9 @@ class TerminalView: NSView, NSTextInputClient {
         CVDisplayLinkSetOutputCallback(link, { (_, _, _, _, _, userdata) -> CVReturn in
             guard let userdata = userdata else { return kCVReturnSuccess }
             let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
-            // Render directly on CVDisplayLink's thread — no main queue hop.
-            // aterm_core_take_dirty + aterm_core_render are thread-safe (Rust side).
+            // CVDisplayLink serves as fallback renderer for animations/cursor blink.
+            // Primary input-driven render happens in dirty callback (Fix #153).
+            // try_render is thread-safe and skips if PTY callback already rendered.
             view.renderFrame()
             return kCVReturnSuccess
         }, ud)
@@ -171,10 +177,9 @@ class TerminalView: NSView, NSTextInputClient {
 
     private func renderFrame() {
         guard let core = core else { return }
-        // Only render if dirty (Rust-side atomic flag)
-        if aterm_core_take_dirty(core) != 0 {
-            aterm_core_render(core)
-        }
+        // try_render atomically: check dirty + acquire render lock + render.
+        // Skips if PTY dirty callback already rendered this frame (Fix #153).
+        aterm_core_try_render(core)
     }
 
     // MARK: - Resize
@@ -632,6 +637,7 @@ class TerminalView: NSView, NSTextInputClient {
             aterm_core_set_dirty_callback(core, { userdata in
                 guard let userdata = userdata else { return }
                 let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
+                aterm_core_try_render(view.core)
                 DispatchQueue.main.async {
                     view.onActivity?()
                 }

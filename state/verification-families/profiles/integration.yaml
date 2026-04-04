@@ -1,0 +1,15 @@
+schema_version: 1
+name: integration
+description: Execute Rust integration-test families from polling_event_tests.rs.
+command:
+  package: aterm-core
+  target: polling_event_tests
+  template:
+    - cargo
+    - test
+    - -p
+    - "%{package}"
+    - --test
+    - "%{target}"
+    - --
+    - "%{selector}"

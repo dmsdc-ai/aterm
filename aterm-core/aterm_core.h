@@ -137,6 +137,8 @@ void aterm_core_named_key(struct AtermCore *core, uint32_t key_code);
 
 void aterm_core_render(struct AtermCore *core);
 
+int32_t aterm_core_try_render(struct AtermCore *core);
+
 void aterm_core_resize(struct AtermCore *core, uint32_t width, uint32_t height);
 
 void aterm_core_grid_size(const struct AtermCore *core,

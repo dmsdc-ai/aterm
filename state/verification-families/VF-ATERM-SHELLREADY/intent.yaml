@@ -1,0 +1,33 @@
+schema_version: 1
+id: VF-ATERM-SHELLREADY
+feature: shell ready and trust prompt detection
+intent: >
+  Verify prompt-driven readiness, timeout fallback, UTF-8-safe rolling buffers,
+  and trust prompt detection for interactive shells.
+profile: unit
+package: aterm-core
+source_files:
+  - aterm-core/src/pty.rs
+inventory_source: state/tests.md
+selectors:
+  - "pty::tests::shell_ready_"
+  - "pty::tests::trust_prompt_"
+tests:
+  - shell_ready_bare_prompt_fires_immediately
+  - shell_ready_constants
+  - shell_ready_fallback_still_works_for_bootstrap
+  - shell_ready_fallback_timeout_fires_without_prompt
+  - shell_ready_fires_only_once
+  - shell_ready_fish_nushell_trailing_newline
+  - shell_ready_immediate_trigger_enables_fast_bootstrap
+  - shell_ready_large_chunk_with_multibyte_utf8
+  - shell_ready_large_chunk_with_prompt_at_end
+  - shell_ready_large_chunk_without_prompt
+  - shell_ready_prompt_fires_even_after_non_prompt_output
+  - shell_ready_prompt_fires_immediately
+  - trust_prompt_buffer_respects_utf8_boundaries
+  - trust_prompt_detected_on_matching_pattern
+  - trust_prompt_fires_only_once
+  - trust_prompt_non_matching_does_not_fire
+  - trust_prompt_pattern_split_across_feeds
+  - trust_prompt_rolling_buffer_trims_to_limit

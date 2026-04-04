@@ -1,0 +1,23 @@
+schema_version: 1
+id: VF-ATERM-SESSION
+feature: workspace create, restore, and cleanup lifecycle
+intent: >
+  Verify workspace registration waits, readiness completion, timeout behavior, and stale-session cleanup flows.
+profile: integration
+package: aterm-core
+target: polling_event_tests
+source_files:
+  - aterm-core/tests/polling_event_tests.rs
+inventory_source: state/tests.md
+selectors:
+  - "create_workspace_"
+  - "stale_cleanup_"
+tests:
+  - create_workspace_blocks_until_registered
+  - create_workspace_no_sleep_2_in_ready_detection
+  - create_workspace_returns_after_shell_running
+  - create_workspace_returns_immediately_if_already_registered
+  - create_workspace_timeout_after_15s_if_never_registered
+  - create_workspace_timeout_returns_after_specified_duration
+  - stale_cleanup_fires_once_on_closed_event
+  - stale_cleanup_not_repeating_timer

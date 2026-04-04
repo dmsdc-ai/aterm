@@ -1,0 +1,39 @@
+schema_version: 1
+id: VF-ATERM-RENDER
+feature: glyph atlas padding, cache invalidation, and render safety
+intent: >
+  Verify render-path batching stays safe on edge cases, glyph atlas uploads use cell-sized padding,
+  cache invalidation clears stale glyphs when font metrics change, and FFI render/resize entry points
+  stay panic-safe.
+profile: unit
+package: aterm-core
+source_files:
+  - aterm-core/src/renderer.rs
+  - aterm-core/src/renderer_glyph.rs
+  - aterm-core/src/lib.rs
+  - aterm-core/src/pty.rs
+inventory_source: state/tests.md
+selectors:
+  - "renderer::tests::"
+  - "ffi_tests::"
+  - "pty::tests::pty_output_signal_"
+tests:
+  - aterm_core_render_does_not_panic_on_empty_grid
+  - aterm_core_render_does_not_panic_on_mismatched_grid_dimensions
+  - glyph_bitmap_padding_matches_cell_dimensions
+  - atlas_clear_triggers_glyph_cache_clear_no_stale_glyphs
+  - font_size_change_resets_both_atlas_and_glyph_cache
+  - ascii_preload_uses_cell_dimensions
+  - cjk_wide_char_padding_matches_two_cell_width
+  - aterm_core_resize_does_not_panic_on_zero_size
+  - aterm_core_resize_does_not_panic_on_very_large_size
+  - all_ffi_entry_points_wrapped_in_catch_unwind
+  - run_based_batching_produces_fewer_text_areas_than_per_cell
+  - run_based_batching_handles_single_character_line
+  - run_based_batching_handles_empty_line
+  - run_based_batching_handles_line_with_all_different_attributes
+  - damage_tracker_partial_damage_skips_unchanged_lines
+  - damage_tracker_full_damage_processes_all_lines
+  - damage_tracker_is_line_damaged_returns_false_for_unchanged_lines
+  - pty_output_signal_can_be_rearmed
+  - pty_output_signal_coalesces_until_taken

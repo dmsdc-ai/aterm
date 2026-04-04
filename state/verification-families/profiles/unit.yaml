@@ -1,0 +1,13 @@
+schema_version: 1
+name: unit
+description: Execute Rust unit-test families inside the aterm-core library test harness.
+command:
+  package: aterm-core
+  template:
+    - cargo
+    - test
+    - -p
+    - "%{package}"
+    - --lib
+    - --
+    - "%{selector}"

@@ -1,0 +1,18 @@
+schema_version: 1
+name: e2e
+description: Reserved execution profile for future end-to-end verification families.
+command:
+  package: aterm-core
+  target: aterm_e2e
+  template:
+    - cargo
+    - test
+    - -p
+    - "%{package}"
+    - --test
+    - "%{target}"
+    - --
+    - "%{selector}"
+notes:
+  - No current family is assigned to this profile.
+  - Keep the profile stable so release packs can adopt e2e families without runner changes.

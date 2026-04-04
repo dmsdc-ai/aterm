@@ -138,6 +138,10 @@ pub struct AtermCore {
     /// Geometry revision counter (Fix 7): cheap monotonic counter for
     /// stale-frame detection without expensive dimension comparison.
     geometry_revision: AtomicU64,
+    /// Render lock (Fix #153): prevents concurrent render() calls from
+    /// CVDisplayLink thread and PTY dirty-callback thread. try_render()
+    /// skips if locked; direct render() spins briefly then skips.
+    render_lock: AtomicBool,
 }
 
 // SAFETY: The raw pointer dirty_userdata is only used from the main thread callback
@@ -164,6 +168,7 @@ impl AtermCore {
             last_pty_cols: 0,
             last_pty_rows: 0,
             geometry_revision: AtomicU64::new(0),
+            render_lock: AtomicBool::new(false),
         }
     }
 
@@ -702,12 +707,57 @@ pub unsafe extern "C" fn aterm_core_named_key(core: *mut AtermCore, key_code: u3
     ffi_catch!((*core).named_key(key_code));
 }
 
+/// Render — acquires render_lock with brief spin (max 8ms) for direct UI calls
+/// (mouseDown, scroll, theme change). Skips if lock cannot be acquired in time.
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_render(core: *mut AtermCore) {
     if core.is_null() {
         return;
     }
+    // Acquire render lock — spin briefly for direct UI calls that need immediate feedback.
+    // If another thread (CVDisplayLink or PTY callback) is rendering, wait up to 8ms.
+    let start = std::time::Instant::now();
+    loop {
+        if (*core)
+            .render_lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
+        if start.elapsed() > std::time::Duration::from_millis(8) {
+            return; // Skip — another thread is rendering, CVDisplayLink will catch up
+        }
+        std::hint::spin_loop();
+    }
     ffi_catch!((*core).render());
+    (*core).render_lock.store(false, Ordering::Release);
+}
+
+/// Try to render if dirty. Returns 1 if rendered, 0 if skipped.
+/// Thread-safe — used by CVDisplayLink and PTY dirty callback for immediate
+/// render without CVDisplayLink latency (Ghostty/Alacritty pattern, Fix #153).
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_try_render(core: *mut AtermCore) -> i32 {
+    if core.is_null() {
+        return 0;
+    }
+    // Try to acquire render lock — skip immediately if another thread is rendering
+    if (*core)
+        .render_lock
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return 0;
+    }
+    let rendered = if (*core).pty_signal.take_dirty() {
+        ffi_catch!((*core).render());
+        1
+    } else {
+        0
+    };
+    (*core).render_lock.store(false, Ordering::Release);
+    rendered
 }
 
 #[no_mangle]

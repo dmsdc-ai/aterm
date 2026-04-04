@@ -1,0 +1,39 @@
+schema_version: 1
+id: VF-ATERM-INJECT
+feature: inject pipeline
+intent: >
+  Verify inject queueing, prompt detection, OSC 133 parsing, idle gating,
+  and condvar signaling invariants in aterm-core.
+profile: unit
+package: aterm-core
+source_files:
+  - aterm-core/src/inject.rs
+inventory_source: state/tests.md
+selectors:
+  - "inject::tests::"
+tests:
+  - detect_osc133_all_marks
+  - detect_osc133_bel_terminated
+  - detect_osc133_no_marks_in_plain_text
+  - detect_osc133_st_terminated
+  - detect_osc133_unterminated_ignored
+  - force_inject_not_triggered_for_fresh_message
+  - force_inject_timeout_constant_is_30s
+  - has_prompt_pattern_detects_ansi_wrapped_prompt
+  - heuristic_prompt_requires_output_settle
+  - idle_state_requires_all_conditions_for_inject
+  - inject_queue_fifo_order
+  - inject_queue_oldest_enqueued_at_tracks_front
+  - inject_queue_push_returns_length
+  - inject_queue_rejects_when_full
+  - inject_signal_empty_queue_waits_for_timeout
+  - inject_signal_notify_before_wait_still_wakes
+  - inject_signal_wait_timeout_returns_false_without_notify
+  - inject_signal_wait_timeout_returns_true_on_notify
+  - inject_signal_wakes_immediately_on_notify
+  - osc133_not_downgraded_by_heuristic
+  - osc133_prompt_skips_output_settle
+  - prompt_detection_stays_latched_until_user_input
+  - record_user_input_clears_osc133
+  - reset_prompt_clears_source
+  - throttle_coalesce_is_25ms

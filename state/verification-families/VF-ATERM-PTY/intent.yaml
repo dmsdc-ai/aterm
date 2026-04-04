@@ -1,0 +1,18 @@
+schema_version: 1
+id: VF-ATERM-PTY
+feature: PTY lifecycle
+intent: >
+  Verify EOF and dead-state transitions are immediate, observable, and clean up PTY-side resources without polling.
+profile: unit
+package: aterm-core
+source_files:
+  - aterm-core/src/pty.rs
+inventory_source: state/tests.md
+selectors:
+  - "pty::tests::mark_workspace_dead_"
+  - "pty::tests::pty_eof_"
+tests:
+  - mark_workspace_dead_closes_writer_and_clears_queue
+  - pty_eof_no_polling_timer_involved
+  - pty_eof_notifies_condvar_waiters
+  - pty_eof_sets_status_to_dead
