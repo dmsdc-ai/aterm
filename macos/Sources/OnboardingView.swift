@@ -5,93 +5,59 @@ struct OnboardingView: View {
     let cliStatus: CliStatus
     let onComplete: (OnboardingResult) -> Void
 
+    @State private var currentStep = 0
     @State private var selectedCLI: String
+    @State private var cliArgs: String
     @State private var selectedShell: String = "zsh"
     @State private var tailscaleEnabled: Bool = false
+    @State private var orchestratorCWD: String = ""
+
+    private let totalSteps = 4
 
     init(isPresented: Binding<Bool>, cliStatus: CliStatus, onComplete: @escaping (OnboardingResult) -> Void) {
         self._isPresented = isPresented
         self.cliStatus = cliStatus
         self.onComplete = onComplete
+        let initialCLI: String
         if cliStatus.claude {
-            _selectedCLI = State(initialValue: "claude")
+            initialCLI = "claude"
         } else if cliStatus.codex {
-            _selectedCLI = State(initialValue: "codex")
+            initialCLI = "codex"
         } else if cliStatus.gemini {
-            _selectedCLI = State(initialValue: "gemini")
+            initialCLI = "gemini"
         } else {
-            _selectedCLI = State(initialValue: "none")
+            initialCLI = "none"
         }
+        _selectedCLI = State(initialValue: initialCLI)
+        _cliArgs = State(initialValue: AtermSettings.shared.cliDefaults[initialCLI] ?? "")
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 8) {
-                Text("aterm")
-                    .font(.system(size: 36, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(nsColor: AtermTheme.accentStrong))
-                Text("AI Development Runtime")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+            // Progress dots
+            HStack(spacing: 6) {
+                ForEach(0..<totalSteps, id: \.self) { step in
+                    Circle()
+                        .fill(step == currentStep
+                            ? Color(nsColor: AtermTheme.accent)
+                            : Color(nsColor: AtermTheme.textMuted).opacity(0.3))
+                        .frame(width: 8, height: 8)
+                }
             }
-            .padding(.top, 32)
-            .padding(.bottom, 24)
+            .padding(.top, 24)
+            .padding(.bottom, 16)
 
             Divider().overlay(Color(nsColor: AtermTheme.border)).padding(.horizontal, 24)
 
+            // Step content
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    settingSection(title: "Choose your AI assistant", step: 1) {
-                        VStack(spacing: 6) {
-                            cliOption("claude", label: "Claude Code", desc: "Anthropic", installed: cliStatus.claude)
-                            cliOption("codex", label: "Codex CLI", desc: "OpenAI", installed: cliStatus.codex)
-                            cliOption("gemini", label: "Gemini CLI", desc: "Google", installed: cliStatus.gemini)
-                            cliOption("none", label: "None", desc: "plain terminal", installed: true)
-                        }
-                    }
-
-                    settingSection(title: "Project folder", step: 2) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("After this step, aterm asks for the first workspace folder.")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
-                            Text("Skip the picker to keep the home directory behavior.")
-                                .font(.system(size: 11))
-                                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
-                        }
-                    }
-
-                    settingSection(title: "Default shell", step: 3) {
-                        HStack(spacing: 8) {
-                            ForEach(["zsh", "bash", "fish"], id: \.self) { shell in
-                                Button(action: { selectedShell = shell }) {
-                                    Text(shell)
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundColor(
-                                            selectedShell == shell
-                                                ? Color(nsColor: AtermTheme.panelBackground)
-                                                : Color(nsColor: AtermTheme.textPrimary)
-                                        )
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 8)
-                                        .background(
-                                            selectedShell == shell
-                                                ? Color(nsColor: AtermTheme.accent)
-                                                : Color(nsColor: AtermTheme.panelInsetBackground)
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-
-                    settingSection(title: "Connect to other machines?", step: 4) {
-                        Toggle(isOn: $tailscaleEnabled) {
-                            Text("Tailscale")
-                                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
-                        }
-                        .toggleStyle(.switch)
+                Group {
+                    switch currentStep {
+                    case 0: stepWelcome
+                    case 1: stepWhatIsOrchestrator
+                    case 2: stepChooseCLI
+                    case 3: stepGetStarted
+                    default: EmptyView()
                     }
                 }
                 .padding(24)
@@ -99,10 +65,19 @@ struct OnboardingView: View {
 
             Divider().overlay(Color(nsColor: AtermTheme.border)).padding(.horizontal, 24)
 
+            // Navigation
             HStack {
+                if currentStep > 0 {
+                    Button(action: { withAnimation { currentStep -= 1 } }) {
+                        Text("Back")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                    }
+                    .buttonStyle(.plain)
+                }
                 Spacer()
-                Button(action: complete) {
-                    Text("Choose Project Folder")
+                Button(action: advance) {
+                    Text(currentStep == totalSteps - 1 ? "Get Started" : "Next")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(Color(nsColor: AtermTheme.panelBackground))
                         .padding(.horizontal, 24)
@@ -111,12 +86,219 @@ struct OnboardingView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
-                Spacer()
             }
+            .padding(.horizontal, 24)
             .padding(.vertical, 16)
         }
-        .frame(width: 440, height: 720)
+        .frame(width: 480, height: 560)
         .background(Color(nsColor: AtermTheme.panelBackground))
+    }
+
+    // MARK: - Step 1: Welcome
+
+    private var stepWelcome: some View {
+        VStack(spacing: 20) {
+            Spacer().frame(height: 24)
+            Text("aterm")
+                .font(.system(size: 42, weight: .bold, design: .monospaced))
+                .foregroundColor(Color(nsColor: AtermTheme.accentStrong))
+            Text("AI Development Runtime")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+            Spacer().frame(height: 12)
+            Text("aterm uses an Orchestrator to manage your AI workflow.")
+                .font(.system(size: 14))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                .multilineTextAlignment(.center)
+            Text("Let's set it up.")
+                .font(.system(size: 14))
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                .multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: - Step 2: What is Orchestrator?
+
+    private var stepWhatIsOrchestrator: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("What is the Orchestrator?")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            tutorialCard(
+                icon: "command.circle.fill",
+                title: "Your AI command center",
+                desc: "The Orchestrator is a persistent AI session that runs as long as aterm is open."
+            )
+            tutorialCard(
+                icon: "arrow.triangle.branch",
+                title: "Delegates tasks",
+                desc: "It breaks down complex work into subtasks and assigns them to specialized sessions."
+            )
+            tutorialCard(
+                icon: "list.clipboard.fill",
+                title: "Tracks progress",
+                desc: "Think of it as your AI project manager — it knows what's done and what's next."
+            )
+
+            Text("You can always add more workspaces for hands-on coding. The Orchestrator coordinates them all.")
+                .font(.system(size: 12))
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                .padding(.top, 4)
+        }
+    }
+
+    // MARK: - Step 3: Choose CLI
+
+    private var stepChooseCLI: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Choose your Orchestrator CLI")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            Text("Which AI CLI should power your Orchestrator?")
+                .font(.system(size: 13))
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+
+            VStack(spacing: 6) {
+                cliOption("claude", label: "Claude Code", desc: "Anthropic — architecture, debugging, MCP", installed: cliStatus.claude)
+                cliOption("codex", label: "Codex CLI", desc: "OpenAI — code generation, testing", installed: cliStatus.codex)
+                cliOption("gemini", label: "Gemini CLI", desc: "Google — web search, documentation", installed: cliStatus.gemini)
+                cliOption("none", label: "None", desc: "plain terminal", installed: true)
+            }
+            .onChange(of: selectedCLI) {
+                cliArgs = AtermSettings.shared.cliDefaults[selectedCLI] ?? ""
+            }
+
+            if selectedCLI != "none" {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CLI Arguments")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                    TextField(
+                        AtermSettings.defaultCliArgs[selectedCLI] ?? "",
+                        text: $cliArgs
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: - Step 4: Get Started
+
+    private var stepGetStarted: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("You're all set!")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(Color(nsColor: AtermTheme.accent))
+                        .frame(width: 20)
+                    Text("Orchestrator Working Directory")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                }
+                HStack(spacing: 8) {
+                    Text(orchestratorCWD.isEmpty ? "~/.aigentry/orchestrator/" : orchestratorCWD)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Change...") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        panel.allowsMultipleSelection = false
+                        if panel.runModal() == .OK, let url = panel.url {
+                            orchestratorCWD = url.path
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            infoRow(
+                icon: "plus.circle.fill",
+                text: "Add more workspaces later with the + button in the sidebar."
+            )
+            infoRow(
+                icon: "gearshape.fill",
+                text: "Settings (\u{2318},) lets you change the Orchestrator CLI anytime."
+            )
+
+            HStack(spacing: 16) {
+                settingPill(title: "Shell", value: selectedShell, options: ["zsh", "bash", "fish"], selection: $selectedShell)
+                Toggle(isOn: $tailscaleEnabled) {
+                    Text("Tailscale")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+            .padding(.top, 8)
+
+            Spacer()
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func tutorialCard(icon: String, title: String, desc: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 20))
+                .foregroundColor(Color(nsColor: AtermTheme.accent))
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                Text(desc)
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: AtermTheme.panelInsetBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func infoRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(Color(nsColor: AtermTheme.accent))
+                .frame(width: 20)
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+        }
+    }
+
+    private func settingPill(title: String, value: String, options: [String], selection: Binding<String>) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+            Picker("", selection: selection) {
+                ForEach(options, id: \.self) { opt in
+                    Text(opt).tag(opt)
+                }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+        }
     }
 
     private func cliOption(_ value: String, label: String, desc: String, installed: Bool) -> some View {
@@ -177,29 +359,29 @@ struct OnboardingView: View {
         .disabled(!installed)
     }
 
-    private func settingSection<Content: View>(title: String, step: Int, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("\(step)")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(Color(nsColor: AtermTheme.panelBackground))
-                    .frame(width: 18, height: 18)
-                    .background(Color(nsColor: AtermTheme.accent))
-                    .clipShape(Circle())
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
-            }
-            content()
+    private func advance() {
+        if currentStep < totalSteps - 1 {
+            withAnimation { currentStep += 1 }
+        } else {
+            complete()
         }
     }
 
     private func complete() {
+        if selectedCLI != "none" {
+            let args = cliArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !args.isEmpty {
+                AtermSettings.shared.cliDefaults[selectedCLI] = args
+            }
+            AtermSettings.shared.save()
+        }
+
         let result = OnboardingResult(
             defaultCLI: selectedCLI,
             defaultShell: selectedShell,
             tailscaleEnabled: tailscaleEnabled,
-            initialProjectDirectory: nil
+            orchestratorCLI: selectedCLI,
+            orchestratorCWD: orchestratorCWD
         )
         onComplete(result)
         isPresented = false
@@ -210,7 +392,8 @@ struct OnboardingResult {
     let defaultCLI: String
     let defaultShell: String
     let tailscaleEnabled: Bool
-    let initialProjectDirectory: String?
+    let orchestratorCLI: String
+    let orchestratorCWD: String
 }
 
 struct CliStatus {
@@ -227,6 +410,8 @@ struct PreferencesView: View {
     @State private var selectedCLI: String
     @State private var selectedShell: String
     @State private var tailscaleEnabled: Bool
+    @State private var orchestratorCLI: String
+    @State private var orchestratorCWD: String
     @Environment(\.dismiss) private var dismiss
 
     init(cliStatus: CliStatus, currentConfig: [String: Any], onSave: @escaping (OnboardingResult) -> Void) {
@@ -241,6 +426,9 @@ struct PreferencesView: View {
         _selectedCLI = State(initialValue: ai?["defaultCLI"] as? String ?? "none")
         _selectedShell = State(initialValue: shell?["default"] as? String ?? "zsh")
         _tailscaleEnabled = State(initialValue: tailscale?["connect_on_launch"] as? Bool ?? false)
+        let orchestrator = currentConfig["orchestrator"] as? [String: Any]
+        _orchestratorCLI = State(initialValue: orchestrator?["cli"] as? String ?? ai?["defaultCLI"] as? String ?? "none")
+        _orchestratorCWD = State(initialValue: orchestrator?["cwd"] as? String ?? "")
     }
 
     var body: some View {
@@ -259,6 +447,15 @@ struct PreferencesView: View {
                         Text("Claude").tag("claude").disabled(!cliStatus.claude)
                         Text("Codex").tag("codex").disabled(!cliStatus.codex)
                         Text("Gemini").tag("gemini").disabled(!cliStatus.gemini)
+                        Text("None").tag("none")
+                    }
+                }
+
+                Section("Orchestrator") {
+                    Picker("Orchestrator CLI", selection: $orchestratorCLI) {
+                        Text("Claude").tag("claude")
+                        Text("Codex").tag("codex")
+                        Text("Gemini").tag("gemini")
                         Text("None").tag("none")
                     }
                 }
@@ -289,7 +486,8 @@ struct PreferencesView: View {
                         defaultCLI: selectedCLI,
                         defaultShell: selectedShell,
                         tailscaleEnabled: tailscaleEnabled,
-                        initialProjectDirectory: nil
+                        orchestratorCLI: orchestratorCLI,
+                        orchestratorCWD: orchestratorCWD
                     ))
                     dismiss()
                 }

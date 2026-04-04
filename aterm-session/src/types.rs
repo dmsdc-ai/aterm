@@ -7,6 +7,10 @@ pub struct WorkspaceInfo {
     pub cli: String,
     pub cwd: String,
     pub status: String,
+    pub custom_command: Option<String>,
+    pub created_at: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub is_system: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,4 +29,6 @@ pub enum WorkspaceEvent {
     Closed { id: String },
     StatusChanged { id: String, status: String },
     TitleChanged { id: String, title: String },
+    ShellReady { id: String },
+    TrustPromptDetected { id: String },
 }

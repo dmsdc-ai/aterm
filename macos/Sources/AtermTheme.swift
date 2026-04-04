@@ -15,15 +15,15 @@ enum AtermThemeMode: UInt8 {
 enum AtermTheme {
     static let windowBackground = NSColor.atermDynamic(
         light: .atermHex(0xFAF6F0),
-        dark: .atermHex(0x000000)
+        dark: .atermHex(0x1A1B26)
     )
     static let terminalBackground = NSColor.atermDynamic(
         light: .atermHex(0xFAF6F0),
-        dark: .atermHex(0x000000)
+        dark: .atermHex(0x1A1B26)
     )
     static let terminalForeground = NSColor.atermDynamic(
         light: .atermHex(0x24292F),
-        dark: .atermHex(0xE0E0E0)
+        dark: .atermHex(0xA9B1D6)
     )
     static let sidebarBackground = NSColor.atermDynamic(
         light: .atermHex(0xF0EBE3),

@@ -79,9 +79,7 @@ impl SessionStore {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 // Check for Swift format at ~/.aigentry/config/sessions.json
-                let swift_path = dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("/tmp"))
-                    .join(".aigentry/config/sessions.json");
+                let swift_path = data_root().join("config/sessions.json");
                 if swift_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&swift_path) {
                         match serde_json::from_str::<Vec<SwiftSessionEntry>>(&content) {
@@ -108,7 +106,7 @@ impl SessionStore {
                                 return Ok(data);
                             }
                             Err(e) => {
-                                eprintln!(
+                                log_stderr!(
                                     "[session] Swift migration parse failed: {e}. Starting fresh."
                                 );
                             }
@@ -145,7 +143,7 @@ impl SessionStore {
         for entry in data.sessions {
             let mut guard = manager.lock().map_err(|error| error.to_string())?;
             if let Err(error) = guard.restore_session_entry(entry) {
-                eprintln!("[aterm] restore_sessions skipped entry: {}", error);
+                log_stderr!("[aterm] restore_sessions skipped entry: {}", error);
             }
         }
 
@@ -153,9 +151,64 @@ impl SessionStore {
     }
 }
 
+/// Return the aterm data root directory.
+/// Uses ATERM_DATA_ROOT env var if set, else ~/.aigentry.
+pub fn data_root() -> PathBuf {
+    std::env::var("ATERM_DATA_ROOT")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".aigentry")
+        })
+}
+
 pub fn sessions_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".aterm").join("sessions.json")
+    migrate_dot_aterm(&home);
+    data_root().join("data").join("sessions.json")
+}
+
+/// One-shot migration: move ~/.aterm/ contents into ~/.aigentry/ then remove ~/.aterm/.
+fn migrate_dot_aterm(home: &std::path::Path) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static MIGRATED: AtomicBool = AtomicBool::new(false);
+    if MIGRATED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let old_root = home.join(".aterm");
+    if !old_root.is_dir() {
+        return;
+    }
+
+    let moves: &[(&str, &str)] = &[
+        ("sessions.json", ".aigentry/data/sessions.json"),
+        ("aterm.json", ".aigentry/config/aterm.json"),
+        ("shell-integration", ".aigentry/shell-integration"),
+        ("refs", ".aigentry/refs"),
+        ("tailscale", ".aigentry/tailscale"),
+        ("aterm.sock", ".aigentry/aterm.sock"),
+    ];
+
+    for &(src_rel, dst_rel) in moves {
+        let src = old_root.join(src_rel);
+        let dst = home.join(dst_rel);
+        if !src.exists() || dst.exists() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::rename(&src, &dst).is_ok() {
+            eprintln!("[aterm] migrated {} → {}", src.display(), dst.display());
+        }
+    }
+
+    // Remove ~/.aterm/ if now empty
+    let _ = std::fs::remove_dir(&old_root);
 }
 
 pub fn is_claude_session(command: &str, args: &[String]) -> bool {

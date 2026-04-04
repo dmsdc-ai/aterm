@@ -88,7 +88,7 @@ impl SessionStore {
 
 pub fn sessions_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".aterm").join("sessions.json")
+    home.join(".aigentry").join("data").join("sessions.json")
 }
 
 pub fn is_claude_session(command: &str, args: &[String]) -> bool {

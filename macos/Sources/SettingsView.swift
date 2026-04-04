@@ -8,7 +8,7 @@ class AtermSettings: ObservableObject {
     static let shared = AtermSettings()
 
     // Appearance
-    @Published var colorScheme: String = "Tokyo Night"
+    @Published var colorScheme: String = "Default"
     @Published var fontSize: Double = 18
     @Published var fontFamily: String = "System Default"
     @Published var lineHeight: Double = 1.4
@@ -30,8 +30,39 @@ class AtermSettings: ObservableObject {
     // Sidebar
     @Published var showTaskBoard: Bool = true
 
+    // CLI Defaults (per-CLI arguments)
+    @Published var cliDefaults: [String: String] = AtermSettings.defaultCliArgs
+
+    static let defaultCliArgs: [String: String] = [
+        "claude": "--dangerously-skip-permissions --continue",
+        "codex": "resume --last --dangerously-bypass-approvals-and-sandbox",
+        "gemini": "resume -y",
+    ]
+
+    // Orchestrator
+    @Published var orchestratorCLI: String = "claude"
+    @Published var orchestratorArgs: String = ""
+    @Published var orchestratorName: String = "orchestrator"
+    @Published var orchestratorCWD: String = ""
+
+    /// Resolved orchestrator CWD: user-set value or default (aigentryRoot/orchestrator)
+    var effectiveOrchestratorCWD: String {
+        orchestratorCWD.isEmpty ? aigentryRoot + "/orchestrator" : orchestratorCWD
+    }
+
+    /// Base data root: ATERM_DATA_ROOT env var if set, else ~/.aigentry
+    static var dataRoot: String {
+        if let root = ProcessInfo.processInfo.environment["ATERM_DATA_ROOT"], !root.isEmpty {
+            return root
+        }
+        return NSHomeDirectory() + "/.aigentry"
+    }
+
+    // Data folder (aigentry root)
+    @Published var aigentryRoot: String = AtermSettings.dataRoot
+
     static let colorSchemes = [
-        "Dark", "Light", "Solarized Dark", "Solarized Light",
+        "Default", "Dark", "Light", "Solarized Dark", "Solarized Light",
         "Monokai", "Dracula", "Nord", "Tokyo Night",
     ]
 
@@ -48,7 +79,8 @@ class AtermSettings: ObservableObject {
         case "Dracula": return 5
         case "Nord": return 6
         case "Tokyo Night": return 7
-        default: return 0
+        case "Default": return 8
+        default: return 8
         }
     }
 
@@ -62,14 +94,93 @@ class AtermSettings: ObservableObject {
         case 5: return "Dracula"
         case 6: return "Nord"
         case 7: return "Tokyo Night"
-        default: return "Dark"
+        case 8: return "Default"
+        default: return "Default"
         }
     }
 
-    private static let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
+    private static var bootstrapPath: String { dataRoot + "/config/aterm.json" }
+
+    private var configPath: String {
+        aigentryRoot + "/config/aterm.json"
+    }
+
+    /// Read aigentry_root from config file (~/.aigentry/config/aterm.json), default to ~/.aigentry
+    private static func resolveAigentryRoot() -> String {
+        let defaultRoot = dataRoot
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: bootstrapPath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let root = json["aigentry_root"] as? String
+        else { return defaultRoot }
+        // Expand ~ if present
+        let expanded = root.hasPrefix("~/")
+            ? NSHomeDirectory() + String(root.dropFirst(1))
+            : root
+        return expanded.isEmpty ? defaultRoot : expanded
+    }
+
+    /// Save aigentry_root pointer to bootstrap file
+    private func saveBootstrap() {
+        let dir = URL(fileURLWithPath: Self.bootstrapPath).deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let json: [String: Any] = ["aigentry_root": aigentryRoot]
+        if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+            try? data.write(to: URL(fileURLWithPath: Self.bootstrapPath))
+        }
+    }
+
+    /// Migrate .aigentry contents to a new location
+    func migrateAigentryRoot(to newRoot: String) -> Bool {
+        let fm = FileManager.default
+        let oldRoot = aigentryRoot
+        guard oldRoot != newRoot else { return true }
+
+        // Create destination
+        do {
+            try fm.createDirectory(atPath: newRoot, withIntermediateDirectories: true)
+        } catch {
+            NSLog("[aterm] migrate: failed to create destination %@: %@", newRoot, error.localizedDescription)
+            return false
+        }
+
+        // Copy contents
+        do {
+            let contents = try fm.contentsOfDirectory(atPath: oldRoot)
+            for item in contents {
+                let src = oldRoot + "/" + item
+                let dst = newRoot + "/" + item
+                if fm.fileExists(atPath: dst) {
+                    try fm.removeItem(atPath: dst)
+                }
+                try fm.copyItem(atPath: src, toPath: dst)
+            }
+        } catch {
+            NSLog("[aterm] migrate: copy failed from %@ to %@: %@", oldRoot, newRoot, error.localizedDescription)
+            return false
+        }
+
+        // Verify config exists at new location
+        let newConfig = newRoot + "/config/aterm.json"
+        guard fm.fileExists(atPath: newConfig) else {
+            NSLog("[aterm] migrate: verification failed — config not found at %@", newConfig)
+            return false
+        }
+
+        // Update state and save pointer
+        aigentryRoot = newRoot
+        saveBootstrap()
+
+        // Remove old directory only after successful migration
+        try? fm.removeItem(atPath: oldRoot)
+        NSLog("[aterm] migrated .aigentry from %@ to %@", oldRoot, newRoot)
+        return true
+    }
 
     func load() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: Self.configPath)),
+        // Resolve aigentry root from bootstrap file first
+        aigentryRoot = Self.resolveAigentryRoot()
+
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
               let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
 
@@ -85,7 +196,6 @@ class AtermSettings: ObservableObject {
         if let s = appearance?["backgroundOpacity"] as? Double { backgroundOpacity = s }
         if let s = appearance?["showStatusEmoji"] as? Bool { showStatusEmoji = s }
         if let s = appearance?["useAsciiIcons"] as? Bool { useAsciiIcons = s }
-
         if let s = ai?["defaultCLI"] as? String { defaultCLI = s }
         if let s = terminal?["defaultCWD"] as? String { defaultCWD = s }
         if let s = terminal?["scrollbackLines"] as? Int { scrollbackLines = s }
@@ -97,12 +207,25 @@ class AtermSettings: ObservableObject {
 
         let sidebar = config["sidebar"] as? [String: Any]
         if let s = sidebar?["showTaskBoard"] as? Bool { showTaskBoard = s }
+
+        if let cd = config["cli_defaults"] as? [String: String] {
+            var merged = AtermSettings.defaultCliArgs
+            for (k, v) in cd { merged[k] = v }
+            cliDefaults = merged
+        }
+
+        let orchestrator = config["orchestrator"] as? [String: Any]
+        if let s = orchestrator?["cli"] as? String { orchestratorCLI = s }
+        else if let s = ai?["defaultCLI"] as? String, s != "none" { orchestratorCLI = s }
+        if let s = orchestrator?["args"] as? String { orchestratorArgs = s }
+        if let s = orchestrator?["name"] as? String { orchestratorName = s }
+        if let s = orchestrator?["cwd"] as? String, !s.isEmpty { orchestratorCWD = s }
     }
 
     func save() {
         // Read existing config to preserve fields we don't manage
         var config: [String: Any] = [:]
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: Self.configPath)),
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
            let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             config = existing
         }
@@ -137,11 +260,20 @@ class AtermSettings: ObservableObject {
             "showTaskBoard": showTaskBoard,
         ] as [String: Any]
 
+        config["cli_defaults"] = cliDefaults
+
+        config["orchestrator"] = [
+            "cli": orchestratorCLI,
+            "cwd": effectiveOrchestratorCWD,
+            "args": orchestratorArgs,
+            "name": orchestratorName,
+        ] as [String: Any]
+
         do {
-            let dir = URL(fileURLWithPath: Self.configPath).deletingLastPathComponent()
+            let dir = URL(fileURLWithPath: configPath).deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: URL(fileURLWithPath: Self.configPath))
+            try data.write(to: URL(fileURLWithPath: configPath))
         } catch {
             NSLog("[aterm] settings save failed: %@", error.localizedDescription)
         }
@@ -154,12 +286,14 @@ enum SettingsTab: CaseIterable {
     case appearance
     case terminal
     case session
+    case orchestrator
 
     var title: String {
         switch self {
         case .appearance: return AtermLocalization.text(ko: "모양", en: "Appearance")
         case .terminal: return AtermLocalization.text(ko: "터미널", en: "Terminal")
         case .session: return AtermLocalization.text(ko: "세션", en: "Session")
+        case .orchestrator: return AtermLocalization.text(ko: "오케스트레이터", en: "Orchestrator")
         }
     }
 
@@ -168,6 +302,7 @@ enum SettingsTab: CaseIterable {
         case .appearance: return "paintbrush"
         case .terminal: return "terminal"
         case .session: return "arrow.clockwise"
+        case .orchestrator: return "cpu"
         }
     }
 }
@@ -175,6 +310,8 @@ enum SettingsTab: CaseIterable {
 struct SettingsView: View {
     @ObservedObject var settings: AtermSettings
     let onApply: () -> Void
+    var onApplyOrchestrator: (() -> Void)? = nil
+    var isOrchestratorRunning: Bool = false
     @State private var selectedTab: SettingsTab = .appearance
     @Environment(\.dismiss) private var dismiss
 
@@ -220,6 +357,15 @@ struct SettingsView: View {
                     TerminalSettingsView(settings: settings)
                 case .session:
                     SessionSettingsView(settings: settings)
+                case .orchestrator:
+                    OrchestratorSettingsView(
+                        settings: settings,
+                        isRunning: isOrchestratorRunning,
+                        onApply: {
+                            settings.save()
+                            onApplyOrchestrator?()
+                        }
+                    )
                 }
             }
             .frame(maxHeight: .infinity)
@@ -247,7 +393,7 @@ struct SettingsView: View {
     }
 
     private func resetDefaults() {
-        settings.colorScheme = "Dark"
+        settings.colorScheme = "Default"
         settings.fontSize = 18
         settings.fontFamily = "System Default"
         settings.lineHeight = 1.4
@@ -260,6 +406,11 @@ struct SettingsView: View {
         settings.autoRestartDead = false
         settings.maxRestartAttempts = 3
         settings.showTaskBoard = true
+        settings.orchestratorCLI = "claude"
+        settings.orchestratorArgs = ""
+        settings.orchestratorName = "orchestrator"
+        settings.orchestratorCWD = ""
+        settings.cliDefaults = AtermSettings.defaultCliArgs
         settings.save()
         onApply()
     }
@@ -442,6 +593,38 @@ struct TerminalSettingsView: View {
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
+            Text(AtermLocalization.text(ko: "CLI 기본 인수", en: "Default CLI Arguments"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            Text(AtermLocalization.text(
+                ko: "새 워크스페이스 생성 시 자동 입력되는 CLI 인수",
+                en: "Pre-filled when creating a new workspace"
+            ))
+                .font(.system(size: 10))
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+
+            ForEach(["claude", "codex", "gemini"], id: \.self) { cli in
+                HStack {
+                    Text(cli)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .frame(width: 60, alignment: .leading)
+                        .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                    TextField(
+                        AtermSettings.defaultCliArgs[cli] ?? "",
+                        text: Binding(
+                            get: { settings.cliDefaults[cli] ?? "" },
+                            set: { settings.cliDefaults[cli] = $0 }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .onChange(of: settings.cliDefaults[cli]) { settings.save() }
+                }
+            }
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
             Text(AtermLocalization.text(ko: "기본 작업 디렉터리", en: "Default Working Directory"))
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
@@ -537,6 +720,210 @@ struct SessionSettingsView: View {
             Toggle(AtermLocalization.text(ko: "태스크 보드 표시", en: "Show Task Board"), isOn: $settings.showTaskBoard)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 .onChange(of: settings.showTaskBoard) { settings.save() }
+        }
+        .padding(20)
+    }
+}
+
+// MARK: - Orchestrator Tab
+
+struct OrchestratorSettingsView: View {
+    @ObservedObject var settings: AtermSettings
+    let isRunning: Bool
+    let onApply: () -> Void
+
+    private var isTrusted: Bool {
+        let cwd = settings.effectiveOrchestratorCWD
+        let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+        let trustDir = NSHomeDirectory() + "/.claude/projects/" + encoded
+        return FileManager.default.fileExists(atPath: trustDir)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Status
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(isRunning ? Color.green : Color(nsColor: AtermTheme.textMuted))
+                    .frame(width: 8, height: 8)
+                Text(isRunning
+                    ? AtermLocalization.text(ko: "실행 중", en: "Running")
+                    : AtermLocalization.text(ko: "중지됨", en: "Stopped"))
+                    .font(.system(size: 12))
+                    .foregroundColor(isRunning
+                        ? Color.green
+                        : Color(nsColor: AtermTheme.textMuted))
+                Spacer()
+                if settings.orchestratorCLI == "claude" {
+                    HStack(spacing: 4) {
+                        Image(systemName: isTrusted ? "checkmark.shield.fill" : "shield.slash")
+                            .font(.system(size: 11))
+                        Text(isTrusted
+                            ? AtermLocalization.text(ko: "신뢰됨", en: "Trusted")
+                            : AtermLocalization.text(ko: "미신뢰", en: "Not Trusted"))
+                            .font(.system(size: 11))
+                    }
+                    .foregroundColor(isTrusted
+                        ? Color.green
+                        : Color(nsColor: AtermTheme.statusWarning))
+                }
+            }
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            // CLI picker
+            Text(AtermLocalization.text(ko: "CLI", en: "CLI"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            Picker("", selection: $settings.orchestratorCLI) {
+                Text("Claude").tag("claude")
+                Text("Codex").tag("codex")
+                Text("Gemini").tag("gemini")
+                Text(AtermLocalization.text(ko: "커스텀", en: "Custom")).tag("custom")
+            }
+            .pickerStyle(.segmented)
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            // Name
+            Text(AtermLocalization.text(ko: "워크스페이스 이름", en: "Workspace Name"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            TextField(
+                AtermLocalization.text(ko: "이름", en: "Name"),
+                text: $settings.orchestratorName
+            )
+            .textFieldStyle(.roundedBorder)
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            // Working directory
+            Text(AtermLocalization.text(ko: "작업 디렉터리", en: "Working Directory"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            HStack(spacing: 8) {
+                Text(settings.effectiveOrchestratorCWD)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if settings.orchestratorCWD.isEmpty {
+                    Text(AtermLocalization.text(ko: "기본값", en: "Default"))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(Color(nsColor: AtermTheme.accent))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color(nsColor: AtermTheme.accentSubtle))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                Button(AtermLocalization.text(ko: "선택...", en: "Choose...")) {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = false
+                    panel.allowsMultipleSelection = false
+                    panel.prompt = AtermLocalization.text(ko: "선택", en: "Select")
+                    if panel.runModal() == .OK, let url = panel.url {
+                        settings.orchestratorCWD = url.path
+                    }
+                }
+
+                if !settings.orchestratorCWD.isEmpty {
+                    Button(AtermLocalization.text(ko: "초기화", en: "Reset")) {
+                        settings.orchestratorCWD = ""
+                    }
+                    .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                }
+            }
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            // Data folder
+            Text(AtermLocalization.text(ko: "데이터 폴더", en: "Data Folder"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            HStack(spacing: 8) {
+                Text(settings.aigentryRoot)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if settings.aigentryRoot == NSHomeDirectory() + "/.aigentry" {
+                    Text(AtermLocalization.text(ko: "기본값", en: "Default"))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(Color(nsColor: AtermTheme.accent))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color(nsColor: AtermTheme.accentSubtle))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+
+                Button(AtermLocalization.text(ko: "변경...", en: "Change...")) {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = false
+                    panel.allowsMultipleSelection = false
+                    panel.prompt = AtermLocalization.text(ko: "선택", en: "Select")
+                    if panel.runModal() == .OK, let url = panel.url {
+                        let newRoot = url.path + "/.aigentry"
+                        if settings.migrateAigentryRoot(to: newRoot) {
+                            settings.save()
+                            onApply()
+                        }
+                    }
+                }
+            }
+
+            Text(AtermLocalization.text(
+                ko: "오케스트레이터, 설정, 세션 데이터가 저장되는 위치입니다.",
+                en: "Where orchestrator, settings, and session data are stored."
+            ))
+                .font(.system(size: 10))
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+
+            // Args (visible for custom CLI)
+            if settings.orchestratorCLI == "custom" {
+                Divider().overlay(Color(nsColor: AtermTheme.border))
+
+                Text(AtermLocalization.text(ko: "커스텀 명령어", en: "Custom Command"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+                TextField(
+                    AtermLocalization.text(ko: "예: my-cli --flag", en: "e.g. my-cli --flag"),
+                    text: $settings.orchestratorArgs
+                )
+                .textFieldStyle(.roundedBorder)
+            }
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            // Apply button
+            HStack {
+                Spacer()
+                Button(action: onApply) {
+                    Text(isRunning
+                        ? AtermLocalization.text(ko: "적용 및 재시작", en: "Apply & Restart")
+                        : AtermLocalization.text(ko: "적용 및 시작", en: "Apply & Start"))
+                        .frame(minWidth: 120)
+                }
+                .controlSize(.large)
+            }
+
+            Text(AtermLocalization.text(
+                ko: "오케스트레이터 워크스페이스를 새 설정으로 (재)시작합니다.",
+                en: "Starts or restarts the orchestrator workspace with the new configuration."
+            ))
+                .font(.system(size: 10))
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
         }
         .padding(20)
     }

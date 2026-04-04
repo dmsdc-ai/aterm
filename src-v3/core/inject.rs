@@ -8,6 +8,7 @@ pub const INJECTOR_POLL: Duration = Duration::from_millis(500);
 pub const IDLE_THRESHOLD: Duration = Duration::from_secs(2);
 pub const OUTPUT_SETTLE: Duration = Duration::from_secs(1);
 const PROMPT_PATTERNS: &[&str] = &["❯", "> ", "$ ", "% "];
+const BARE_PROMPTS: &[&str] = &["❯", ">", "$", "%"];
 
 pub type SharedInjectQueue = Arc<Mutex<InjectQueue>>;
 
@@ -101,7 +102,9 @@ impl IdleState {
     pub fn record_output(&mut self, has_prompt: bool) {
         let now = Instant::now();
         self.last_output_at = now;
-        self.last_output_has_prompt = has_prompt;
+        if has_prompt {
+            self.last_output_has_prompt = true;
+        }
     }
 
     pub fn should_inject(&self, queue_has_messages: bool) -> bool {
@@ -113,7 +116,13 @@ impl IdleState {
 }
 
 pub fn has_prompt_pattern(data: &str) -> bool {
-    PROMPT_PATTERNS.iter().any(|pattern| data.contains(pattern))
+    let stripped = strip_ansi(data);
+    let trimmed = stripped.trim();
+
+    BARE_PROMPTS.iter().any(|prompt| trimmed == *prompt)
+        || PROMPT_PATTERNS
+            .iter()
+            .any(|pattern| stripped.contains(pattern))
 }
 
 pub fn normalize_terminal_text(input: &str) -> String {

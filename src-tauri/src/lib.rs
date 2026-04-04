@@ -357,7 +357,7 @@ fn set_workspace_status(status: &Arc<Mutex<String>>, next: &str) {
 
 fn sessions_path() -> std::path::PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-    home.join(".aterm").join("sessions.json")
+    home.join(".aigentry").join("data").join("sessions.json")
 }
 
 fn is_executable_file(path: &Path) -> bool {

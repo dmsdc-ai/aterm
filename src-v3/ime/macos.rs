@@ -104,9 +104,7 @@ extern "C" fn key_down(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObject) {
     }
 
     // Route through macOS IME
-    let events = unsafe {
-        NSArray::from_retained_slice(&[Retained::retain(event).unwrap()])
-    };
+    let events = unsafe { NSArray::from_retained_slice(&[Retained::retain(event).unwrap()]) };
     let _: () = unsafe { msg_send![this, interpretKeyEvents: &*events] };
 
     // Drain accumulator → committed
@@ -127,8 +125,15 @@ extern "C" fn key_down(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObject) {
     }
 }
 
-extern "C" fn insert_text(_this: *mut AnyObject, _cmd: Sel, string: *mut AnyObject, _range: NSRange) {
-    if string.is_null() { return; }
+extern "C" fn insert_text(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    string: *mut AnyObject,
+    _range: NSRange,
+) {
+    if string.is_null() {
+        return;
+    }
     let text = extract_string(unsafe { &*string });
     eprintln!("[ime] insertText: {:?}", text);
     if text.is_empty() {
@@ -160,7 +165,9 @@ extern "C" fn set_marked_text(
     _selected: NSRange,
     _replacement: NSRange,
 ) {
-    if string.is_null() { return; }
+    if string.is_null() {
+        return;
+    }
     let text = extract_string(unsafe { &*string });
     eprintln!("[ime] setMarkedText: {:?}", text);
     if let Ok(mut s) = shared().lock() {
@@ -288,7 +295,12 @@ fn register_class() -> &'static AnyClass {
             builder.add_method(
                 sel!(attributedSubstringForProposedRange:actualRange:),
                 attributed_substring
-                    as extern "C" fn(*mut AnyObject, Sel, NSRange, *mut NSRange) -> *const AnyObject,
+                    as extern "C" fn(
+                        *mut AnyObject,
+                        Sel,
+                        NSRange,
+                        *mut NSRange,
+                    ) -> *const AnyObject,
             );
             builder.add_method(
                 sel!(validAttributesForMarkedText),
@@ -296,8 +308,7 @@ fn register_class() -> &'static AnyClass {
             );
             builder.add_method(
                 sel!(firstRectForCharacterRange:actualRange:),
-                first_rect
-                    as extern "C" fn(*mut AnyObject, Sel, NSRange, *mut NSRange) -> NSRect,
+                first_rect as extern "C" fn(*mut AnyObject, Sel, NSRange, *mut NSRange) -> NSRect,
             );
             builder.add_method(
                 sel!(characterIndexForPoint:),
@@ -342,7 +353,10 @@ impl NativeImeHandler {
             let view: *mut AnyObject = unsafe { msg_send![cls, alloc] };
             let view: *mut AnyObject = unsafe { msg_send![view, initWithFrame: frame] };
 
-            NativeImeHandler { view, attached_host_view: Mutex::new(None) }
+            NativeImeHandler {
+                view,
+                attached_host_view: Mutex::new(None),
+            }
         })
     }
 
@@ -350,7 +364,9 @@ impl NativeImeHandler {
         unsafe { &*(self.view.cast::<NSView>()) }
     }
 
-    fn appkit_handles<W: HasWindowHandle>(window: &W) -> Option<(Retained<NSView>, Retained<NSWindow>)> {
+    fn appkit_handles<W: HasWindowHandle>(
+        window: &W,
+    ) -> Option<(Retained<NSView>, Retained<NSWindow>)> {
         let handle = window.window_handle().ok()?;
         let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
             return None;

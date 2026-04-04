@@ -69,6 +69,24 @@ cd npm/aterm && npm publish --access public
 - 보고: `telepty inject --from {session-id} aigentry-orchestrator-claude "report"`
 - 헌법: `~/projects/aigentry/docs/CONSTITUTION.md`
 
+## Debugging Methodology
+
+### Evidence-Based Benchmark-First Debugging (HARD RULE)
+When fixing rendering, font, performance, or input bugs:
+1. Logger captures raw evidence (PTY bytes, hexdump, timing, GPU state)
+2. Terminal benchmark sessions (ghostty/alacritty/kitty/wezterm/contour/cmux) research how competitors solved the same problem — code + git history
+3. Analyst verifies fix is architecturally feasible with current libraries
+4. Implementation based on benchmarked, verified solutions only
+5. Tester verifies fix with runtime evidence (not just compile success)
+
+DO NOT attempt fixes based on speculation. DO NOT assume a library can do something without verifying its API surface.
+
+### Architecture Constraints
+- fontdue: pure Rust single-TTF rasterizer — NO system font access. Use Core Text FFI for fallback.
+- wgpu: clear_color must match terminal background or be transparent. Never use debug colors.
+- Resize: atlas persists, surface.configure deferred to render time, PTY SIGWINCH coalesced.
+- Resize new cells = default bg. Erase ops (EL/ECH/ED) = cursor SGR bg. Never mix these. After Term::resize(), cursor template bg is reset to default to prevent child process post-SIGWINCH erases from inheriting stale SGR bg (fix #157).
+
 ## Session Detection
 
 CLI/AI가 세션을 탐지할 때 아래 우선순위를 반드시 따른다.

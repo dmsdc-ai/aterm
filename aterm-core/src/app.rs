@@ -1,13 +1,80 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::io::Write as IoWrite;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
+
+/// Global monotonic sequence counter for IPC events.
+/// Incremented on every broadcast — subscribers use this to detect gaps.
+static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_seq() -> u64 {
+    EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
+}
 
 use aterm_ipc::server::IpcServer;
-use aterm_session::action::{ActionResponse, SessionAction};
+use aterm_session::action::{ActionResponse, AtermEvent, SessionAction};
 use aterm_session::host::PlatformHost;
-use aterm_session::types::WorkspaceInfo;
+use aterm_session::types::{WorkspaceEvent, WorkspaceInfo};
 
-use crate::inject::{InjectMessage, SharedInjectQueue};
+use crate::inject::{InjectMessage, InjectSignal, SharedInjectQueue};
+use crate::pty::WorkspaceStatus;
 use crate::telepty_bridge::TeleptyBridge;
+
+pub struct EventBus {
+    subscribers: Mutex<Vec<mpsc::Sender<AtermEvent>>>,
+    host_waker: Option<Arc<AtomicBool>>,
+    pending_events: Mutex<Vec<AtermEvent>>,
+}
+
+impl EventBus {
+    pub fn new() -> Self {
+        Self {
+            subscribers: Mutex::new(Vec::new()),
+            host_waker: None,
+            pending_events: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn set_host_waker(&mut self, waker: Arc<AtomicBool>) {
+        self.host_waker = Some(waker);
+    }
+
+    pub fn subscribe(&self) -> mpsc::Receiver<AtermEvent> {
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut subs) = self.subscribers.lock() {
+            subs.push(tx);
+        }
+        rx
+    }
+
+    pub fn publish(&self, event: AtermEvent) {
+        // Wake C-FFI host if waker is set
+        if let Some(ref waker) = self.host_waker {
+            waker.store(true, Ordering::Release);
+        }
+
+        // Store in pending for poll-based consumers
+        if let Ok(mut pending) = self.pending_events.lock() {
+            pending.push(event.clone());
+        }
+
+        // Send to channel subscribers, remove dead ones
+        if let Ok(mut subs) = self.subscribers.lock() {
+            subs.retain(|tx| tx.send(event.clone()).is_ok());
+        }
+    }
+
+    pub fn drain_pending(&self) -> Vec<AtermEvent> {
+        if let Ok(mut pending) = self.pending_events.lock() {
+            std::mem::take(&mut *pending)
+        } else {
+            Vec::new()
+        }
+    }
+}
 
 /// App-level singleton that owns the IPC server and routes inject messages.
 /// Workspace PTY processes are owned by per-view AtermCore instances.
@@ -15,6 +82,12 @@ use crate::telepty_bridge::TeleptyBridge;
 pub struct AtermApp {
     /// workspace_name → inject queue (cloned Arc from PtyManager)
     inject_queues: HashMap<String, SharedInjectQueue>,
+    /// workspace_name → inject signal (wake injector on enqueue)
+    inject_signals: HashMap<String, InjectSignal>,
+    /// workspace_name → PTY writer for direct (force) inject
+    workspace_writers: HashMap<String, Arc<Mutex<Box<dyn IoWrite + Send>>>>,
+    /// workspace_name → lifecycle status (running/closing/dead)
+    workspace_statuses: HashMap<String, WorkspaceStatus>,
     /// workspace metadata for ListWorkspaces fallback
     workspace_meta: HashMap<String, WorkspaceMeta>,
     ipc_server: Option<IpcServer>,
@@ -22,6 +95,10 @@ pub struct AtermApp {
     telepty_bridge: Option<TeleptyBridge>,
     socket_path: String,
     token: String,
+    /// Condvar pulsed when any workspace is registered. Used by CreateWorkspace
+    /// to avoid polling for workspace availability.
+    registration_signal: Arc<(Mutex<()>, Condvar)>,
+    event_bus: EventBus,
 }
 
 #[derive(Clone)]
@@ -33,17 +110,23 @@ struct WorkspaceMeta {
 
 impl AtermApp {
     pub fn new() -> Self {
+        cleanup_stale_socket_files();
         let socket_path = format!("/tmp/aterm-{}.sock", std::process::id());
         let token = generate_token();
         let telepty_bridge = TeleptyBridge::try_connect();
         Self {
             inject_queues: HashMap::new(),
+            inject_signals: HashMap::new(),
+            workspace_writers: HashMap::new(),
+            workspace_statuses: HashMap::new(),
             workspace_meta: HashMap::new(),
             ipc_server: None,
             host: None,
             telepty_bridge,
             socket_path,
             token,
+            registration_signal: Arc::new((Mutex::new(()), Condvar::new())),
+            event_bus: EventBus::new(),
         }
     }
 
@@ -55,12 +138,38 @@ impl AtermApp {
         &self.token
     }
 
+    pub fn registration_signal(&self) -> Arc<(Mutex<()>, Condvar)> {
+        self.registration_signal.clone()
+    }
+
     pub fn set_host(&mut self, host: Box<dyn PlatformHost>) {
         self.host = Some(host);
     }
 
+    pub fn host_ref(&self) -> Option<&dyn PlatformHost> {
+        self.host.as_deref()
+    }
+
     fn workspace_exists(&self, name: &str) -> bool {
         self.workspace_meta.contains_key(name) && self.inject_queues.contains_key(name)
+    }
+
+    fn workspace_state(&self, name: &str) -> Option<String> {
+        self.workspace_statuses
+            .get(name)
+            .and_then(|status| status.0.lock().ok().map(|current| current.clone()))
+    }
+
+    /// Get the status Arc for a workspace (used by WaitUntil without long-holding app lock).
+    pub fn workspace_status_arc(&self, name: &str) -> Option<WorkspaceStatus> {
+        self.workspace_statuses.get(name).cloned()
+    }
+
+    fn workspace_is_dead(&self, name: &str) -> bool {
+        matches!(
+            self.workspace_state(name).as_deref(),
+            Some("dead" | "closing")
+        )
     }
 
     fn rename_workspace_registration(
@@ -79,16 +188,37 @@ impl AtermApp {
             .inject_queues
             .remove(old_name)
             .ok_or_else(|| format!("workspace '{}' not found", old_name))?;
+        let sig = self.inject_signals.remove(old_name);
+        let writer = self.workspace_writers.remove(old_name);
+        let status = self.workspace_statuses.remove(old_name);
         let mut meta = match self.workspace_meta.remove(old_name) {
             Some(meta) => meta,
             None => {
                 self.inject_queues.insert(old_name.to_string(), queue);
+                if let Some(si) = sig {
+                    self.inject_signals.insert(old_name.to_string(), si);
+                }
+                if let Some(w) = writer {
+                    self.workspace_writers.insert(old_name.to_string(), w);
+                }
+                if let Some(s) = status {
+                    self.workspace_statuses.insert(old_name.to_string(), s);
+                }
                 return Err(format!("workspace '{}' not found", old_name));
             }
         };
 
         meta.name = new_name.to_string();
         self.inject_queues.insert(new_name.to_string(), queue);
+        if let Some(si) = sig {
+            self.inject_signals.insert(new_name.to_string(), si);
+        }
+        if let Some(w) = writer {
+            self.workspace_writers.insert(new_name.to_string(), w);
+        }
+        if let Some(s) = status {
+            self.workspace_statuses.insert(new_name.to_string(), s);
+        }
         self.workspace_meta
             .insert(new_name.to_string(), meta.clone());
 
@@ -106,15 +236,27 @@ impl AtermApp {
         Ok(())
     }
 
-    /// Register a workspace's inject queue so IPC can route to it.
+    /// Register a workspace's inject queue and PTY writer so IPC can route to it.
     pub fn register_workspace(
         &mut self,
         name: &str,
         queue: SharedInjectQueue,
+        signal: Option<InjectSignal>,
+        writer: Option<Arc<Mutex<Box<dyn IoWrite + Send>>>>,
+        status: Option<WorkspaceStatus>,
         command: &str,
         cwd: &str,
     ) {
         self.inject_queues.insert(name.to_string(), queue);
+        if let Some(sig) = signal {
+            self.inject_signals.insert(name.to_string(), sig);
+        }
+        if let Some(w) = writer {
+            self.workspace_writers.insert(name.to_string(), w);
+        }
+        if let Some(s) = status {
+            self.workspace_statuses.insert(name.to_string(), s);
+        }
         self.workspace_meta.insert(
             name.to_string(),
             WorkspaceMeta {
@@ -126,17 +268,91 @@ impl AtermApp {
         if let Some(ref bridge) = self.telepty_bridge {
             bridge.register(name, name, command, cwd, &self.socket_path);
         }
-        eprintln!("[aterm-app] registered workspace: {}", name);
+        self.publish_event(AtermEvent::WorkspaceCreated {
+            id: name.to_string(),
+            cli: command.to_string(),
+            cwd: cwd.to_string(),
+        });
+        // Wake CreateWorkspace waiters — workspace is now registered
+        if let Ok(_guard) = self.registration_signal.0.lock() {
+            self.registration_signal.1.notify_all();
+        }
+        log_stderr!("[aterm-app] registered workspace: {}", name);
     }
 
     /// Deregister a workspace (on close).
     pub fn deregister_workspace(&mut self, name: &str) {
         self.inject_queues.remove(name);
+        self.inject_signals.remove(name);
+        self.workspace_writers.remove(name);
+        self.workspace_statuses.remove(name);
         self.workspace_meta.remove(name);
         if let Some(ref bridge) = self.telepty_bridge {
             bridge.deregister(name);
         }
-        eprintln!("[aterm-app] deregistered workspace: {}", name);
+        log_stderr!("[aterm-app] deregistered workspace: {}", name);
+    }
+
+    /// Re-register all current workspaces with telepty.
+    /// Called after session restore to ensure all workspaces are visible.
+    pub fn sync_telepty_registrations(&self) {
+        if let Some(ref bridge) = self.telepty_bridge {
+            let workspaces: Vec<(String, String, String, String)> = self
+                .workspace_meta
+                .values()
+                .map(|m| {
+                    (
+                        m.name.clone(),
+                        m.command.clone(),
+                        m.cwd.clone(),
+                        self.socket_path.clone(),
+                    )
+                })
+                .collect();
+
+            if !workspaces.is_empty() {
+                log_stderr!(
+                    "[aterm-app] syncing {} workspaces to telepty",
+                    workspaces.len()
+                );
+                bridge.sync_all(workspaces);
+            }
+        }
+    }
+
+    /// Re-register workspace handles after auto-restart so workspace_exists() stays true.
+    pub fn update_workspace_handles(
+        &mut self,
+        name: &str,
+        writer: Arc<Mutex<Box<dyn IoWrite + Send>>>,
+        inject_queue: SharedInjectQueue,
+        inject_signal: InjectSignal,
+        status: WorkspaceStatus,
+    ) {
+        self.workspace_writers.insert(name.to_string(), writer);
+        self.inject_queues.insert(name.to_string(), inject_queue);
+        self.inject_signals.insert(name.to_string(), inject_signal);
+        self.workspace_statuses.insert(name.to_string(), status);
+    }
+
+    pub fn handle_workspace_marked_dead(&mut self, name: &str) {
+        let exists = self.workspace_exists(name);
+        if exists && !self.workspace_is_dead(name) {
+            return;
+        }
+        // Always fire Closed event — even if workspace was already deregistered,
+        // Swift sidebar may still have a stale entry that needs removal.
+        if let Some(ref host) = self.host {
+            host.on_workspace_event(WorkspaceEvent::Closed {
+                id: name.to_string(),
+            });
+        }
+        if exists {
+            self.deregister_workspace(name);
+        }
+        self.publish_event(AtermEvent::WorkspaceClosed {
+            id: name.to_string(),
+        });
     }
 
     /// Start the embedded IPC server. Must be called after the app is wrapped in Arc<Mutex<>>.
@@ -147,8 +363,123 @@ impl AtermApp {
             app.socket_path.clone()
         };
 
+        let reg_signal = {
+            let app = app.lock().unwrap();
+            app.registration_signal()
+        };
+
         let dispatcher: Arc<dyn Fn(SessionAction) -> ActionResponse + Send + Sync> =
             Arc::new(move |action| {
+                // WaitUntil: extract status arc briefly, then release app lock and block on Condvar.
+                // Must NOT hold the app Mutex while blocking — that would deadlock all IPC.
+                if let SessionAction::WaitUntil {
+                    ref workspace,
+                    ref state,
+                    timeout_ms,
+                    since_seq: _,
+                } = action
+                {
+                    let status_arc = {
+                        if let Ok(app) = app_clone.lock() {
+                            app.workspace_status_arc(workspace)
+                        } else {
+                            return ActionResponse::error("app lock failed");
+                        }
+                    };
+                    // App lock released here
+                    let Some(status_arc) = status_arc else {
+                        return ActionResponse::error(format!(
+                            "workspace '{}' not found",
+                            workspace
+                        ));
+                    };
+                    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(300_000));
+                    let deadline = std::time::Instant::now() + timeout;
+                    let (ref mutex, ref condvar) = *status_arc;
+                    // Condvar wait — zero CPU when idle, instant response on state change
+                    let mut current = match mutex.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return ActionResponse::error("status lock poisoned"),
+                    };
+                    loop {
+                        if *current == *state {
+                            return ActionResponse::data(serde_json::json!({
+                                "reached": true, "state": *current
+                            }));
+                        }
+                        let remaining =
+                            deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            return ActionResponse::data(serde_json::json!({
+                                "reached": false, "state": *current, "timeout": true
+                            }));
+                        }
+                        let result = condvar
+                            .wait_timeout(current, remaining)
+                            .unwrap_or_else(|e| e.into_inner());
+                        current = result.0;
+                    }
+                }
+
+                // CreateWorkspace: dispatch, then wait for shell "running" before returning.
+                if let SessionAction::CreateWorkspace { ref name, .. } = action {
+                    let workspace_name = name.clone();
+                    let resp = {
+                        if let Ok(mut app) = app_clone.lock() {
+                            app.dispatch(action)
+                        } else {
+                            return ActionResponse::error("app lock failed");
+                        }
+                    };
+                    if !matches!(resp, ActionResponse::Ok) {
+                        return resp;
+                    }
+                    // Wait for workspace to register and reach "running" (up to 15s)
+                    let deadline = Instant::now() + std::time::Duration::from_secs(15);
+                    loop {
+                        let status_arc = {
+                            if let Ok(app) = app_clone.lock() {
+                                app.workspace_status_arc(&workspace_name)
+                            } else {
+                                return resp;
+                            }
+                        };
+                        if let Some(status_arc) = status_arc {
+                            let (ref mutex, ref condvar) = *status_arc;
+                            let mut current = match mutex.lock() {
+                                Ok(g) => g,
+                                Err(_) => return resp,
+                            };
+                            loop {
+                                if *current == "running" {
+                                    return ActionResponse::data(serde_json::json!({
+                                        "ready": true
+                                    }));
+                                }
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                if remaining.is_zero() {
+                                    return ActionResponse::data(serde_json::json!({
+                                        "ready": false, "timeout": true
+                                    }));
+                                }
+                                let result = condvar
+                                    .wait_timeout(current, remaining)
+                                    .unwrap_or_else(|e| e.into_inner());
+                                current = result.0;
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            return resp;
+                        }
+                        // Wait for workspace registration event (Condvar) instead of polling
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let (ref lock, ref cvar) = *reg_signal;
+                        if let Ok(guard) = lock.lock() {
+                            let _ = cvar.wait_timeout(guard, remaining);
+                        }
+                    }
+                }
+
                 if let Ok(mut app) = app_clone.lock() {
                     app.dispatch(action)
                 } else {
@@ -160,10 +491,10 @@ impl AtermApp {
             Ok(server) => {
                 let mut app = app.lock().unwrap();
                 app.ipc_server = Some(server);
-                eprintln!("[aterm-app] IPC server started: {}", app.socket_path);
+                log_stderr!("[aterm-app] IPC server started: {}", app.socket_path);
             }
             Err(e) => {
-                eprintln!("[aterm-app] IPC server failed to start: {}", e);
+                log_stderr!("[aterm-app] IPC server failed to start: {}", e);
             }
         }
     }
@@ -175,20 +506,68 @@ impl AtermApp {
                 workspace,
                 text,
                 from,
+                force,
             } => {
-                if let Some(queue) = self.inject_queues.get(&workspace) {
+                if self.workspace_is_dead(&workspace) {
+                    return ActionResponse::error(format!("workspace '{}' is dead", workspace));
+                }
+                if force.unwrap_or(false) {
+                    // Direct PTY write — bypass idle gate
+                    // Split text and Enter so TUI frameworks process them separately.
+                    if let Some(writer) = self.workspace_writers.get(&workspace) {
+                        let text_only = text.trim_end_matches(|c: char| c == '\r' || c == '\n');
+                        let text_result = match writer.lock() {
+                            Ok(mut w) => w.write_all(text_only.as_bytes()).and_then(|_| w.flush()),
+                            Err(e) => Err(std::io::Error::other(e.to_string())),
+                        };
+                        if let Err(e) = text_result {
+                            return ActionResponse::error(e.to_string());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        match writer.lock() {
+                            Ok(mut w) => match w.write_all(b"\r").and_then(|_| w.flush()) {
+                                Ok(_) => {
+                                    log_stderr!(
+                                        "[aterm-app] force-injected {} bytes + Enter into '{}'",
+                                        text_only.len(),
+                                        workspace
+                                    );
+                                    ActionResponse::ok()
+                                }
+                                Err(e) => ActionResponse::error(e.to_string()),
+                            },
+                            Err(e) => ActionResponse::error(e.to_string()),
+                        }
+                    } else {
+                        ActionResponse::error(format!("workspace '{}' writer not found", workspace))
+                    }
+                } else if let Some(queue) = self.inject_queues.get(&workspace) {
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::SystemTime::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
                     match queue.lock() {
                         Ok(mut q) => {
-                            let pending = q.push(InjectMessage {
+                            match q.push(InjectMessage {
                                 from: from.unwrap_or_default(),
                                 text,
                                 timestamp,
-                            });
-                            ActionResponse::data(serde_json::json!({ "queued": pending }))
+                                enqueued_at: Instant::now(),
+                            }) {
+                                Ok(pending) => {
+                                    // Wake injector loop — message enqueued
+                                    if let Some(sig) = self.inject_signals.get(&workspace) {
+                                        sig.notify();
+                                    }
+                                    log_stderr!(
+                                        "[aterm-app] queued inject into '{}' (pending: {})",
+                                        workspace,
+                                        pending
+                                    );
+                                    ActionResponse::data(serde_json::json!({ "queued": pending }))
+                                }
+                                Err(e) => ActionResponse::error(e),
+                            }
                         }
                         Err(e) => ActionResponse::error(e.to_string()),
                     }
@@ -204,12 +583,21 @@ impl AtermApp {
                     let infos: Vec<WorkspaceInfo> = self
                         .workspace_meta
                         .values()
-                        .map(|m| WorkspaceInfo {
-                            id: m.name.clone(),
-                            name: m.name.clone(),
-                            cli: m.command.clone(),
-                            cwd: m.cwd.clone(),
-                            status: "running".to_string(),
+                        .map(|m| {
+                            let status = self
+                                .workspace_state(&m.name)
+                                .unwrap_or_else(|| "running".to_string());
+                            WorkspaceInfo {
+                                id: m.name.clone(),
+                                name: m.name.clone(),
+                                cli: m.command.clone(),
+                                cwd: m.cwd.clone(),
+                                status,
+                                custom_command: None,
+                                created_at: None,
+                                last_activity_at: None,
+                                is_system: None,
+                            }
                         })
                         .collect();
                     ActionResponse::data(serde_json::to_value(infos).unwrap_or_default())
@@ -217,7 +605,13 @@ impl AtermApp {
             }
             SessionAction::WorkspaceStatus { workspace } => {
                 let exists = self.inject_queues.contains_key(&workspace);
-                ActionResponse::data(serde_json::json!({ "alive": exists }))
+                let state = self
+                    .workspace_state(&workspace)
+                    .unwrap_or_else(|| "unknown".to_string());
+                ActionResponse::data(serde_json::json!({
+                    "alive": exists && !matches!(state.as_str(), "dead" | "closing"),
+                    "state": state
+                }))
             }
             SessionAction::FocusWorkspace { workspace } => {
                 if let Some(ref host) = self.host {
@@ -232,18 +626,31 @@ impl AtermApp {
                     host.close_workspace_view(&workspace);
                 }
                 self.deregister_workspace(&workspace);
+                self.publish_event(AtermEvent::WorkspaceClosed {
+                    id: workspace.to_string(),
+                });
                 ActionResponse::ok()
             }
             SessionAction::CreateWorkspace { name, cli, cwd } => {
-                if let Some(ref host) = self.host {
+                let created = if let Some(ref host) = self.host {
                     let config = aterm_session::types::WorkspaceConfig {
                         name: name.clone(),
-                        cli,
-                        cwd,
+                        cli: cli.clone(),
+                        cwd: cwd.clone(),
                         cols: 80,
                         rows: 24,
                     };
                     host.create_workspace_view(&name, &config);
+                    true
+                } else {
+                    false
+                };
+                if created {
+                    self.publish_event(AtermEvent::WorkspaceCreated {
+                        id: name.to_string(),
+                        cli,
+                        cwd,
+                    });
                     ActionResponse::ok()
                 } else {
                     ActionResponse::unsupported()
@@ -256,7 +663,10 @@ impl AtermApp {
                         host.close_workspace_view(&workspace);
                     }
                     self.deregister_workspace(&workspace);
-                    if let Some(ref host) = self.host {
+                    self.publish_event(AtermEvent::WorkspaceClosed {
+                        id: workspace.to_string(),
+                    });
+                    let restarted = if let Some(ref host) = self.host {
                         let config = aterm_session::types::WorkspaceConfig {
                             name: meta.name.clone(),
                             cli: meta.command.clone(),
@@ -265,6 +675,16 @@ impl AtermApp {
                             rows: 24,
                         };
                         host.create_workspace_view(&meta.name, &config);
+                        true
+                    } else {
+                        false
+                    };
+                    if restarted {
+                        self.publish_event(AtermEvent::WorkspaceCreated {
+                            id: meta.name.clone(),
+                            cli: meta.command.clone(),
+                            cwd: meta.cwd.clone(),
+                        });
                         ActionResponse::ok()
                     } else {
                         ActionResponse::unsupported()
@@ -282,6 +702,9 @@ impl AtermApp {
                 }
                 for meta in &metas {
                     self.deregister_workspace(&meta.name);
+                    self.publish_event(AtermEvent::WorkspaceClosed {
+                        id: meta.name.clone(),
+                    });
                 }
                 if let Some(ref host) = self.host {
                     for meta in &metas {
@@ -295,7 +718,51 @@ impl AtermApp {
                         host.create_workspace_view(&meta.name, &config);
                     }
                 }
+                for meta in &metas {
+                    self.publish_event(AtermEvent::WorkspaceCreated {
+                        id: meta.name.clone(),
+                        cli: meta.command.clone(),
+                        cwd: meta.cwd.clone(),
+                    });
+                }
                 ActionResponse::data(serde_json::json!({ "restarted": metas.len() }))
+            }
+            SessionAction::ChangeWorkspaceCLI { workspace, cli } => {
+                let meta = self.workspace_meta.get(&workspace).cloned();
+                if let Some(meta) = meta {
+                    if let Some(ref host) = self.host {
+                        host.close_workspace_view(&workspace);
+                    }
+                    self.deregister_workspace(&workspace);
+                    self.publish_event(AtermEvent::WorkspaceClosed {
+                        id: workspace.to_string(),
+                    });
+                    let changed = if let Some(ref host) = self.host {
+                        let config = aterm_session::types::WorkspaceConfig {
+                            name: meta.name.clone(),
+                            cli: cli.clone(),
+                            cwd: meta.cwd.clone(),
+                            cols: 80,
+                            rows: 24,
+                        };
+                        host.create_workspace_view(&meta.name, &config);
+                        true
+                    } else {
+                        false
+                    };
+                    if changed {
+                        self.publish_event(AtermEvent::WorkspaceCreated {
+                            id: meta.name.clone(),
+                            cli,
+                            cwd: meta.cwd.clone(),
+                        });
+                        ActionResponse::ok()
+                    } else {
+                        ActionResponse::unsupported()
+                    }
+                } else {
+                    ActionResponse::error(format!("workspace '{}' not found", workspace))
+                }
             }
             SessionAction::ListTasks { workspace } => {
                 if let Some(meta) = self.workspace_meta.get(&workspace) {
@@ -400,6 +867,9 @@ impl AtermApp {
                 if let Some(ref host) = self.host {
                     host.close_workspace_view(&workspace);
                     self.deregister_workspace(&workspace);
+                    self.publish_event(AtermEvent::WorkspaceClosed {
+                        id: workspace.to_string(),
+                    });
                     ActionResponse::ok()
                 } else {
                     ActionResponse::unsupported()
@@ -417,6 +887,104 @@ impl AtermApp {
                 workspace: _,
                 max_bytes: _,
             } => ActionResponse::unsupported(),
+            SessionAction::Subscribe { .. } => {
+                // Return workspace snapshot so IPC server can send it on subscribe
+                ActionResponse::data(self.workspace_snapshot())
+            }
+            SessionAction::RequestSnapshot => {
+                // Client detected a seq gap — return fresh snapshot
+                ActionResponse::data(self.workspace_snapshot())
+            }
+            SessionAction::WaitUntil { .. } => {
+                // Handled in start_ipc dispatcher (outside app lock); should not reach here
+                ActionResponse::error("WaitUntil must be handled outside app lock")
+            }
+        }
+    }
+
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    fn publish_event(&self, event: AtermEvent) {
+        // Serialize to JSON for IPC broadcast (existing mechanism)
+        if let Ok(json) = serde_json::to_value(&event) {
+            self.broadcast_event(&json);
+        }
+        // Also publish to EventBus
+        self.event_bus.publish(event);
+    }
+
+    /// Broadcast a workspace event to all IPC subscribers.
+    pub fn broadcast_workspace_event(&self, event: &serde_json::Value) {
+        self.broadcast_event(event);
+    }
+
+    fn broadcast_event(&self, event: &serde_json::Value) {
+        if let Some(ref server) = self.ipc_server {
+            let seq = next_seq();
+            let mut event = event.clone();
+            if let Some(obj) = event.as_object_mut() {
+                obj.insert("seq".to_string(), serde_json::json!(seq));
+            }
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            let snapshot_fn = || {
+                let snap = self.workspace_snapshot();
+                serde_json::to_string(&snap).unwrap_or_default()
+            };
+            server.broadcast(&json, &snapshot_fn);
+        }
+    }
+
+    /// Build a full workspace snapshot with current sequence number.
+    /// Used for initial Subscribe response and gap re-sync.
+    pub fn workspace_snapshot(&self) -> serde_json::Value {
+        let workspaces: Vec<serde_json::Value> = self
+            .workspace_meta
+            .values()
+            .map(|m| {
+                let status = self
+                    .workspace_state(&m.name)
+                    .unwrap_or_else(|| "running".to_string());
+                serde_json::json!({
+                    "id": m.name,
+                    "name": m.name,
+                    "cli": m.command,
+                    "cwd": m.cwd,
+                    "status": status
+                })
+            })
+            .collect();
+
+        let seq = EVENT_SEQ.load(Ordering::Relaxed);
+        serde_json::json!({
+            "type": "Snapshot",
+            "seq": seq,
+            "workspaces": workspaces
+        })
+    }
+}
+
+fn cleanup_stale_socket_files() {
+    let Ok(entries) = std::fs::read_dir("/tmp") else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("aterm-") || !name.ends_with(".sock") {
+            continue;
+        }
+
+        if UnixStream::connect(&path).is_ok() {
+            continue;
+        }
+
+        if std::fs::remove_file(&path).is_ok() {
+            log_stderr!("[aterm-app] removed stale socket: {}", path.display());
         }
     }
 }

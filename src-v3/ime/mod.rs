@@ -20,7 +20,10 @@ impl TextRange {
     }
 
     pub const fn empty(location: usize) -> Self {
-        Self { location, length: 0 }
+        Self {
+            location,
+            length: 0,
+        }
     }
 
     pub const fn end(self) -> usize {
@@ -135,12 +138,12 @@ impl ImeBridge {
                 .candidate_rect
                 .map(|candidate| candidate.rect)
                 .unwrap_or_else(Rect::zero);
-            state
-                .snapshot
-                .committed_text
-                .push(text.to_string());
+            state.snapshot.committed_text.push(text.to_string());
             state.snapshot.marked_text = None;
-            state.snapshot.candidate_rect = Some(CandidateRect { rect, actual_range: replacement_range });
+            state.snapshot.candidate_rect = Some(CandidateRect {
+                rect,
+                actual_range: replacement_range,
+            });
         }
     }
 
@@ -173,10 +176,7 @@ impl ImeBridge {
         self.insert_text(text, replacement_range);
     }
 
-    pub fn first_rect_for_character_range_non_macos(
-        &self,
-        range: TextRange,
-    ) -> CandidateRect {
+    pub fn first_rect_for_character_range_non_macos(&self, range: TextRange) -> CandidateRect {
         self.first_rect_for_character_range(range)
     }
 }

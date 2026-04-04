@@ -23,9 +23,7 @@ fn verify_peer_macos(stream: &UnixStream) -> bool {
     let fd = stream.as_raw_fd();
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
-    unsafe {
-        libc::getpeereid(fd, &mut uid, &mut gid) == 0 && uid == libc::getuid()
-    }
+    unsafe { libc::getpeereid(fd, &mut uid, &mut gid) == 0 && uid == libc::getuid() }
 }
 
 #[cfg(target_os = "linux")]

@@ -435,10 +435,7 @@ fn extract_auth_url(line: &str) -> Option<String> {
 }
 
 fn default_state_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".aterm")
-        .join("tailscale")
+    crate::session::data_root().join("tailscale")
 }
 
 fn default_hostname() -> String {

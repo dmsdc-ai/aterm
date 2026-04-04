@@ -3,7 +3,7 @@ import net from 'net';
 import path from 'path';
 import os from 'os';
 
-const SOCKET_PATH = path.join(os.homedir(), '.aterm', 'aterm.sock');
+const SOCKET_PATH = path.join(os.homedir(), '.aigentry', 'aterm.sock');
 
 // ── Argument parsing ──────────────────────────────────────────────────────────
 

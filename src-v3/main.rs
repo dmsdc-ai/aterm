@@ -142,7 +142,9 @@ impl App {
     }
 
     fn spawn_default_shell(&mut self) {
-        let Some(ref renderer) = self.renderer else { return };
+        let Some(ref renderer) = self.renderer else {
+            return;
+        };
         let Some(ref gpu) = self.gpu else { return };
 
         let (cols, rows) = renderer.grid_size(gpu.config.width as f32, gpu.config.height as f32);
@@ -177,8 +179,12 @@ impl App {
     }
 
     fn sync_pty_output(&mut self) {
-        let Some(ref id) = self.workspace_id else { return };
-        let Some(ref mut terminal) = self.terminal else { return };
+        let Some(ref id) = self.workspace_id else {
+            return;
+        };
+        let Some(ref mut terminal) = self.terminal else {
+            return;
+        };
 
         match self.pty_manager.drain_term_bytes(id) {
             Ok(bytes) if !bytes.is_empty() => terminal.advance(&bytes),
@@ -230,11 +236,10 @@ impl App {
         self.sync_pty_output();
         let draw_start = Instant::now();
 
-        let (gpu, renderer, terminal) =
-            match (&self.gpu, &mut self.renderer, &self.terminal) {
-                (Some(g), Some(r), Some(t)) => (g, r, t),
-                _ => return,
-            };
+        let (gpu, renderer, terminal) = match (&self.gpu, &mut self.renderer, &self.terminal) {
+            (Some(g), Some(r), Some(t)) => (g, r, t),
+            _ => return,
+        };
 
         let output = match gpu.surface.get_current_texture() {
             Ok(t) => t,
@@ -306,7 +311,9 @@ impl App {
 
     #[cfg(target_os = "macos")]
     fn activate_native_ime(&mut self) {
-        let Some(window) = self.window.as_ref() else { return };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
         let handler = *self
             .native_ime
             .get_or_insert_with(NativeImeHandler::initialize);
@@ -322,7 +329,9 @@ impl App {
 
     #[cfg(target_os = "macos")]
     fn deactivate_native_ime(&mut self) {
-        let Some(window) = self.window.as_ref() else { return };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
         if let Some(handler) = self.native_ime {
             handler.deactivate_for_window(window.as_ref());
             self.native_ime_active = false;
@@ -340,7 +349,9 @@ impl App {
             return;
         }
 
-        let Some(handler) = self.native_ime else { return };
+        let Some(handler) = self.native_ime else {
+            return;
+        };
         let mut wrote_input = false;
 
         for bytes in handler.drain_key_bytes() {
@@ -394,9 +405,7 @@ impl ApplicationHandler for App {
             }
         }
         // Wake every 8ms (~120fps). CPU cost: ~1-2%.
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + FRAME_INTERVAL,
-        ));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -494,10 +503,17 @@ impl ApplicationHandler for App {
 
             WindowEvent::Ime(Ime::Preedit(ref text, _cursor)) => {
                 self.ime_composing = !text.is_empty();
-                eprintln!("[ime] Preedit: composing={} text={:?}", self.ime_composing, text);
+                eprintln!(
+                    "[ime] Preedit: composing={} text={:?}",
+                    self.ime_composing, text
+                );
                 #[cfg(target_os = "macos")]
                 {
-                    self.ime_marked = if text.is_empty() { None } else { Some(text.clone()) };
+                    self.ime_marked = if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.clone())
+                    };
                     self.refresh_window_title();
                 }
                 self.mark_dirty();

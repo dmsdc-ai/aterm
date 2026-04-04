@@ -27,16 +27,19 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
         }
     }
 
-    func bootstrapCommand(customCommand: String) -> String? {
+    func bootstrapCommand(customCommand: String, cliArgs: String = "") -> String? {
         switch self {
         case .zsh:
             return nil
         case .claude:
-            return "claude --dangerously-skip-permissions --continue"
+            let args = cliArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "claude " + (args.isEmpty ? "--dangerously-skip-permissions --continue" : args)
         case .codex:
-            return "codex resume --last --dangerously-bypass-approvals-and-sandbox"
+            let args = cliArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "codex " + (args.isEmpty ? "resume --last --dangerously-bypass-approvals-and-sandbox" : args)
         case .gemini:
-            return "gemini resume -y"
+            let args = cliArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "gemini " + (args.isEmpty ? "resume -y" : args)
         case .custom:
             let trimmed = customCommand.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
@@ -69,7 +72,7 @@ enum WorkspaceLaunchCommand: String, CaseIterable, Identifiable {
 }
 
 struct SidebarWorkspace: Identifiable, Equatable {
-    let id: UUID
+    let id: String
     var name: String
     var cwd: String
     var launchCommand: WorkspaceLaunchCommand
@@ -89,6 +92,7 @@ struct WorkspaceDraft: Identifiable, Equatable {
     var name: String = ""
     var command: WorkspaceLaunchCommand = .zsh
     var customCommand: String = ""
+    var cliArgs: String = ""
 
     var folderName: String {
         let trimmed = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -103,11 +107,244 @@ struct WorkspaceCreationRequest {
     var initialDirectory: String?
 }
 
+private struct IpcWorkspaceListResponse: Decodable {
+    let status: String
+    let data: [IpcWorkspaceRecord]?
+    let message: String?
+}
+
+private struct IpcWorkspaceRecord: Decodable {
+    let id: String
+    let name: String
+    let cli: String
+    let cwd: String
+    let status: String
+    let customCommand: String?
+    let createdAt: String?
+    let lastActivityAt: String?
+    let isSystem: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, cli, cwd, status
+        case customCommand = "custom_command"
+        case createdAt = "created_at"
+        case lastActivityAt = "last_activity_at"
+        case isSystem = "is_system"
+    }
+}
+
 final class WorkspaceSidebarModel: ObservableObject {
     @Published var workspaces: [SidebarWorkspace] = []
-    @Published var selectedWorkspaceID: UUID?
+    @Published var selectedWorkspaceName: String?
     @Published var creationDrafts: [WorkspaceDraft] = []
     @Published var isCreateSheetPresented = false
+
+    private var eventSubscriberFD: Int32 = -1
+    private var eventQueue: DispatchQueue?
+    private var fallbackTimer: Timer?
+    private var coalesceWorkItem: DispatchWorkItem?
+    private var lastRefreshTime: CFAbsoluteTime = 0
+    private var refreshInFlight = false
+    /// Last seen IPC sequence number for gap detection
+    private var lastSeq: UInt64 = 0
+
+    deinit {
+        stopAutoRefresh()
+    }
+
+    func startAutoRefresh() {
+        refreshWorkspaces()
+        startEventSubscription()
+    }
+
+    func stopAutoRefresh() {
+        fallbackTimer?.invalidate()
+        fallbackTimer = nil
+        coalesceWorkItem?.cancel()
+        coalesceWorkItem = nil
+        let fd = eventSubscriberFD
+        eventSubscriberFD = -1
+        if fd >= 0 { Darwin.close(fd) }
+        eventQueue = nil
+    }
+
+    func refreshWorkspaces() {
+        guard !refreshInFlight else { return }
+        refreshInFlight = true
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let refreshed = Self.fetchWorkspacesFromIPC()
+            DispatchQueue.main.async {
+                if let refreshed {
+                    self?.workspaces = refreshed
+                }
+                self?.refreshInFlight = false
+            }
+        }
+    }
+
+    // MARK: - IPC Event Subscription
+
+    private func startEventSubscription() {
+        let fd = eventSubscriberFD
+        if fd >= 0 { Darwin.close(fd) }
+        eventSubscriberFD = -1
+        fallbackTimer?.invalidate()
+        fallbackTimer = nil
+
+        let queue = DispatchQueue(label: "com.aterm.sidebar-events", qos: .userInitiated)
+        eventQueue = queue
+        queue.async { [weak self] in
+            self?.connectAndSubscribe()
+        }
+    }
+
+    private func connectAndSubscribe() {
+        guard let pathPtr = aterm_ipc_socket_path() else {
+            startFallbackPolling()
+            return
+        }
+        let socketPath = String(cString: pathPtr)
+        aterm_core_free_string(pathPtr)
+        guard !socketPath.isEmpty else {
+            startFallbackPolling()
+            return
+        }
+
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            startFallbackPolling()
+            return
+        }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutablePointer(to: &addr.sun_path.0) { pathBuf in
+            socketPath.withCString { src in _ = strcpy(pathBuf, src) }
+        }
+        let connected = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else {
+            Darwin.close(fd)
+            startFallbackPolling()
+            return
+        }
+
+        eventSubscriberFD = fd
+
+        // Send Subscribe action (empty events = all events)
+        let msg = "{\"action\":\"Subscribe\",\"events\":[]}\n"
+        msg.withCString { ptr in _ = Darwin.write(fd, ptr, Int(strlen(ptr))) }
+
+        // Read event lines (blocks until data or close)
+        var readBuf = [UInt8](repeating: 0, count: 4096)
+        var partial = Data()
+
+        while eventSubscriberFD >= 0 {
+            let n = Darwin.read(fd, &readBuf, readBuf.count)
+            if n <= 0 { break }
+
+            partial.append(contentsOf: readBuf[0..<n])
+
+            while let newline = partial.firstIndex(of: 0x0A) {
+                let lineData = partial[partial.startIndex..<newline]
+                partial = Data(partial[partial.index(after: newline)...])
+
+                guard let str = String(data: Data(lineData), encoding: .utf8),
+                      !str.isEmpty else { continue }
+
+                // Try to parse JSON for snapshot/seq handling
+                if let jsonData = str.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+
+                    // Handle snapshot (initial Subscribe response or re-snapshot)
+                    if let dataObj = json["data"] as? [String: Any],
+                       let eventType = dataObj["type"] as? String,
+                       eventType == "Snapshot" {
+                        if let seq = dataObj["seq"] as? UInt64 {
+                            lastSeq = seq
+                        }
+                        // Snapshot contains full workspace list — apply directly
+                        scheduleCoalescedRefresh()
+                        continue
+                    }
+
+                    // Handle inline Snapshot event (gap re-sync from server)
+                    if let eventType = json["type"] as? String, eventType == "Snapshot" {
+                        if let seq = json["seq"] as? UInt64 {
+                            lastSeq = seq
+                        }
+                        scheduleCoalescedRefresh()
+                        continue
+                    }
+
+                    // Regular event — check seq for gap detection
+                    if let eventSeq = json["seq"] as? UInt64 {
+                        if lastSeq > 0 && eventSeq > lastSeq + 1 {
+                            // Gap detected — server should send re-snapshot automatically,
+                            // but trigger a full refresh as fallback
+                            scheduleCoalescedRefresh()
+                        }
+                        lastSeq = eventSeq
+                    }
+
+                    // Skip non-event lines (e.g. Subscribe OK status response)
+                    guard json["type"] != nil else { continue }
+                    scheduleCoalescedRefresh()
+                    continue
+                }
+
+                // Fallback: skip non-event responses
+                if !str.contains("\"type\"") { continue }
+                scheduleCoalescedRefresh()
+            }
+        }
+
+        // Stream disconnected — fallback to polling
+        Darwin.close(fd)
+        if eventSubscriberFD == fd { eventSubscriberFD = -1 }
+        startFallbackPolling()
+    }
+
+    /// Leading-edge throttle: first event fires immediately, then coalesce within 25ms.
+    private func scheduleCoalescedRefresh() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            let elapsed = now - self.lastRefreshTime
+
+            self.coalesceWorkItem?.cancel()
+
+            if elapsed >= 0.025 {
+                self.lastRefreshTime = now
+                self.refreshWorkspaces()
+            } else {
+                let delay = 0.025 - elapsed
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.lastRefreshTime = CFAbsoluteTimeGetCurrent()
+                    self.refreshWorkspaces()
+                }
+                self.coalesceWorkItem = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            }
+        }
+    }
+
+    /// Graceful degradation: poll every 5s if event stream disconnects.
+    private func startFallbackPolling() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.fallbackTimer == nil else { return }
+            NSLog("[aterm-sidebar] event stream disconnected, falling back to 5s polling")
+            self.fallbackTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+                self?.refreshWorkspaces()
+            }
+            self.fallbackTimer?.tolerance = 1.0
+        }
+    }
 
     func presentCreationDrafts(for urls: [URL], preferredCommand: WorkspaceLaunchCommand) {
         presentCreationDrafts(
@@ -126,11 +363,13 @@ final class WorkspaceSidebarModel: ObservableObject {
         guard !directories.isEmpty else { return }
 
         creationDrafts = directories.map {
-            WorkspaceDraft(
+            var draft = WorkspaceDraft(
                 cwd: $0.path,
                 command: preferredCommand,
                 customCommand: preferredCustomCommand
             )
+            draft.cliArgs = AtermSettings.shared.cliDefaults[preferredCommand.rawValue] ?? ""
+            return draft
         }
         isCreateSheetPresented = true
     }
@@ -138,6 +377,101 @@ final class WorkspaceSidebarModel: ObservableObject {
     func dismissCreationSheet() {
         creationDrafts = []
         isCreateSheetPresented = false
+    }
+
+    private static func fetchWorkspacesFromIPC() -> [SidebarWorkspace]? {
+        let request = #"{"action":"ListWorkspaces"}"#
+        let responsePtr = request.withCString { ptr in
+            aterm_dispatch(ptr, request.utf8.count)
+        }
+
+        guard let responsePtr else { return nil }
+        let responseJson = String(cString: responsePtr)
+        aterm_core_free_string(responsePtr)
+
+        guard let data = responseJson.data(using: .utf8),
+              let response = try? JSONDecoder().decode(IpcWorkspaceListResponse.self, from: data),
+              response.status == "Data",
+              let records = response.data else {
+            return nil
+        }
+
+        return records.map(Self.sidebarWorkspace(from:))
+    }
+
+    private static func sidebarWorkspace(from record: IpcWorkspaceRecord) -> SidebarWorkspace {
+        let command = WorkspaceLaunchCommand(rawValue: record.cli) ?? .custom
+        let customCommand: String
+        if command == .custom {
+            customCommand = record.customCommand ?? record.cli
+        } else {
+            customCommand = record.customCommand ?? ""
+        }
+        let createdAt = parseTimestamp(record.createdAt) ?? Date()
+        let lastActivityAt = parseTimestamp(record.lastActivityAt) ?? createdAt
+        let useAscii = AtermSettings.shared.useAsciiIcons
+
+        return SidebarWorkspace(
+            id: record.id,
+            name: record.name,
+            cwd: record.cwd,
+            launchCommand: command,
+            customCommand: customCommand,
+            foregroundProcessName: command.displayTitle(customCommand: customCommand),
+            status: record.status,
+            cliIcon: sidebarCliIcon(for: command, useAscii: useAscii),
+            statusEmoji: sidebarStatusIcon(for: record.status, useAscii: useAscii),
+            createdAt: createdAt,
+            lastActivityAt: lastActivityAt,
+            isSystem: record.isSystem ?? false
+        )
+    }
+
+    private static func parseTimestamp(_ value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        if let parsed = sidebarWorkspaceDateFormatter.date(from: value) {
+            return parsed
+        }
+        return ISO8601DateFormatter().date(from: value)
+    }
+}
+
+private let sidebarWorkspaceDateFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+}()
+
+private func sidebarCliIcon(for command: WorkspaceLaunchCommand, useAscii: Bool) -> String {
+    if useAscii {
+        switch command {
+        case .claude: return "[C]"
+        case .codex: return "[X]"
+        case .gemini: return "[G]"
+        case .zsh, .custom: return "[S]"
+        }
+    }
+
+    return command.cliIcon
+}
+
+private func sidebarStatusIcon(for status: String, useAscii: Bool) -> String {
+    if useAscii {
+        switch status {
+        case "working": return "[*]"
+        case "idle": return "[-]"
+        case "dead": return "[!]"
+        case "starting", "restarting": return "[>]"
+        default: return "[?]"
+        }
+    }
+
+    switch status {
+    case "working": return "🔨"
+    case "idle": return "💤"
+    case "dead": return "🔴"
+    case "starting", "restarting": return "🔄"
+    default: return ""
     }
 }
 
@@ -159,17 +493,63 @@ private struct TaskQueueFile: Codable {
 final class TaskQueueLoader: ObservableObject {
     @Published var tasks: [TaskQueueItem] = []
 
-    private var timer: Timer?
+    private var fileSource: DispatchSourceFileSystemObject?
 
     var activeCount: Int { tasks.filter { $0.status == "in_progress" }.count }
     var totalCount: Int { tasks.count }
 
     func startAutoRefresh() {
         load()
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.load()
+        startFileWatcher()
+    }
+
+    func stopAutoRefresh() {
+        fileSource?.cancel()
+        fileSource = nil
+    }
+
+    deinit { stopAutoRefresh() }
+
+    private func startFileWatcher() {
+        stopAutoRefresh()
+        guard let path = findTaskQueuePath() else { return }
+
+        let fd = Darwin.open(path, O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename, .delete],
+            queue: DispatchQueue.global(qos: .utility)
+        )
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            if source.data.contains(.delete) || source.data.contains(.rename) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.load()
+                    self?.startFileWatcher()
+                }
+            } else {
+                self.load()
+            }
         }
+        source.setCancelHandler { Darwin.close(fd) }
+        fileSource = source
+        source.resume()
+    }
+
+    private func findTaskQueuePath() -> String? {
+        let knownPath = NSHomeDirectory() + "/projects/aigentry-orchestrator/state/task-queue.json"
+        if FileManager.default.fileExists(atPath: knownPath) { return knownPath }
+
+        let projectsDir = NSHomeDirectory() + "/projects"
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: projectsDir) {
+            for entry in entries {
+                let candidate = projectsDir + "/" + entry + "/state/task-queue.json"
+                if FileManager.default.fileExists(atPath: candidate) { return candidate }
+            }
+        }
+        return nil
     }
 
     private func load() {
@@ -314,9 +694,10 @@ struct SessionSidebarView: View {
 
     let onBeginWorkspaceCreation: (WorkspaceCreationRequest) -> Void
     let onCreateWorkspaces: ([WorkspaceDraft]) -> Void
-    let onSelectWorkspace: (UUID) -> Void
-    let onRenameWorkspace: (UUID, String) -> Void
-    let onCloseWorkspace: (UUID) -> Void
+    let onSelectWorkspace: (String) -> Void
+    let onRenameWorkspace: (String, String) -> Void
+    let onCloseWorkspace: (String) -> Void
+    let onChangeWorkspaceCLI: (String, String) -> Void
     let onAttachExternalSession: (String) -> Void
     let onOpenSettings: () -> Void
 
@@ -355,7 +736,7 @@ struct SessionSidebarView: View {
                         ForEach(workspaceModel.workspaces) { workspace in
                             WorkspaceRowView(
                                 workspace: workspace,
-                                isSelected: workspace.id == workspaceModel.selectedWorkspaceID,
+                                isSelected: workspace.id == workspaceModel.selectedWorkspaceName,
                                 onSelect: { onSelectWorkspace(workspace.id) },
                                 onNew: {
                                     onBeginWorkspaceCreation(
@@ -370,7 +751,8 @@ struct SessionSidebarView: View {
                                     renameTarget = workspace
                                     renameText = workspace.name
                                 },
-                                onClose: { onCloseWorkspace(workspace.id) }
+                                onClose: { onCloseWorkspace(workspace.id) },
+                                onChangeCLI: { newCli in onChangeWorkspaceCLI(workspace.id, newCli) }
                             )
                         }
                     }
@@ -391,7 +773,13 @@ struct SessionSidebarView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .onAppear { taskLoader.startAutoRefresh() }
+            .onAppear {
+                taskLoader.startAutoRefresh()
+                workspaceModel.startAutoRefresh()
+            }
+            .onDisappear {
+                workspaceModel.stopAutoRefresh()
+            }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
@@ -464,8 +852,24 @@ struct SessionSidebarView: View {
     }
 
     private var externalSessions: [TeleptySession] {
-        let ownWorkspaceIDs = Set(workspaceModel.workspaces.map(\.name))
-        return busClient.sessions.filter { !ownWorkspaceIDs.contains($0.id) }
+        let ownNames = Set(workspaceModel.workspaces.map(\.name))
+        let ownIDs = Set(workspaceModel.workspaces.map(\.id))
+        let ownCWDs = Set(workspaceModel.workspaces.map(\.cwd))
+        return busClient.sessions.filter { session in
+            // Exclude if session id matches any internal workspace name or id
+            if ownNames.contains(session.id) || ownIDs.contains(session.id) {
+                return false
+            }
+            // Exclude if registered by this aterm instance
+            if session.termProgram == "aterm" {
+                return false
+            }
+            // Exclude if session cwd matches any internal workspace cwd
+            if let cwd = session.cwd, ownCWDs.contains(cwd) {
+                return false
+            }
+            return true
+        }
     }
 
     private var workspaceHeader: some View {
@@ -546,16 +950,37 @@ private struct WorkspaceCreateSheet: View {
                                     }
                                 }
                                 .pickerStyle(.segmented)
+                                .onChange(of: draft.command) {
+                                    if draft.command != .custom {
+                                        draft.cliArgs = AtermSettings.shared.cliDefaults[draft.command.rawValue] ?? ""
+                                    }
+                                }
 
                                 if draft.command == .custom {
                                     TextField("e.g. opencode --full-auto", text: $draft.customCommand)
                                         .textFieldStyle(.roundedBorder)
                                         .font(.system(size: 12, design: .monospaced))
-                                } else {
-                                    Text(draft.command.bootstrapCommand(customCommand: draft.customCommand) ?? "zsh")
+                                } else if draft.command == .zsh {
+                                    Text("zsh")
                                         .font(.system(size: 11, design: .monospaced))
                                         .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
-                                        .lineLimit(2)
+                                } else {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Arguments")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                                        TextField(
+                                            AtermSettings.defaultCliArgs[draft.command.rawValue] ?? "",
+                                            text: $draft.cliArgs
+                                        )
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.system(size: 12, design: .monospaced))
+
+                                        Text(draft.command.bootstrapCommand(customCommand: draft.customCommand, cliArgs: draft.cliArgs) ?? "")
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                                            .lineLimit(2)
+                                    }
                                 }
                             }
                         }
@@ -571,7 +996,19 @@ private struct WorkspaceCreateSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", action: onCancel)
-                Button("Create", action: onCreate)
+                Button("Create") {
+                    // Save edited CLI args as new defaults
+                    for draft in drafts {
+                        if draft.command != .custom && draft.command != .zsh {
+                            let args = draft.cliArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !args.isEmpty {
+                                AtermSettings.shared.cliDefaults[draft.command.rawValue] = args
+                            }
+                        }
+                    }
+                    AtermSettings.shared.save()
+                    onCreate()
+                }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canCreate)
             }
@@ -634,6 +1071,7 @@ struct WorkspaceRowView: View {
     let onNew: () -> Void
     let onRename: () -> Void
     let onClose: () -> Void
+    let onChangeCLI: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -706,6 +1144,14 @@ struct WorkspaceRowView: View {
             Button("New Session", action: onNew)
             if !workspace.isSystem {
                 Button("Rename", action: onRename)
+                Menu("Change CLI") {
+                    ForEach(WorkspaceLaunchCommand.allCases.filter { $0 != .custom }) { command in
+                        Button(command.title) {
+                            onChangeCLI(command.rawValue)
+                        }
+                        .disabled(command == workspace.launchCommand)
+                    }
+                }
                 Divider()
                 Button("Close", role: .destructive, action: onClose)
             }

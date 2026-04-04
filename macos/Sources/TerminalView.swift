@@ -26,8 +26,17 @@ class TerminalView: NSView, NSTextInputClient {
     // Ghostty pattern: set to non-nil during keyDown to accumulate insertText contents
     private var keyTextAccumulator: [String]?
 
+    // Resize dedup: skip resize+render if pixel dimensions unchanged (cmux/Ghostty pattern)
+    private var lastDrawableSize: CGSize = .zero
+    private var hasObservedLayoutBounds = false
+
     // Scroll: accumulate fractional trackpad deltas before converting to lines
     private var scrollAccumulator: CGFloat = 0.0
+
+    // Auto-scroll during drag selection near edges
+    private var autoScrollTimer: Timer?
+    private var autoScrollDirection: Int32 = 0  // +1 = up (scroll back), -1 = down
+    private var lastDragEvent: NSEvent?
 
     // MARK: - Init
 
@@ -47,6 +56,7 @@ class TerminalView: NSView, NSTextInputClient {
         metalLayer.device = MTLCreateSystemDefaultDevice()
         metalLayer.pixelFormat = .bgra8Unorm_srgb
         metalLayer.framebufferOnly = true
+        metalLayer.masksToBounds = true
         layer = metalLayer
         syncMetalLayerBacking()
 
@@ -72,6 +82,8 @@ class TerminalView: NSView, NSTextInputClient {
         // Init GPU with this view's pointer
         let viewPtr = Unmanaged.passUnretained(self).toOpaque()
         let size = self.convertToBacking(bounds).size
+        // Defer init if bounds not yet laid out — setFrameSize will retry
+        guard size.width > 0 && size.height > 0 else { return }
         let w = UInt32(size.width)
         let h = UInt32(size.height)
 
@@ -83,15 +95,19 @@ class TerminalView: NSView, NSTextInputClient {
         }
 
         hasInitializedCore = true
+        lastDrawableSize = size
 
-        // Set dirty callback — wakes the display link
+        // Force PTY resize — layout() may have run before core was initialized,
+        // updating lastDrawableSize without calling aterm_core_resize.
+        aterm_core_resize(core, w, h)
+
+        // Set dirty callback — notifies activity (rendering handled by CVDisplayLink)
         let ud = Unmanaged.passUnretained(self).toOpaque()
         aterm_core_set_dirty_callback(core, { userdata in
             guard let userdata = userdata else { return }
             let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
             DispatchQueue.main.async {
                 view.onActivity?()
-                view.needsDisplay = true
             }
         }, ud)
 
@@ -100,9 +116,7 @@ class TerminalView: NSView, NSTextInputClient {
 
         window?.makeFirstResponder(self)
 
-        DispatchQueue.main.async { [weak self] in
-            self?.spawnShellIfNeeded()
-        }
+        spawnShellIfNeeded()
     }
 
     deinit {
@@ -118,6 +132,7 @@ class TerminalView: NSView, NSTextInputClient {
     // MARK: - Responder
 
     override var acceptsFirstResponder: Bool { true }
+    override var isFlipped: Bool { true }
 
     override func becomeFirstResponder() -> Bool {
         inputContext_?.activate()
@@ -137,9 +152,9 @@ class TerminalView: NSView, NSTextInputClient {
         CVDisplayLinkSetOutputCallback(link, { (_, _, _, _, _, userdata) -> CVReturn in
             guard let userdata = userdata else { return kCVReturnSuccess }
             let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
-            DispatchQueue.main.async {
-                view.renderFrame()
-            }
+            // Render directly on CVDisplayLink's thread — no main queue hop.
+            // aterm_core_take_dirty + aterm_core_render are thread-safe (Rust side).
+            view.renderFrame()
             return kCVReturnSuccess
         }, ud)
 
@@ -156,10 +171,9 @@ class TerminalView: NSView, NSTextInputClient {
 
     private func renderFrame() {
         guard let core = core else { return }
-        // Only render if dirty
-        if aterm_core_take_dirty(core) != 0 || needsDisplay {
+        // Only render if dirty (Rust-side atomic flag)
+        if aterm_core_take_dirty(core) != 0 {
             aterm_core_render(core)
-            needsDisplay = false
         }
     }
 
@@ -167,28 +181,67 @@ class TerminalView: NSView, NSTextInputClient {
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        syncMetalLayerBacking()
         guard let core = core else { return }
 
+        // Retry deferred GPU init if viewDidMoveToWindow skipped due to zero bounds
+        if !hasInitializedCore && self.window != nil {
+            viewDidMoveToWindow()
+            guard hasInitializedCore else { return }
+        }
+
         let backingSize = convertToBacking(NSRect(origin: .zero, size: newSize)).size
+        guard backingSize != lastDrawableSize else { return }
+        lastDrawableSize = backingSize
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        syncMetalLayerBacking()
         let w = UInt32(backingSize.width)
         let h = UInt32(backingSize.height)
-
         aterm_core_resize(core, w, h)
-        spawnShellIfNeeded()
-        aterm_core_render(core)
+        CATransaction.commit()
+
+        // No synchronous render — Rust resize sets dirty flag, CVDisplayLink handles render
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        syncMetalLayerBacking()
         guard hasInitializedCore, let core = core else { return }
 
         let backingSize = convertToBacking(bounds).size
+        guard backingSize != lastDrawableSize else { return }
+        lastDrawableSize = backingSize
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        syncMetalLayerBacking()
+        CATransaction.commit()
+
         let w = UInt32(backingSize.width)
         let h = UInt32(backingSize.height)
         aterm_core_resize(core, w, h)
-        aterm_core_render(core)
+        // No synchronous render — CVDisplayLink handles it via dirty flag
+    }
+
+    override func layout() {
+        super.layout()
+        syncMetalLayerBacking()
+
+        // Unified dedup (Fix 2): shares lastDrawableSize with setFrameSize()
+        // to prevent duplicate FFI calls. Fixes first session bottom clipping
+        // where PTY spawns with provisional bounds before AppKit layout settles.
+        let newSize = convertToBacking(bounds).size
+        if newSize.width > 0 && newSize.height > 0 {
+            hasObservedLayoutBounds = true
+        }
+        if newSize != lastDrawableSize && newSize.width > 0 && newSize.height > 0 {
+            lastDrawableSize = newSize
+            if let core = core {
+                aterm_core_resize(core, UInt32(newSize.width), UInt32(newSize.height))
+            }
+        }
+
+        spawnShellIfNeeded()
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -382,10 +435,8 @@ class TerminalView: NSView, NSTextInputClient {
         let backingPoint = convertToBacking(NSRect(origin: location, size: .zero)).origin
         let backingSize = convertToBacking(bounds).size
         
-        // y is flipped in macOS NSView coordinate system (origin bottom-left)
-        // aterm renderer uses origin top-left (4.0 padding)
         let x = Float(backingPoint.x)
-        let y = Float(backingSize.height - backingPoint.y)
+        let y = Float(backingPoint.y)
         
         var cw: Float = 0
         var ch: Float = 0
@@ -426,11 +477,56 @@ class TerminalView: NSView, NSTextInputClient {
             aterm_core_selection_update(core, pt.col, pt.row, 0)
             aterm_core_render(core)
         }
+
+        // Auto-scroll when dragging near edges
+        lastDragEvent = event
+        let location = convert(event.locationInWindow, from: nil)
+        let edgeThreshold: CGFloat = 20.0
+
+        if location.y < edgeThreshold {
+            // Near top edge (isFlipped: y=0 is top) → scroll back (up)
+            startAutoScroll(direction: 1)
+        } else if location.y > bounds.height - edgeThreshold {
+            // Near bottom edge → scroll down (forward)
+            startAutoScroll(direction: -1)
+        } else {
+            stopAutoScroll()
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
         isDraggingSelection = false
         dragStartGridPoint = nil
+        stopAutoScroll()
+    }
+
+    private func startAutoScroll(direction: Int32) {
+        if autoScrollDirection == direction, autoScrollTimer != nil { return }
+        stopAutoScroll()
+        autoScrollDirection = direction
+        autoScrollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.performAutoScroll()
+        }
+    }
+
+    private func stopAutoScroll() {
+        autoScrollTimer?.invalidate()
+        autoScrollTimer = nil
+        autoScrollDirection = 0
+        lastDragEvent = nil
+    }
+
+    private func performAutoScroll() {
+        guard let core = core, isDraggingSelection else {
+            stopAutoScroll()
+            return
+        }
+        aterm_core_scroll(core, autoScrollDirection)
+        // Update selection endpoint to match the edge row
+        if let event = lastDragEvent, let pt = gridPoint(for: event) {
+            aterm_core_selection_update(core, pt.col, pt.row, 0)
+        }
+        aterm_core_render(core)
     }
 
     // MARK: - Scroll
@@ -475,6 +571,7 @@ class TerminalView: NSView, NSTextInputClient {
 
     private func spawnShellIfNeeded() {
         guard !shellSpawned, let core = core else { return }
+        guard hasInitializedCore, hasObservedLayoutBounds, window != nil, !isHidden else { return }
 
         let backingSize = convertToBacking(bounds).size
         guard backingSize.width > 0, backingSize.height > 0 else { return }
@@ -517,6 +614,7 @@ class TerminalView: NSView, NSTextInputClient {
 
             let viewPtr = Unmanaged.passUnretained(self).toOpaque()
             let size = self.convertToBacking(bounds).size
+            guard size.width > 0 && size.height > 0 else { return }
             let w = UInt32(size.width)
             let h = UInt32(size.height)
             let scale = Float(currentBackingScaleFactor())
@@ -527,6 +625,8 @@ class TerminalView: NSView, NSTextInputClient {
             }
 
             hasInitializedCore = true
+            lastDrawableSize = size
+            aterm_core_resize(core, w, h)
 
             let ud = Unmanaged.passUnretained(self).toOpaque()
             aterm_core_set_dirty_callback(core, { userdata in
@@ -534,13 +634,14 @@ class TerminalView: NSView, NSTextInputClient {
                 let view = Unmanaged<TerminalView>.fromOpaque(userdata).takeUnretainedValue()
                 DispatchQueue.main.async {
                     view.onActivity?()
-                    view.needsDisplay = true
                 }
             }, ud)
 
             startDisplayLink()
         }
 
+        needsLayout = true
+        layoutSubtreeIfNeeded()
         spawnShellIfNeeded()
     }
 
@@ -566,7 +667,6 @@ class TerminalView: NSView, NSTextInputClient {
         }
         if let core {
             aterm_core_set_theme_mode(core, mode.rawValue)
-            needsDisplay = true
             if hasInitializedCore {
                 aterm_core_render(core)
             }

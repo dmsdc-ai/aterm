@@ -4,14 +4,17 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+pub type WorkspaceStatus = Arc<(Mutex<String>, Condvar)>;
 use tokio::sync::Notify;
 
 use crate::inject::{
-    has_prompt_pattern, normalize_terminal_text, run_injector_loop, split_at_utf8_boundary,
-    IdleState, InjectMessage, InjectMessageInfo, InjectQueue, SharedInjectQueue,
+    close_writer_handle, detect_osc133, has_prompt_pattern, normalize_terminal_text,
+    run_injector_loop, split_at_utf8_boundary, IdleState, InjectMessage, InjectMessageInfo,
+    InjectQueue, InjectSignal, Osc133Mark, SharedInjectQueue,
 };
 use crate::session::{restored_session_args, strip_claude_continue_arg, SessionEntry};
 
@@ -115,8 +118,9 @@ struct Workspace {
     buffer: Arc<Mutex<OutputBuffer>>,
     term_bytes: PtyByteQueue,
     created_at: String,
-    status: Arc<Mutex<String>>,
+    status: WorkspaceStatus,
     inject_queue: SharedInjectQueue,
+    inject_signal: InjectSignal,
     idle_state: Arc<Mutex<IdleState>>,
     auto_restart: bool,
     restart_count: Arc<AtomicU32>,
@@ -270,6 +274,7 @@ impl PtyManager {
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(spawned.writer));
         let inject_queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+        let inject_signal = InjectSignal::new();
         let idle_state: Arc<Mutex<IdleState>> = Arc::new(Mutex::new(IdleState::new()));
         let size = Arc::new(Mutex::new(size));
         let master: Arc<Mutex<Box<dyn MasterPty + Send>>> = Arc::new(Mutex::new(spawned.master));
@@ -277,7 +282,7 @@ impl PtyManager {
             Arc::new(Mutex::new(spawned.child));
         let buffer: Arc<Mutex<OutputBuffer>> = Arc::new(Mutex::new(OutputBuffer::new()));
         let term_bytes: PtyByteQueue = Arc::new(Mutex::new(Vec::new()));
-        let status: Arc<Mutex<String>> = Arc::new(Mutex::new("running".to_string()));
+        let status: WorkspaceStatus = Arc::new((Mutex::new("running".to_string()), Condvar::new()));
         let now = chrono_now();
 
         let reader_buffer = buffer.clone();
@@ -295,6 +300,7 @@ impl PtyManager {
         let reader_master = master.clone();
         let reader_child = child.clone();
         let reader_inject_queue = inject_queue.clone();
+        let reader_inject_signal = inject_signal.clone();
         let restart_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
         let reader_restart_count = restart_count.clone();
 
@@ -317,6 +323,7 @@ impl PtyManager {
                 reader_master,
                 reader_child,
                 reader_inject_queue,
+                reader_inject_signal,
                 reader_restart_count,
             );
         });
@@ -325,12 +332,14 @@ impl PtyManager {
         let injector_idle = idle_state.clone();
         let injector_writer = writer.clone();
         let injector_status = status.clone();
+        let injector_signal = inject_signal.clone();
         thread::spawn(move || {
             run_injector_loop(
                 injector_queue,
                 injector_idle,
                 injector_writer,
                 injector_status,
+                injector_signal,
             );
         });
 
@@ -348,6 +357,7 @@ impl PtyManager {
             created_at: now,
             status,
             inject_queue,
+            inject_signal,
             idle_state,
             auto_restart,
             restart_count,
@@ -358,7 +368,7 @@ impl PtyManager {
         };
 
         self.workspaces.insert(id.clone(), workspace);
-        eprintln!("[PTY] workspace created: {}", id);
+        log_stderr!("[PTY] workspace created: {}", id);
         Ok(id)
     }
 
@@ -397,6 +407,15 @@ impl PtyManager {
 
         set_workspace_status(&ws.status, "closing");
 
+        // Notify IPC subscribers about the status transition
+        if let Ok(app) = crate::global_app().lock() {
+            app.broadcast_workspace_event(&serde_json::json!({
+                "type": "StatusChanged",
+                "id": id,
+                "status": "closing"
+            }));
+        }
+
         if let Ok(mut child) = ws.child.lock() {
             let _ = child.kill();
         }
@@ -406,15 +425,30 @@ impl PtyManager {
 
     pub fn send_to_workspace(&self, id: &str, text: &str) -> Result<(), String> {
         let ws = self.workspace(id)?;
+        if !workspace_accepts_input(ws) {
+            return Err(format!("workspace '{}' is dead", id));
+        }
         if let Ok(mut idle) = ws.idle_state.lock() {
             idle.record_user_input();
         }
 
-        let mut writer = ws.writer.lock().map_err(|error| error.to_string())?;
-        writer
-            .write_all(text.as_bytes())
-            .map_err(|error| error.to_string())?;
-        writer.flush().map_err(|error| error.to_string())
+        let write_result = {
+            let mut writer = ws.writer.lock().map_err(|error| error.to_string())?;
+            writer
+                .write_all(text.as_bytes())
+                .and_then(|_| writer.flush())
+        };
+
+        match write_result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if should_mark_workspace_dead(&error) {
+                    mark_workspace_dead(ws);
+                    return Err(format!("workspace '{}' is dead", id));
+                }
+                Err(error.to_string())
+            }
+        }
     }
 
     pub fn send_key(&self, id: &str, key: &str) -> Result<(), String> {
@@ -454,6 +488,9 @@ impl PtyManager {
 
     pub fn queue_inject(&self, id: &str, from: &str, text: String) -> Result<usize, String> {
         let ws = self.workspace(id)?;
+        if !workspace_accepts_input(ws) {
+            return Err(format!("workspace '{}' is dead", id));
+        }
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -465,8 +502,12 @@ impl PtyManager {
                 from: from.to_string(),
                 text,
                 timestamp,
-            })
+                enqueued_at: Instant::now(),
+            })?
         };
+
+        // Wake the injector loop — message enqueued
+        ws.inject_signal.notify();
 
         Ok(pending)
     }
@@ -474,6 +515,11 @@ impl PtyManager {
     /// Get a clone of the inject queue for a workspace (for external dispatch).
     pub fn inject_queue_for(&self, id: &str) -> Option<crate::inject::SharedInjectQueue> {
         self.workspaces.get(id).map(|ws| ws.inject_queue.clone())
+    }
+
+    /// Get the inject signal for a workspace (to wake injector on enqueue).
+    pub fn inject_signal_for(&self, id: &str) -> Option<InjectSignal> {
+        self.workspaces.get(id).map(|ws| ws.inject_signal.clone())
     }
 
     pub fn peek_queue(&self, id: &str) -> Result<Vec<InjectMessageInfo>, String> {
@@ -492,6 +538,7 @@ impl PtyManager {
                 args: ws.args.clone(),
                 status: ws
                     .status
+                    .0
                     .lock()
                     .map(|s| s.clone())
                     .unwrap_or_else(|_| "unknown".to_string()),
@@ -509,6 +556,7 @@ impl PtyManager {
                     return false;
                 }
                 ws.status
+                    .0
                     .lock()
                     .map(|status| status.as_str() != "dead")
                     .unwrap_or(false)
@@ -536,29 +584,20 @@ impl PtyManager {
         self.workspaces.get(id).map(|ws| ws.writer.clone())
     }
 
+    pub fn workspace_status_handle(&self, id: &str) -> Option<WorkspaceStatus> {
+        self.workspaces.get(id).map(|ws| ws.status.clone())
+    }
+
     pub fn workspace_is_alive(&self, id: &str) -> bool {
         let Ok(ws) = self.workspace(id) else {
             return false;
         };
 
-        let alive = ws
-            .child
+        ws.status
+            .0
             .lock()
-            .ok()
-            .and_then(|mut child| child.try_wait().ok())
-            .map(|status| status.is_none())
-            .unwrap_or_else(|| {
-                ws.status
-                    .lock()
-                    .map(|status| status.as_str() != "dead")
-                    .unwrap_or(false)
-            });
-
-        if !alive {
-            set_workspace_status(&ws.status, "dead");
-        }
-
-        alive
+            .map(|status| !matches!(status.as_str(), "dead" | "closing"))
+            .unwrap_or(false)
     }
 
     fn workspace(&self, id: &str) -> Result<&Workspace, String> {
@@ -568,9 +607,201 @@ impl PtyManager {
     }
 }
 
-fn set_workspace_status(status: &Arc<Mutex<String>>, next: &str) {
-    if let Ok(mut current) = status.lock() {
+fn set_workspace_status(status: &WorkspaceStatus, next: &str) {
+    if let Ok(mut current) = status.0.lock() {
         *current = next.to_string();
+    }
+    status.1.notify_all();
+}
+
+fn workspace_accepts_input(ws: &Workspace) -> bool {
+    ws.status
+        .0
+        .lock()
+        .map(|status| !matches!(status.as_str(), "dead" | "closing"))
+        .unwrap_or(false)
+}
+
+fn should_mark_workspace_dead(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+    ) || error.raw_os_error() == Some(5)
+}
+
+fn mark_workspace_dead(ws: &Workspace) {
+    mark_workspace_dead_handles(&ws.id, &ws.status, &ws.writer, &ws.inject_queue);
+}
+
+fn mark_workspace_dead_handles(
+    id: &str,
+    status: &WorkspaceStatus,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    inject_queue: &SharedInjectQueue,
+) {
+    let already_dead = status
+        .0
+        .lock()
+        .map(|current| current.as_str() == "dead")
+        .unwrap_or(false);
+    set_workspace_status(status, "dead");
+    if let Ok(mut queue) = inject_queue.lock() {
+        queue.clear();
+    }
+    close_writer_handle(writer);
+    if !already_dead {
+        log_stderr!("[PTY] workspace marked dead: {}", id);
+    }
+    if let Ok(mut app) = crate::global_app().lock() {
+        app.handle_workspace_marked_dead(id);
+    }
+}
+
+// --- Shell integration: OSC 133 ---
+
+const OSC133_ZSH: &str = r#"# aterm OSC 133 shell integration (zsh)
+# Emits semantic prompt markers for reliable inject timing.
+_aterm_osc133_precmd() {
+    local ret=$?
+    printf '\e]133;D;%d\a' "$ret"
+    printf '\e]133;A\a'
+}
+_aterm_osc133_preexec() {
+    printf '\e]133;C\a'
+}
+# Emit B (prompt ready) after PS1 renders — append to RPS1 for end-of-prompt placement
+_aterm_osc133_prompt_ready() {
+    printf '\e]133;B\a'
+}
+precmd_functions=(_aterm_osc133_precmd "${precmd_functions[@]}")
+precmd_functions+=(_aterm_osc133_prompt_ready)
+preexec_functions=(_aterm_osc133_preexec "${preexec_functions[@]}")
+# Emit initial A+B for first prompt
+printf '\e]133;A\a\e]133;B\a'
+"#;
+
+const OSC133_BASH: &str = r#"# aterm OSC 133 shell integration (bash)
+_aterm_osc133_prompt() {
+    printf '\e]133;D\a'
+    printf '\e]133;A\a\e]133;B\a'
+}
+PROMPT_COMMAND="_aterm_osc133_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+PS0='\e]133;C\a'
+"#;
+
+const OSC133_FISH: &str = r#"# aterm OSC 133 shell integration (fish)
+function __aterm_osc133_prompt --on-event fish_prompt
+    printf '\e]133;A\a\e]133;B\a'
+end
+function __aterm_osc133_preexec --on-event fish_preexec
+    printf '\e]133;C\a'
+end
+function __aterm_osc133_postexec --on-event fish_postexec
+    printf '\e]133;D\a'
+end
+"#;
+
+const ZDOTDIR_ZSHENV: &str = r#"# aterm ZDOTDIR wrapper — restore original then source it
+ZDOTDIR="${ATERM_ORIGINAL_ZDOTDIR:-$HOME}"
+unset ATERM_ORIGINAL_ZDOTDIR
+[[ -f "${ZDOTDIR}/.zshenv" ]] && source "${ZDOTDIR}/.zshenv"
+"#;
+
+const ZDOTDIR_ZSHRC: &str = r#"# aterm ZDOTDIR wrapper — source user rc then load OSC 133 integration
+[[ -f "${ZDOTDIR}/.zshrc" ]] && source "${ZDOTDIR}/.zshrc"
+source "${ATERM_DATA_ROOT:-$HOME/.aigentry}/shell-integration/aterm-osc133.zsh"
+"#;
+
+/// Write shell integration scripts to ~/.aigentry/shell-integration/ if missing or outdated.
+fn ensure_shell_integration() -> Option<PathBuf> {
+    let base = crate::session::data_root().join("shell-integration");
+    let zsh_dir = base.join("zsh");
+
+    // Create directories
+    std::fs::create_dir_all(&zsh_dir).ok()?;
+
+    // Write scripts (always overwrite to stay current)
+    let zsh_path = base.join("aterm-osc133.zsh");
+    let bash_path = base.join("aterm-osc133.bash");
+    let fish_path = base.join("aterm-osc133.fish");
+    let zshenv_path = zsh_dir.join(".zshenv");
+    let zshrc_path = zsh_dir.join(".zshrc");
+    let writes: &[(&Path, &str)] = &[
+        (zsh_path.as_path(), OSC133_ZSH),
+        (bash_path.as_path(), OSC133_BASH),
+        (fish_path.as_path(), OSC133_FISH),
+        (zshenv_path.as_path(), ZDOTDIR_ZSHENV),
+        (zshrc_path.as_path(), ZDOTDIR_ZSHRC),
+    ];
+    for (path, content) in writes {
+        if let Ok(existing) = std::fs::read_to_string(path) {
+            if existing == *content {
+                continue;
+            }
+        }
+        let _ = std::fs::write(path, content);
+    }
+
+    Some(base)
+}
+
+fn is_shell_command(command: &str) -> bool {
+    let basename = Path::new(command)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(command);
+    matches!(basename, "zsh" | "bash" | "fish" | "sh")
+}
+
+fn is_zsh_command(command: &str) -> bool {
+    let basename = Path::new(command)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(command);
+    basename == "zsh"
+}
+
+fn is_bash_command(command: &str) -> bool {
+    let basename = Path::new(command)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(command);
+    basename == "bash"
+}
+
+fn has_explicit_locale_env() -> bool {
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if std::env::var_os(key).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn default_utf8_locale() -> &'static str {
+    "en_US.UTF-8"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_utf8_locale() -> &'static str {
+    "C.UTF-8"
+}
+
+fn apply_utf8_locale_fallback(cmd: &mut CommandBuilder) {
+    if has_explicit_locale_env() {
+        return;
+    }
+
+    let locale = default_utf8_locale();
+    cmd.env("LANG", locale);
+    cmd.env("LC_CTYPE", locale);
+
+    static REPORTED_UTF8_LOCALE_FALLBACK: AtomicBool = AtomicBool::new(false);
+    if !REPORTED_UTF8_LOCALE_FALLBACK.swap(true, Ordering::AcqRel) {
+        log_stderr!("[aterm] applying default UTF-8 locale fallback: {locale}");
     }
 }
 
@@ -596,6 +827,7 @@ fn spawn_workspace_process(
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "aterm");
     cmd.env("TERM_PROGRAM_VERSION", "3.0");
+    apply_utf8_locale_fallback(&mut cmd);
     if let Some(ws_id) = workspace_id {
         cmd.env("ATERM_SESSION_ID", ws_id);
         cmd.env("ATERM_WORKSPACE_NAME", ws_id);
@@ -605,10 +837,47 @@ fn spawn_workspace_process(
     if let Some(path_env) = augmented_path_env() {
         cmd.env("PATH", path_env);
     }
+    // Expose Resources/bin path so the aterm CLI can re-add it to PATH
+    // even if the login shell resets PATH during startup
+    if let Some(ref resources_bin) = app_resources_bin() {
+        cmd.env("ATERM_RESOURCES_BIN", resources_bin);
+    }
+
+    // Orchestrator session name from aterm.json config (for dynamic hook routing)
+    if let Some(orch_name) = read_orchestrator_session_name() {
+        cmd.env("ATERM_ORCHESTRATOR_SESSION", &orch_name);
+    }
 
     // IPC socket path for child processes
     let socket_path = format!("/tmp/aterm-{}.sock", std::process::id());
     cmd.env("ATERM_IPC_SOCKET", &socket_path);
+
+    // OSC 133 shell integration — only applicable for shell commands (zsh/bash/fish).
+    // AI CLIs (claude/codex/gemini) are TUI apps that don't source shell rc files
+    // and don't emit OSC 133 sequences. For those, ShellReady uses heuristic
+    // prompt detection and inject uses heuristic + force-inject.
+    if is_shell_command(command) {
+        if let Some(base) = ensure_shell_integration() {
+            cmd.env("ATERM_SHELL_INTEGRATION", "1");
+            cmd.env(
+                "ATERM_SHELL_INTEGRATION_DIR",
+                base.to_string_lossy().as_ref(),
+            );
+
+            if is_zsh_command(command) {
+                // ZDOTDIR trick: wrapper .zshrc sources user config then OSC 133
+                let original = std::env::var("ZDOTDIR").unwrap_or_default();
+                if !original.is_empty() {
+                    cmd.env("ATERM_ORIGINAL_ZDOTDIR", &original);
+                }
+                cmd.env("ZDOTDIR", base.join("zsh").to_string_lossy().as_ref());
+            } else if is_bash_command(command) {
+                // BASH_ENV sources integration for non-interactive; --rcfile for interactive
+                let integration = base.join("aterm-osc133.bash");
+                cmd.env("BASH_ENV", integration.to_string_lossy().as_ref());
+            }
+        }
+    }
 
     let child = pair
         .slave
@@ -642,13 +911,14 @@ fn try_restart_workspace(
     child: &Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
     buffer: &Arc<Mutex<OutputBuffer>>,
     term_bytes: &PtyByteQueue,
-    status: &Arc<Mutex<String>>,
+    status: &WorkspaceStatus,
     idle_state: &Arc<Mutex<IdleState>>,
     inject_queue: &SharedInjectQueue,
+    inject_signal: &InjectSignal,
     signal: &PtyOutputSignal,
     restart_count: &Arc<AtomicU32>,
 ) -> bool {
-    eprintln!("[PTY] auto-restart: attempting respawn for {}", ws_id);
+    log_stderr!("[PTY] auto-restart: attempting respawn for {}", ws_id);
 
     let current_size = size
         .lock()
@@ -664,7 +934,7 @@ fn try_restart_workspace(
     let spawned = match spawn_workspace_process(cwd, command, args, current_size, Some(ws_id)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[PTY] auto-restart failed for {}: {}", ws_id, e);
+            log_stderr!("[PTY] auto-restart failed for {}: {}", ws_id, e);
             return false;
         }
     };
@@ -679,9 +949,10 @@ fn try_restart_workspace(
     if let Ok(mut c) = child.lock() {
         *c = spawned.child;
     }
-    if let Ok(mut s) = status.lock() {
+    if let Ok(mut s) = status.0.lock() {
         *s = "running".to_string();
     }
+    status.1.notify_all();
     if let Ok(mut b) = buffer.lock() {
         b.clear();
     }
@@ -693,6 +964,17 @@ fn try_restart_workspace(
     }
     if let Ok(mut q) = inject_queue.lock() {
         q.clear();
+    }
+
+    // Re-register handles with AtermApp so workspace_exists() stays true
+    if let Ok(mut app) = crate::global_app().lock() {
+        app.update_workspace_handles(
+            ws_id,
+            writer.clone(),
+            inject_queue.clone(),
+            inject_signal.clone(),
+            status.clone(),
+        );
     }
 
     // Spawn new reader thread
@@ -711,6 +993,7 @@ fn try_restart_workspace(
     let restart_master = master.clone();
     let restart_child = child.clone();
     let restart_inject_queue = inject_queue.clone();
+    let restart_inject_signal = inject_signal.clone();
     let restart_restart_count = restart_count.clone();
 
     thread::spawn(move || {
@@ -732,6 +1015,7 @@ fn try_restart_workspace(
             restart_master,
             restart_child,
             restart_inject_queue,
+            restart_inject_signal,
             restart_restart_count,
         );
     });
@@ -741,18 +1025,162 @@ fn try_restart_workspace(
     let injector_idle = idle_state.clone();
     let injector_writer = writer.clone();
     let injector_status = status.clone();
+    let injector_signal = inject_signal.clone();
     thread::spawn(move || {
         run_injector_loop(
             injector_queue,
             injector_idle,
             injector_writer,
             injector_status,
+            injector_signal,
         );
     });
 
     signal.mark_dirty();
-    eprintln!("[PTY] auto-restart: respawned {}", ws_id);
+    log_stderr!("[PTY] auto-restart: respawned {}", ws_id);
     true
+}
+
+/// Detects when the shell is ready to accept input after PTY spawn.
+/// Checks last 256B of each chunk for prompt pattern → fire immediately.
+/// One-shot: fires once per workspace lifecycle, then stops monitoring.
+///
+/// Why no settle wait: after a CLI displays its prompt, PTY output stops
+/// (process waits for input). reader.read() blocks, so feed() is never
+/// called again. A settle-based approach caused ShellReady to always fall
+/// through to the 10s fallback timeout.
+///
+/// Why check tail of large chunks: AI CLI startup (claude/gemini) often
+/// exceeds 256B in a single PTY read, but the prompt sits at the end.
+/// Checking only the last 256B catches the prompt without false-positives
+/// from mid-dump content.
+struct ShellReadyDetector {
+    fired: bool,
+    created_at: Instant,
+    fallback_timeout: Duration,
+}
+
+const SHELL_READY_MAX_CHUNK: usize = 256;
+const SHELL_READY_FALLBACK: Duration = Duration::from_secs(10);
+
+impl ShellReadyDetector {
+    fn new() -> Self {
+        Self {
+            fired: false,
+            created_at: Instant::now(),
+            fallback_timeout: SHELL_READY_FALLBACK,
+        }
+    }
+
+    /// Feed output chunk. Returns true if shell_ready should fire now.
+    fn feed(&mut self, data: &str, chunk_len: usize) -> bool {
+        if self.fired {
+            return false;
+        }
+
+        // Guard 1: fallback timeout
+        if self.created_at.elapsed() >= self.fallback_timeout {
+            self.fired = true;
+            log_stderr!(
+                "[shell-ready] fallback timeout ({}s)",
+                self.fallback_timeout.as_secs()
+            );
+            return true;
+        }
+
+        // Guard 2: for large chunks, only check the tail for a prompt.
+        // AI CLI startup output (claude/gemini) often exceeds 256B in a single
+        // PTY read, but the prompt appears at the very end.
+        let check_data = if chunk_len >= SHELL_READY_MAX_CHUNK {
+            let raw_start = data.len().saturating_sub(SHELL_READY_MAX_CHUNK);
+            // Floor to char boundary — avoid slicing mid-UTF-8 (Korean, CJK, box-drawing)
+            let start = (raw_start..data.len())
+                .find(|&i| data.is_char_boundary(i))
+                .unwrap_or(data.len());
+            &data[start..]
+        } else {
+            data
+        };
+
+        // Guard 3: prompt pattern in last non-empty line → fire immediately
+        let last_nonempty = check_data.lines().rev().find(|l| !l.trim().is_empty());
+        let has_prompt = last_nonempty
+            .map(|l| has_prompt_pattern(l))
+            .unwrap_or(false);
+
+        if has_prompt {
+            self.fired = true;
+            log_stderr!("[shell-ready] detected (prompt pattern)");
+            return true;
+        }
+
+        false
+    }
+
+    fn has_fired(&self) -> bool {
+        self.fired
+    }
+
+    fn mark_fired(&mut self) {
+        self.fired = true;
+    }
+}
+
+/// Detects trust prompts in PTY output for auto-acceptance.
+/// One-shot: fires once per workspace lifecycle.
+/// Scans a rolling buffer of recent output for trust prompt patterns.
+const TRUST_PROMPT_BUFFER_BYTES: usize = 512;
+const TRUST_PROMPT_PATTERNS: &[&str] = &[
+    "Do you trust",
+    "do you trust",
+    "Trust this",
+    "trust this project",
+];
+
+struct TrustPromptDetector {
+    fired: bool,
+    recent: String,
+}
+
+impl TrustPromptDetector {
+    fn new() -> Self {
+        Self {
+            fired: false,
+            recent: String::new(),
+        }
+    }
+
+    /// Feed new PTY output data. Returns true if trust prompt detected.
+    fn feed(&mut self, data: &str) -> bool {
+        if self.fired {
+            return false;
+        }
+
+        // Append to rolling buffer
+        self.recent.push_str(data);
+        // Keep only last N bytes (same boundary technique as append_recent_text)
+        if self.recent.len() > TRUST_PROMPT_BUFFER_BYTES {
+            let mut start = self.recent.len().saturating_sub(TRUST_PROMPT_BUFFER_BYTES);
+            while start < self.recent.len() && !self.recent.is_char_boundary(start) {
+                start += 1;
+            }
+            self.recent.drain(..start);
+        }
+
+        for pattern in TRUST_PROMPT_PATTERNS {
+            if self.recent.contains(pattern) {
+                self.fired = true;
+                log_stderr!("[trust-prompt] detected pattern: {}", pattern);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn has_fired(&self) -> bool {
+        self.fired
+    }
 }
 
 fn reader_loop(
@@ -760,7 +1188,7 @@ fn reader_loop(
     ws_id: String,
     buffer: Arc<Mutex<OutputBuffer>>,
     term_bytes: PtyByteQueue,
-    status: Arc<Mutex<String>>,
+    status: WorkspaceStatus,
     idle_state: Arc<Mutex<IdleState>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     codex_resume_monitor: bool,
@@ -773,6 +1201,7 @@ fn reader_loop(
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
     inject_queue: SharedInjectQueue,
+    inject_signal: InjectSignal,
     restart_count: Arc<AtomicU32>,
 ) {
     let mut buf = [0u8; 4096];
@@ -781,6 +1210,9 @@ fn reader_loop(
     let mut codex_resume_recent = String::new();
     let mut codex_resume_enter_sent = false;
     let mut codex_resume_entered_at: Option<Instant> = None;
+    let mut shell_ready = ShellReadyDetector::new();
+    let mut trust_prompt = TrustPromptDetector::new();
+    let mut osc133_detected = false;
 
     loop {
         match reader.read(&mut buf) {
@@ -838,45 +1270,114 @@ fn reader_loop(
                     }
                 }
 
-                if let Ok(mut idle) = idle_state.lock() {
-                    idle.record_output(has_prompt_pattern(&data));
+                // OSC 133 detection (primary, definitive signal)
+                let osc_marks = detect_osc133(&data);
+                let has_osc133_prompt = osc_marks.contains(&Osc133Mark::PromptEnd);
+                let has_osc133_cmd = osc_marks.contains(&Osc133Mark::CommandStart);
+
+                if !osc133_detected && !osc_marks.is_empty() {
+                    osc133_detected = true;
+                    log_stderr!("[prompt] OSC 133 shell integration active");
+                }
+                if has_osc133_prompt {
+                    if let Ok(mut idle) = idle_state.lock() {
+                        idle.record_osc133_prompt();
+                    }
+                    inject_signal.notify();
+                }
+                if has_osc133_cmd {
+                    // Command started = user/inject submitted input
+                    if let Ok(mut idle) = idle_state.lock() {
+                        idle.record_user_input();
+                    }
+                }
+
+                // Heuristic prompt detection (fallback for shells without OSC 133
+                // and TUI CLIs like claude/codex/gemini)
+                if !has_osc133_prompt {
+                    let has_prompt = has_prompt_pattern(&data);
+                    if let Ok(mut idle) = idle_state.lock() {
+                        idle.record_output(has_prompt);
+                    }
+                    if has_prompt {
+                        inject_signal.notify();
+                    }
+                } else if let Ok(mut idle) = idle_state.lock() {
+                    // Still update output timestamp for non-prompt output tracking
+                    idle.record_output(false);
+                }
+
+                // Shell-ready detection (one-shot) — OSC 133;B is definitive
+                let shell_ready_now = if !shell_ready.has_fired() {
+                    if has_osc133_prompt {
+                        shell_ready.mark_fired();
+                        log_stderr!("[shell-ready] detected (OSC 133;B)");
+                        true
+                    } else {
+                        shell_ready.feed(&data, n)
+                    }
+                } else {
+                    false
+                };
+                if shell_ready_now {
+                    if let Ok(app) = crate::global_app().lock() {
+                        if let Some(ref host) = app.host_ref() {
+                            host.on_workspace_event(
+                                aterm_session::types::WorkspaceEvent::ShellReady {
+                                    id: ws_id.clone(),
+                                },
+                            );
+                        }
+                        // Also broadcast to IPC subscribers
+                        app.broadcast_workspace_event(&serde_json::json!({
+                            "type": "ShellReady",
+                            "id": ws_id
+                        }));
+                    }
+                }
+
+                // Trust prompt detection (one-shot)
+                if !trust_prompt.has_fired() && trust_prompt.feed(&data) {
+                    if let Ok(app) = crate::global_app().lock() {
+                        if let Some(ref host) = app.host_ref() {
+                            host.on_workspace_event(
+                                aterm_session::types::WorkspaceEvent::TrustPromptDetected {
+                                    id: ws_id.clone(),
+                                },
+                            );
+                        }
+                        app.broadcast_workspace_event(&serde_json::json!({
+                            "type": "TrustPromptDetected",
+                            "id": ws_id
+                        }));
+                    }
                 }
             }
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                eprintln!("[aterm] reader error for {}: {}", ws_id, error);
+                log_stderr!("[aterm] reader error for {}: {}", ws_id, error);
                 break;
             }
         }
     }
 
-    if let Ok(mut current) = status.lock() {
-        if current.as_str() != "closing" {
-            *current = "dead".to_string();
-        }
-    }
+    let is_closing = status
+        .0
+        .lock()
+        .map(|current| current.as_str() == "closing")
+        .unwrap_or(false);
 
-    if auto_restart {
+    if !is_closing && auto_restart {
         let attempts = restart_count.fetch_add(1, Ordering::SeqCst);
-        if attempts >= 3 {
-            eprintln!(
-                "[PTY] auto-restart: max retries (3) reached for {}, giving up",
-                ws_id
-            );
-            if let Ok(mut current) = status.lock() {
-                *current = "dead".to_string();
-            }
-            signal.mark_dirty();
-        } else {
-            // Always strip --continue on retry (graceful degradation for first-run)
+        if attempts < 3 {
             let retry_args: Vec<String> = args
                 .iter()
                 .filter(|a| a.as_str() != "--continue")
                 .cloned()
                 .collect();
-            eprintln!(
+            log_stderr!(
                 "[PTY] auto-restart: attempt {}/3 for {} (without --continue)",
                 attempts + 1,
                 ws_id
@@ -895,14 +1396,30 @@ fn reader_loop(
                 &status,
                 &idle_state,
                 &inject_queue,
+                &inject_signal,
                 &signal,
                 &restart_count,
             );
             if restarted {
-                return; // New reader thread is running
+                return; // New reader thread is running, don't mark dead
             }
+            log_stderr!(
+                "[PTY] auto-restart: respawn failed for {}, marking dead",
+                ws_id
+            );
+        } else {
+            log_stderr!(
+                "[PTY] auto-restart: max retries (3) reached for {}, giving up",
+                ws_id
+            );
         }
     }
+
+    // Only mark dead when: closing, not auto_restart, all retries exhausted, or restart failed
+    if !is_closing {
+        mark_workspace_dead_handles(&ws_id, &status, &writer, &inject_queue);
+    }
+    signal.mark_dirty();
 
     let _ = codex_resume_entered_at;
 }
@@ -1101,7 +1618,15 @@ pub fn resolve_command_binary(command: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::PtyOutputSignal;
+    use super::{
+        mark_workspace_dead_handles, InjectMessage, InjectQueue, PtyOutputSignal,
+        SharedInjectQueue, ShellReadyDetector, TrustPromptDetector, WorkspaceStatus,
+        SHELL_READY_FALLBACK, SHELL_READY_MAX_CHUNK, TRUST_PROMPT_BUFFER_BYTES,
+        TRUST_PROMPT_PATTERNS,
+    };
+    use std::io::Write;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn pty_output_signal_coalesces_until_taken() {
@@ -1129,6 +1654,370 @@ mod tests {
         signal.mark_dirty();
         assert!(signal.has_dirty());
         assert!(signal.take_dirty());
+    }
+
+    #[test]
+    fn mark_workspace_dead_closes_writer_and_clears_queue() {
+        let status: WorkspaceStatus = Arc::new((Mutex::new("running".to_string()), Condvar::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(Vec::<u8>::new())));
+        let queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+
+        queue.lock().unwrap().push(InjectMessage {
+            from: "tester".to_string(),
+            text: "hello".to_string(),
+            timestamp: 0,
+            enqueued_at: Instant::now(),
+        });
+
+        mark_workspace_dead_handles("dead-test", &status, &writer, &queue);
+
+        assert_eq!(status.0.lock().unwrap().as_str(), "dead");
+        assert!(queue.lock().unwrap().is_empty());
+
+        let err = writer.lock().unwrap().write_all(b"x").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    // ===== TEST 2: ShellReadyDetector =====
+
+    #[test]
+    fn shell_ready_prompt_fires_immediately() {
+        let mut detector = ShellReadyDetector::new();
+        // Small chunk with prompt pattern — fires immediately (no settle)
+        let data = "Welcome to zsh\n❯";
+        let fired = detector.feed(data, data.len());
+        assert!(fired, "Should fire immediately on prompt in small chunk");
+        assert!(detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_bare_prompt_fires_immediately() {
+        let mut detector = ShellReadyDetector::new();
+        let data = "❯";
+        let fired = detector.feed(data, data.len());
+        assert!(fired, "Should fire immediately on bare prompt");
+        assert!(detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_large_chunk_with_prompt_at_end() {
+        let mut detector = ShellReadyDetector::new();
+
+        // Large chunk with prompt at end — should fire (checks last 256B)
+        let large = "x".repeat(SHELL_READY_MAX_CHUNK) + "\n❯";
+        let fired = detector.feed(&large, large.len());
+        assert!(
+            fired,
+            "Large chunk with prompt at end should trigger ShellReady"
+        );
+        assert!(detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_large_chunk_with_multibyte_utf8() {
+        let mut detector = ShellReadyDetector::new();
+
+        // Korean/CJK text (3 bytes per char) filling >256B, prompt at end
+        // This previously panicked: "byte index not a char boundary"
+        let korean = "서버를 시작합니다. 설정을 로드하는 중입니다. ".repeat(10);
+        let large = korean + "\n❯";
+        assert!(large.len() > SHELL_READY_MAX_CHUNK);
+        let fired = detector.feed(&large, large.len());
+        assert!(fired, "Should handle multibyte UTF-8 without panic");
+    }
+
+    #[test]
+    fn shell_ready_large_chunk_without_prompt() {
+        let mut detector = ShellReadyDetector::new();
+
+        // Large chunk without prompt at end — should not fire
+        let large = "x".repeat(SHELL_READY_MAX_CHUNK + 100);
+        let fired = detector.feed(&large, large.len());
+        assert!(
+            !fired,
+            "Large chunk without prompt should not trigger ShellReady"
+        );
+        assert!(!detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_prompt_fires_even_after_non_prompt_output() {
+        let mut detector = ShellReadyDetector::new();
+
+        // Feed non-prompt data — should not fire
+        let output = "loading config...";
+        let fired = detector.feed(output, output.len());
+        assert!(!fired);
+        assert!(!detector.has_fired());
+
+        // Feed prompt — should fire immediately
+        let prompt = "❯";
+        let fired = detector.feed(prompt, prompt.len());
+        assert!(
+            fired,
+            "Prompt should fire immediately even after non-prompt output"
+        );
+        assert!(detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_fallback_timeout_fires_without_prompt() {
+        let mut detector = ShellReadyDetector::new();
+
+        // Override created_at to simulate 10+ seconds ago
+        detector.created_at = Instant::now()
+            .checked_sub(SHELL_READY_FALLBACK + Duration::from_millis(100))
+            .unwrap();
+
+        // Any data (even without prompt) should trigger via fallback
+        let data = "no prompt here";
+        let fired = detector.feed(data, data.len());
+        assert!(fired, "Fallback timeout should fire after 10s");
+        assert!(detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_fires_only_once() {
+        let mut detector = ShellReadyDetector::new();
+
+        // Trigger via fallback
+        detector.created_at = Instant::now()
+            .checked_sub(SHELL_READY_FALLBACK + Duration::from_secs(1))
+            .unwrap();
+        assert!(detector.feed("data", 4));
+        assert!(detector.has_fired());
+
+        // Subsequent calls should always return false (one-shot)
+        assert!(!detector.feed("❯", 3));
+        assert!(!detector.feed("❯", 3));
+        assert!(detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_fish_nushell_trailing_newline() {
+        let mut detector = ShellReadyDetector::new();
+
+        // fish/nushell may have trailing newline after prompt
+        let data = "❯\n";
+        let fired = detector.feed(data, data.len());
+
+        // The prompt "❯" should be found in last non-empty line
+        // even with trailing newline — fires immediately
+        assert!(
+            fired,
+            "Should fire immediately for fish/nushell prompt with trailing newline"
+        );
+        assert!(detector.has_fired());
+    }
+
+    #[test]
+    fn shell_ready_constants() {
+        assert_eq!(SHELL_READY_MAX_CHUNK, 256);
+        assert_eq!(SHELL_READY_FALLBACK, Duration::from_secs(10));
+    }
+
+    // ===== TEST 3: Bootstrap shell_ready callback =====
+
+    #[test]
+    fn shell_ready_immediate_trigger_enables_fast_bootstrap() {
+        // ShellReady fires immediately on prompt — no settle wait needed.
+        // This means bootstrap can happen instantly (not after 10s fallback).
+        let mut detector = ShellReadyDetector::new();
+        let prompt = "$ ";
+        let fired = detector.feed(prompt, prompt.len());
+        assert!(
+            fired,
+            "ShellReady should fire immediately on prompt — enabling instant bootstrap"
+        );
+    }
+
+    #[test]
+    fn shell_ready_fallback_still_works_for_bootstrap() {
+        // Even without prompt, fallback ensures bootstrap eventually fires
+        let mut detector = ShellReadyDetector::new();
+        detector.created_at = Instant::now()
+            .checked_sub(SHELL_READY_FALLBACK + Duration::from_millis(50))
+            .unwrap();
+
+        let fired = detector.feed("unknown shell output", 20);
+        assert!(
+            fired,
+            "Fallback timeout ensures bootstrap fires even without prompt detection"
+        );
+    }
+
+    // ===== TEST 6: SIGCHLD / Process exit — PTY reader EOF =====
+
+    #[test]
+    fn pty_eof_sets_status_to_dead() {
+        // When PTY reader gets EOF (Ok(0)), mark_workspace_dead_handles is called.
+        // This sets status to "dead" via Condvar — no polling timer involved.
+        let status: WorkspaceStatus = Arc::new((Mutex::new("running".to_string()), Condvar::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(Vec::<u8>::new())));
+        let queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+
+        assert_eq!(status.0.lock().unwrap().as_str(), "running");
+
+        // Simulate what reader_loop does on EOF: calls mark_workspace_dead_handles
+        mark_workspace_dead_handles("eof-test", &status, &writer, &queue);
+
+        assert_eq!(
+            status.0.lock().unwrap().as_str(),
+            "dead",
+            "PTY EOF should set status to 'dead'"
+        );
+    }
+
+    #[test]
+    fn pty_eof_notifies_condvar_waiters() {
+        // Verify that marking dead wakes up any Condvar waiters (event-driven, not polled)
+        let status: WorkspaceStatus = Arc::new((Mutex::new("running".to_string()), Condvar::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(Vec::<u8>::new())));
+        let queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+
+        let status2 = status.clone();
+        let handle = std::thread::spawn(move || {
+            let start = Instant::now();
+            let (ref mutex, ref condvar) = *status2;
+            let mut current = mutex.lock().unwrap();
+            while *current != "dead" {
+                current = condvar.wait(current).unwrap();
+            }
+            start.elapsed()
+        });
+
+        // Give waiter time to block
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Simulate EOF → mark dead (this notifies Condvar)
+        mark_workspace_dead_handles("eof-condvar-test", &status, &writer, &queue);
+
+        let elapsed = handle.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "Condvar waiter should wake promptly on dead (event-driven), got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn pty_eof_no_polling_timer_involved() {
+        // The reader_loop blocks on reader.read() — a blocking syscall.
+        // EOF (Ok(0)) breaks the loop. No timer, no periodic check.
+        // Verify: status transitions happen instantly, not on a timer cadence.
+        let status: WorkspaceStatus = Arc::new((Mutex::new("running".to_string()), Condvar::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(Vec::<u8>::new())));
+        let queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+
+        let start = Instant::now();
+        mark_workspace_dead_handles("no-timer-test", &status, &writer, &queue);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Dead marking should be near-instant (no timer), got {:?}",
+            elapsed
+        );
+        assert_eq!(status.0.lock().unwrap().as_str(), "dead");
+    }
+
+    // ===== TEST 7: TrustPromptDetector =====
+
+    #[test]
+    fn trust_prompt_detected_on_matching_pattern() {
+        let mut detector = TrustPromptDetector::new();
+        for pattern in TRUST_PROMPT_PATTERNS {
+            let mut d = TrustPromptDetector::new();
+            let result = d.feed(pattern);
+            assert!(result, "Should detect trust prompt pattern: '{}'", pattern);
+        }
+        // Also test embedded in longer output
+        let fired = detector.feed("Welcome to project\nDo you trust this folder?\n> ");
+        assert!(fired, "Should detect trust prompt in multi-line output");
+    }
+
+    #[test]
+    fn trust_prompt_non_matching_does_not_fire() {
+        let mut detector = TrustPromptDetector::new();
+
+        assert!(!detector.feed("Hello world"));
+        assert!(!detector.feed("Loading configuration..."));
+        assert!(!detector.feed("npm install completed"));
+        assert!(!detector.feed("$ "));
+        assert!(!detector.feed("trust")); // partial — not a full pattern
+        assert!(!detector.has_fired());
+    }
+
+    #[test]
+    fn trust_prompt_fires_only_once() {
+        let mut detector = TrustPromptDetector::new();
+
+        // First detection
+        assert!(detector.feed("Do you trust this project?"));
+        assert!(detector.has_fired());
+
+        // Subsequent calls should always return false (one-shot)
+        assert!(!detector.feed("Do you trust this project?"));
+        assert!(!detector.feed("Trust this"));
+        assert!(!detector.feed("do you trust"));
+        assert!(detector.has_fired(), "Should remain fired");
+    }
+
+    #[test]
+    fn trust_prompt_rolling_buffer_trims_to_limit() {
+        let mut detector = TrustPromptDetector::new();
+
+        // Feed a large chunk that pushes pattern out of rolling buffer
+        let padding = "x".repeat(TRUST_PROMPT_BUFFER_BYTES + 100);
+        detector.feed(&padding);
+
+        // Now feed the pattern — should detect in fresh buffer
+        let fired = detector.feed("Do you trust");
+        assert!(fired, "Should detect pattern after buffer trim");
+    }
+
+    #[test]
+    fn trust_prompt_pattern_split_across_feeds() {
+        let mut detector = TrustPromptDetector::new();
+
+        // Pattern split across two feeds, within rolling buffer window
+        detector.feed("Do you ");
+        let fired = detector.feed("trust this?");
+        assert!(
+            fired,
+            "Should detect pattern split across consecutive feeds"
+        );
+    }
+
+    #[test]
+    fn trust_prompt_buffer_respects_utf8_boundaries() {
+        let mut detector = TrustPromptDetector::new();
+
+        // Feed multi-byte UTF-8 characters to fill near the buffer limit
+        let filler = "한".repeat(TRUST_PROMPT_BUFFER_BYTES / 3);
+        detector.feed(&filler);
+
+        // Pattern should still be detectable after buffer trimming
+        let fired = detector.feed("Do you trust");
+        assert!(fired, "Should detect pattern after UTF-8 boundary trim");
+    }
+}
+
+/// Read the orchestrator session name from ~/.aigentry/config/aterm.json
+/// Returns None if config doesn't exist or orchestrator is not configured.
+fn read_orchestrator_session_name() -> Option<String> {
+    let config_path = crate::session::data_root().join("config/aterm.json");
+    let data = std::fs::read_to_string(&config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let name = config.get("orchestrator")?.get("name")?.as_str()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 

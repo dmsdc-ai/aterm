@@ -37,6 +37,8 @@ struct TeleptySession: Identifiable, Codable {
     let cwd: String?
     let status: String?
     let host: String?
+    /// Terminal program that registered this session (e.g. "aterm", "ghostty")
+    let termProgram: String?
 
     // Semantic fields (from session_state_report)
     var phase: TaskPhase?
@@ -45,7 +47,7 @@ struct TeleptySession: Identifiable, Codable {
     var needsInput: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case id, project, command, cwd, status, host
+        case id, project, command, cwd, status, host, termProgram
         case phase, currentTask = "current_task", blocker
         case needsInput = "needs_input"
     }
@@ -113,8 +115,9 @@ class TeleptyBusClient: ObservableObject {
 
     private var webSocketTask: URLSessionWebSocketTask?
     private let busURL: URL
-    private var reconnectTimer: Timer?
+    private var reconnectWorkItem: DispatchWorkItem?
     private var corePtr: OpaquePointer?  // AtermCore*
+    private let webSocketSession: URLSession
 
     // Exponential backoff state
     private var failureCount: Int = 0
@@ -126,6 +129,7 @@ class TeleptyBusClient: ObservableObject {
 
     init(host: String = "127.0.0.1", port: Int = 3848) {
         self.busURL = URL(string: "ws://\(host):\(port)/api/bus")!
+        self.webSocketSession = URLSession(configuration: .default)
         loadInitialSessions()
         connect()
     }
@@ -180,22 +184,24 @@ class TeleptyBusClient: ObservableObject {
     // MARK: - WebSocket connection
 
     func connect() {
-        let session = URLSession(configuration: .default)
-        webSocketTask = session.webSocketTask(with: busURL)
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = webSocketSession.webSocketTask(with: busURL)
         webSocketTask?.resume()
-        connected = true
-        failureCount = 0
-        silentMode = false
-        receiveMessage()
+        // connected = true only on first successful receive (not here)
 
         if !silentMode {
             NSLog("[telepty-bus] connecting to %@", busURL.absoluteString)
         }
+
+        receiveMessage()
     }
 
     func disconnect() {
-        reconnectTimer?.invalidate()
-        reconnectTimer = nil
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         connected = false
@@ -205,6 +211,13 @@ class TeleptyBusClient: ObservableObject {
         webSocketTask?.receive { [weak self] result in
             switch result {
             case .success(let message):
+                // Connection confirmed working — reset backoff
+                self?.failureCount = 0
+                self?.silentMode = false
+                DispatchQueue.main.async {
+                    self?.connected = true
+                }
+
                 switch message {
                 case .string(let text):
                     self?.handleMessage(text)
@@ -263,6 +276,7 @@ class TeleptyBusClient: ObservableObject {
                 cwd: nil,
                 status: event.transport?.healthStatus ?? "active",
                 host: nil,
+                termProgram: nil,
                 phase: event.semantic?.phase.flatMap(TaskPhase.init),
                 currentTask: event.semantic?.currentTask,
                 blocker: event.semantic?.blocker,
@@ -278,25 +292,31 @@ class TeleptyBusClient: ObservableObject {
     }
 
     private func scheduleReconnect() {
-        reconnectTimer?.invalidate()
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
         failureCount += 1
 
         if failureCount >= Self.silentThreshold {
             silentMode = true
         }
 
+        // Exponential backoff: 3s → 6s → 12s → 24s → 48s → 60s cap
+        let interval = min(3.0 * pow(2.0, Double(failureCount - 1)), Self.maxBackoffInterval)
+
         if silentMode {
             let now = Date()
             if now.timeIntervalSince(lastSilentLog) >= Self.silentLogInterval {
-                NSLog("[telepty-bus] reconnect attempts: %d (silent mode, retrying every %.0fs)", failureCount, Self.maxBackoffInterval)
+                NSLog("[telepty-bus] reconnect attempts: %d (silent mode, next in %.0fs)", failureCount, interval)
                 lastSilentLog = now
             }
+        } else {
+            NSLog("[telepty-bus] reconnecting in %.0fs (attempt %d)", interval, failureCount)
         }
 
-        // Exponential backoff: 3s → 6s → 12s → 24s → 60s cap
-        let interval = min(3.0 * pow(2.0, Double(failureCount - 1)), Self.maxBackoffInterval)
-        reconnectTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+        let workItem = DispatchWorkItem { [weak self] in
             self?.connect()
         }
+        reconnectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: workItem)
     }
 }

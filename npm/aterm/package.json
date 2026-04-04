@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aterm",
-  "version": "0.1.52",
+  "version": "0.1.92",
   "description": "Native aterm launcher package",
   "type": "module",
   "main": "./bin/aterm.js",
@@ -17,13 +17,19 @@
     "package.json"
   ],
   "optionalDependencies": {
-    "@dmsdc-ai/aterm-darwin-arm64": "0.1.51"
+    "@dmsdc-ai/aterm-darwin-arm64": "0.1.92"
   },
   "dependencies": {
-    "@dmsdc-ai/aigentry-brain": "latest",
-    "@dmsdc-ai/aigentry-deliberation": "latest",
-    "@dmsdc-ai/aigentry-devkit": "^0.0.7",
-    "@dmsdc-ai/aigentry-telepty": "latest"
+    "@dmsdc-ai/aigentry-devkit": ">=0.0.19",
+    "@dmsdc-ai/aigentry-telepty": ">=0.1.88"
+  },
+  "peerDependencies": {
+    "@dmsdc-ai/aigentry": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@dmsdc-ai/aigentry": {
+      "optional": true
+    }
   },
   "license": "UNLICENSED",
   "publishConfig": {

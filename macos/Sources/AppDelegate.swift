@@ -4,1690 +4,1917 @@ import Foundation
 import SwiftUI
 
 private struct IpcWorkspaceConfig: Decodable {
-    let name: String
-    let cli: String
-    let cwd: String
-    let cols: UInt16?
-    let rows: UInt16?
+  let name: String
+  let cli: String
+  let cwd: String
+  let cols: UInt16?
+  let rows: UInt16?
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var window: NSWindow!
-    var terminalView: TerminalView?
-    var busClient: TeleptyBusClient!
-    var splitView: NSSplitView!
-    var terminalContainerView: NSView!
+  var window: NSWindow!
+  var terminalView: TerminalView?
+  var busClient: TeleptyBusClient!
+  var splitView: NSSplitView!
+  var terminalContainerView: NSView!
 
-    private let workspaceSidebarModel = WorkspaceSidebarModel()
-    private var processPollTimer: Timer?
-    private var managedWorkspaces: [UUID: ManagedWorkspace] = [:]
-    private var workspaceOrder: [UUID] = []
-    private var excludedChildPIDs: Set<Int32> = []
+  private let workspaceSidebarModel = WorkspaceSidebarModel()
+  private var managedWorkspaces: [UUID: ManagedWorkspace] = [:]
+  private var workspaceOrder: [UUID] = []
+  /// Pending bootstraps waiting for ShellReady event: workspace UUID → (command, fallback timer)
+  private var pendingBootstraps: [UUID: (command: String, fallbackTimer: DispatchWorkItem)] = [:]
+  private var excludedChildPIDs: Set<Int32> = []
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        ensureTeleptyDaemon()
-        startTailscale()
-
-        let rect = NSRect(x: 0, y: 0, width: 1280, height: 768)
-        window = NSWindow(
-            contentRect: rect,
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "aterm v3"
-        window.center()
-        window.minSize = NSSize(width: 640, height: 400)
-        window.backgroundColor = AtermTheme.windowBackground
-
-        // Create telepty bus client
-        busClient = TeleptyBusClient()
-
-        // Create SwiftUI sidebar
-        let sidebarView = SessionSidebarView(
-            busClient: busClient,
-            workspaceModel: workspaceSidebarModel,
-            onBeginWorkspaceCreation: { [weak self] request in
-                self?.beginWorkspaceCreation(request)
-            },
-            onCreateWorkspaces: { [weak self] drafts in
-                self?.createWorkspaces(from: drafts)
-            },
-            onSelectWorkspace: { [weak self] id in
-                self?.selectWorkspace(id)
-            },
-            onRenameWorkspace: { [weak self] id, name in
-                self?.renameWorkspace(id: id, to: name)
-            },
-            onCloseWorkspace: { [weak self] id in
-                self?.closeWorkspace(id: id)
-            },
-            onAttachExternalSession: { [weak self] sessionID in
-                self?.attachExternalSession(sessionID)
-            },
-            onOpenSettings: { [weak self] in
-                self?.showPreferences()
-            }
-        )
-        let sidebarHost = NSHostingView(rootView: sidebarView)
-        sidebarHost.frame = NSRect(x: 0, y: 0, width: 240, height: rect.height)
-
-        // Create terminal container
-        let terminalRect = NSRect(x: 0, y: 0, width: rect.width - 240, height: rect.height)
-        terminalContainerView = NSView(frame: terminalRect)
-        terminalContainerView.autoresizingMask = [.width, .height]
-        terminalContainerView.wantsLayer = true
-        terminalContainerView.layer?.backgroundColor = AtermTheme.terminalBackground.cgColor
-
-        // Create split view
-        splitView = NSSplitView()
-        splitView.isVertical = true
-        splitView.dividerStyle = .thin
-        splitView.frame = rect
-        splitView.autoresizingMask = [.width, .height]
-
-        splitView.addSubview(sidebarHost)
-        splitView.addSubview(terminalContainerView)
-
-        // Set sidebar constraints
-        // Keep the sidebar near its initial width and let the terminal absorb
-        // horizontal growth/shrink so PTY columns track the visible content.
-        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
-        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
-        sidebarHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
-        sidebarHost.widthAnchor.constraint(lessThanOrEqualToConstant: 400).isActive = true
-        splitView.setPosition(240, ofDividerAt: 0)
-
-        window.contentView = splitView
-        window.makeKeyAndOrderFront(nil)
-
-        setupPreferencesMenu()
-        AtermSettings.shared.load()
-
-        let restoredCount = restoreWorkspaces()
-        if restoredCount == 0 {
-            if needsOnboarding() {
-                showOnboarding()
-            } else {
-                createDefaultWorkspace()
-            }
-        } else if needsOnboarding() {
-            // REINSTALL: sessions restored but config needs setup
-            showOnboarding()
-        }
-        registerHostCallbacks()
-        startProcessPolling()
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    // Single instance enforcement
+    let bundleID = Bundle.main.bundleIdentifier ?? "com.aigentry.aterm"
+    let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+    let others = running.filter { $0 != NSRunningApplication.current }
+    if let existing = others.first {
+      NSLog("[aterm] already running (PID %d), activating existing instance", existing.processIdentifier)
+      existing.activate()
+      exit(0)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+    ensureTeleptyDaemon()
+    startTailscale()
+
+    let rect = NSRect(x: 0, y: 0, width: 1280, height: 768)
+    window = NSWindow(
+      contentRect: rect,
+      styleMask: [.titled, .closable, .resizable, .miniaturizable],
+      backing: .buffered,
+      defer: false
+    )
+    window.title = "aterm v3"
+    window.center()
+    window.minSize = NSSize(width: 640, height: 400)
+    window.backgroundColor = AtermTheme.windowBackground
+
+    // Create telepty bus client
+    busClient = TeleptyBusClient()
+
+    // Create SwiftUI sidebar
+    let sidebarView = SessionSidebarView(
+      busClient: busClient,
+      workspaceModel: workspaceSidebarModel,
+      onBeginWorkspaceCreation: { [weak self] request in
+        self?.beginWorkspaceCreation(request)
+      },
+      onCreateWorkspaces: { [weak self] drafts in
+        self?.createWorkspaces(from: drafts)
+      },
+      onSelectWorkspace: { [weak self] workspaceName in
+        self?.selectWorkspace(named: workspaceName)
+      },
+      onRenameWorkspace: { [weak self] workspaceName, name in
+        self?.renameWorkspace(named: workspaceName, toSuggested: name)
+      },
+      onCloseWorkspace: { [weak self] workspaceName in
+        self?.closeWorkspace(named: workspaceName)
+      },
+      onChangeWorkspaceCLI: { [weak self] workspaceName, newCli in
+        self?.changeWorkspaceCLI(named: workspaceName, to: newCli)
+      },
+      onAttachExternalSession: { [weak self] sessionID in
+        self?.attachExternalSession(sessionID)
+      },
+      onOpenSettings: { [weak self] in
+        self?.showPreferences()
+      }
+    )
+    let sidebarHost = NSHostingView(rootView: sidebarView)
+    sidebarHost.frame = NSRect(x: 0, y: 0, width: 240, height: rect.height)
+
+    // Create terminal container
+    let terminalRect = NSRect(x: 0, y: 0, width: rect.width - 240, height: rect.height)
+    terminalContainerView = NSView(frame: terminalRect)
+    terminalContainerView.autoresizingMask = [.width, .height]
+    terminalContainerView.wantsLayer = true
+    terminalContainerView.layer?.backgroundColor = AtermTheme.terminalBackground.cgColor
+
+    // Create split view
+    splitView = NSSplitView()
+    splitView.isVertical = true
+    splitView.dividerStyle = .thin
+    splitView.frame = rect
+    splitView.autoresizingMask = [.width, .height]
+
+    splitView.addSubview(sidebarHost)
+    splitView.addSubview(terminalContainerView)
+
+    // Set sidebar constraints
+    // Keep the sidebar near its initial width and let the terminal absorb
+    // horizontal growth/shrink so PTY columns track the visible content.
+    splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+    splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+    sidebarHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+    sidebarHost.widthAnchor.constraint(lessThanOrEqualToConstant: 400).isActive = true
+    splitView.setPosition(240, ofDividerAt: 0)
+
+    window.contentView = splitView
+    window.makeKeyAndOrderFront(nil)
+
+    setupPreferencesMenu()
+    AtermSettings.shared.load()
+
+    let restoredCount = restoreWorkspaces()
+    if restoredCount == 0 {
+      if needsOnboarding() {
+        showOnboarding()
+      } else {
+        createDefaultWorkspace()
+      }
+    } else if needsOnboarding() {
+      // REINSTALL: sessions restored but config needs setup
+      showOnboarding()
     }
+    registerHostCallbacks()
 
-    func applicationWillTerminate(_ notification: Notification) {
-        saveWorkspaces()
-        // Deregister all workspaces from telepty daemon to prevent ghost sessions
-        deregisterTeleptyWorkspaces()
-        processPollTimer?.invalidate()
-        processPollTimer = nil
-        let env = ProcessInfo.processInfo.environment
-        let tailscaleDisabledEnv = env["ATERM_TAILSCALE_ENABLED"].map { $0 == "0" || $0.lowercased() == "false" || $0.lowercased() == "no" } ?? false
-        let tailscaleDisabledDefaults = UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil && !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled")
-        if !tailscaleDisabledEnv && !tailscaleDisabledDefaults {
-            aterm_tailscale_shutdown()
-        }
+    // Re-register all workspaces with telepty after restore to ensure
+    // none are missing (fire-and-forget registration can silently fail)
+    if restoredCount > 0 {
+      aterm_sync_telepty()
     }
+    refreshWorkspaceProcesses()
+  }
 
-    private func deregisterTeleptyWorkspaces() {
-        let port = 3848
-        for (_, workspace) in managedWorkspaces {
-            let name = workspace.name
-            guard !name.isEmpty,
-                  let url = URL(string: "http://localhost:\(port)/api/sessions/\(name)") else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "DELETE"
-            request.timeoutInterval = 2
-            // Fire synchronously — we're terminating, must complete before exit
-            let semaphore = DispatchSemaphore(value: 0)
-            URLSession.shared.dataTask(with: request) { _, _, _ in
-                semaphore.signal()
-            }.resume()
-            _ = semaphore.wait(timeout: .now() + 2)
-            NSLog("[aterm] deregistered workspace '%@' from telepty", name)
-        }
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    return true
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    saveWorkspaces()
+    // Deregister all workspaces from telepty daemon to prevent ghost sessions
+    deregisterTeleptyWorkspaces()
+    // Invalidate per-workspace idle timers
+    for (_, ws) in managedWorkspaces {
+      ws.idleTimer?.invalidate()
+      ws.idleTimer = nil
     }
-
-    // MARK: - IPC Host Callbacks
-
-    private func registerHostCallbacks() {
-        let ud = Unmanaged.passUnretained(self).toOpaque()
-        var callbacks = AtermHostCallbacks()
-        callbacks.userdata = ud
-        callbacks.create_workspace_view = { userdata, idPtr, configPtr in
-            guard let userdata, let idPtr else { return }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            let id = String(cString: idPtr)
-            let configJson = configPtr.map { String(cString: $0) } ?? "{}"
-            NSLog("[aterm-ipc] create_workspace_view: %@ config=%@", id, configJson)
-            DispatchQueue.main.async {
-                delegate.handleIpcCreateWorkspace(id: id, configJson: configJson)
-            }
-        }
-        callbacks.close_workspace_view = { userdata, idPtr in
-            guard let userdata, let idPtr else { return }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            let id = String(cString: idPtr)
-            DispatchQueue.main.async {
-                if let uuid = delegate.managedWorkspaces.first(where: { $0.value.name == id })?.key {
-                    delegate.closeWorkspace(id: uuid)
-                }
-            }
-        }
-        callbacks.focus_workspace = { userdata, idPtr in
-            guard let userdata, let idPtr else { return }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            let id = String(cString: idPtr)
-            DispatchQueue.main.async {
-                if let uuid = delegate.managedWorkspaces.first(where: { $0.value.name == id })?.key {
-                    delegate.selectWorkspace(uuid)
-                }
-            }
-        }
-        callbacks.rename_workspace = { userdata, oldNamePtr, newNamePtr in
-            guard let userdata, let oldNamePtr, let newNamePtr else { return }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            let oldName = String(cString: oldNamePtr)
-            let newName = String(cString: newNamePtr)
-            DispatchQueue.main.async {
-                delegate.renameWorkspace(named: oldName, toExact: newName)
-            }
-        }
-        callbacks.send_key = { userdata, workspacePtr, keyPtr in
-            guard let userdata, let workspacePtr, let keyPtr else { return }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            let workspace = String(cString: workspacePtr)
-            let key = String(cString: keyPtr)
-            DispatchQueue.main.async {
-                delegate.sendKey(toWorkspaceNamed: workspace, key: key)
-            }
-        }
-        callbacks.attach_external_session = { userdata, sessionIDPtr in
-            guard let userdata, let sessionIDPtr else { return }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            let sessionID = String(cString: sessionIDPtr)
-            DispatchQueue.main.async {
-                delegate.attachExternalSession(sessionID)
-            }
-        }
-        callbacks.reload_settings = { userdata in
-            guard let userdata else { return }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            DispatchQueue.main.async {
-                delegate.reloadSettingsFromIPC()
-            }
-        }
-        callbacks.list_workspaces = { userdata in
-            guard let userdata else { return nil }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
-            let list = delegate.workspaceOrder.compactMap { id -> [String: String]? in
-                guard let ws = delegate.managedWorkspaces[id] else { return nil }
-                return [
-                    "id": ws.name,
-                    "name": ws.name,
-                    "cli": ws.launchCommand.rawValue,
-                    "cwd": ws.cwd,
-                    "status": "running",
-                ]
-            }
-            guard let data = try? JSONSerialization.data(withJSONObject: list),
-                  let str = String(data: data, encoding: .utf8) else { return nil }
-            return strdup(str)
-        }
-        callbacks.on_workspace_event = { _, eventPtr in
-            guard let eventPtr else { return }
-            let event = String(cString: eventPtr)
-            NSLog("[aterm-ipc] workspace_event: %@", event)
-        }
-        callbacks.request_redraw = { _ in
-            // No-op for now — individual TerminalViews handle their own redraw
-        }
-        aterm_set_host(callbacks)
-        NSLog("[aterm-ipc] host callbacks registered")
+    let env = ProcessInfo.processInfo.environment
+    let tailscaleDisabledEnv =
+      env["ATERM_TAILSCALE_ENABLED"].map {
+        $0 == "0" || $0.lowercased() == "false" || $0.lowercased() == "no"
+      } ?? false
+    let tailscaleDisabledDefaults =
+      UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil
+      && !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled")
+    if !tailscaleDisabledEnv && !tailscaleDisabledDefaults {
+      aterm_tailscale_shutdown()
     }
+  }
 
-    private func handleIpcCreateWorkspace(id: String, configJson: String) {
-        // Parse config and create workspace
-        guard let data = configJson.data(using: .utf8),
-              let config = try? JSONDecoder().decode(IpcWorkspaceConfig.self, from: data) else {
-            NSLog("[aterm-ipc] failed to parse workspace config: %@", configJson)
-            return
-        }
-        let command = WorkspaceLaunchCommand(rawValue: config.cli) ?? .zsh
-        let cwd = config.cwd.isEmpty ? NSHomeDirectory() : config.cwd
-        createWorkspace(name: config.name, command: command, customCommand: "", cwd: cwd, shouldSelect: true)
+  private func deregisterTeleptyWorkspaces() {
+    let port = 3848
+    for (_, workspace) in managedWorkspaces {
+      let name = workspace.name
+      guard !name.isEmpty,
+        let url = URL(string: "http://localhost:\(port)/api/sessions/\(name)")
+      else { continue }
+      var request = URLRequest(url: url)
+      request.httpMethod = "DELETE"
+      request.timeoutInterval = 2
+      // Fire synchronously — we're terminating, must complete before exit
+      let semaphore = DispatchSemaphore(value: 0)
+      URLSession.shared.dataTask(with: request) { _, _, _ in
+        semaphore.signal()
+      }.resume()
+      _ = semaphore.wait(timeout: .now() + 2)
+      NSLog("[aterm] deregistered workspace '%@' from telepty", name)
     }
+  }
 
-    // MARK: - Workspace Persistence
+  // MARK: - IPC Host Callbacks
 
-    private func saveWorkspaces() {
-        let entries: [[String: Any]] = workspaceOrder.compactMap { id in
-            guard let ws = managedWorkspaces[id] else { return nil }
-            let effectiveName = ws.name.isEmpty
-                ? URL(fileURLWithPath: ws.cwd).lastPathComponent
-                : ws.name
-            guard !effectiveName.isEmpty else { return nil }
-            return [
-                "id": effectiveName,
-                "cwd": ws.cwd,
-                "command": ws.launchCommand.rawValue,
-                "args": [] as [String],
-                "customCommand": ws.customCommand,
-                "isSystem": ws.isSystem,
-                "resumeCommand": ws.launchCommand.bootstrapCommand(customCommand: ws.customCommand) ?? "",
-            ] as [String: Any]
-        }
-        let wrapper: [String: Any] = ["sessions": entries]
-        do {
-            let sessionsURL = URL(fileURLWithPath: NSHomeDirectory() + "/.aterm/sessions.json")
-            let dir = sessionsURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: wrapper, options: [.prettyPrinted, .sortedKeys])
-            // Atomic write: write to .tmp then rename/replace
-            let tmpURL = sessionsURL.appendingPathExtension("tmp")
-            try data.write(to: tmpURL)
-            if FileManager.default.fileExists(atPath: sessionsURL.path) {
-                _ = try FileManager.default.replaceItemAt(sessionsURL, withItemAt: tmpURL)
-            } else {
-                try FileManager.default.moveItem(at: tmpURL, to: sessionsURL)
-            }
-            NSLog("[aterm] saved %d workspaces to %@", entries.count, sessionsURL.path)
-        } catch {
-            NSLog("[aterm] save workspaces failed: %@", error.localizedDescription)
-        }
+  private func registerHostCallbacks() {
+    let ud = Unmanaged.passUnretained(self).toOpaque()
+    var callbacks = AtermHostCallbacks()
+    callbacks.userdata = ud
+    callbacks.create_workspace_view = { userdata, idPtr, configPtr in
+      guard let userdata, let idPtr else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      let id = String(cString: idPtr)
+      let configJson = configPtr.map { String(cString: $0) } ?? "{}"
+      NSLog("[aterm-ipc] create_workspace_view: %@ config=%@", id, configJson)
+      DispatchQueue.main.async {
+        delegate.handleIpcCreateWorkspace(id: id, configJson: configJson)
+      }
     }
-
-    private func hasPersistedSessions() -> Bool {
-        let fm = FileManager.default
-        return fm.fileExists(atPath: NSHomeDirectory() + "/.aterm/sessions.json")
-            || fm.fileExists(atPath: NSHomeDirectory() + "/.aigentry/config/sessions.json")
+    callbacks.close_workspace_view = { userdata, idPtr in
+      guard let userdata, let idPtr else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      let id = String(cString: idPtr)
+      DispatchQueue.main.async {
+        if let uuid = delegate.managedWorkspaces.first(where: { $0.value.name == id })?.key {
+          delegate.closeWorkspace(id: uuid)
+        }
+      }
     }
-
-    @discardableResult
-    private func restoreWorkspaces() -> Int {
-        // Distinguish first install from reinstall/upgrade.
-        // NEVER clear sessions just because onboarding is incomplete.
-        if !hasPersistedSessions() {
-            if needsOnboarding() {
-                NSLog("[aterm] first install — no sessions to restore")
-            }
-            return 0
+    callbacks.focus_workspace = { userdata, idPtr in
+      guard let userdata, let idPtr else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      let id = String(cString: idPtr)
+      DispatchQueue.main.async {
+        if let uuid = delegate.managedWorkspaces.first(where: { $0.value.name == id })?.key {
+          delegate.selectWorkspace(uuid)
         }
-        if needsOnboarding() {
-            NSLog("[aterm] reinstall detected — restoring sessions despite incomplete onboarding")
-        }
-
-        let count = Int(aterm_session_count(nil))
-        if count == 0 { return 0 }
-
-        // Collect all entries FIRST before creating any workspaces.
-        // createWorkspace() calls saveWorkspaces() which overwrites sessions.json,
-        // and aterm_session_get() re-reads from disk each call — so the file would
-        // be truncated to 1 entry after the first workspace is created.
-        struct RestoredEntry {
-            let name: String
-            let cwd: String
-            let command: String
-            let customCommand: String
-            let isSystem: Bool
-        }
-        var entries: [RestoredEntry] = []
-        for i in 0..<count {
-            let entry = aterm_session_get(nil, UInt32(i))
-            defer { aterm_session_free(entry) }
-
-            guard let idPtr = entry.id else {
-                NSLog("[aterm] skipping session entry %d: nil id", i)
-                continue
-            }
-            let name = String(cString: idPtr)
-            let cwd = entry.cwd.map { String(cString: $0) } ?? NSHomeDirectory()
-            let commandStr = entry.command.map { String(cString: $0) } ?? ""
-            let custom = entry.custom_command.map { String(cString: $0) } ?? ""
-
-            let effectiveName = name.isEmpty
-                ? URL(fileURLWithPath: cwd).lastPathComponent
-                : name
-            if effectiveName.isEmpty { continue }
-
-            entries.append(RestoredEntry(
-                name: effectiveName,
-                cwd: cwd,
-                command: commandStr,
-                customCommand: custom,
-                isSystem: entry.is_system
-            ))
-        }
-
-        // Now create workspaces from collected data (skipSave until the end)
-        for (i, se) in entries.enumerated() {
-            let effectiveCwd = FileManager.default.fileExists(atPath: se.cwd) ? se.cwd : NSHomeDirectory()
-            let requestedCommand = WorkspaceLaunchCommand(rawValue: se.command) ?? .zsh
-            let command = cliAvailable(for: requestedCommand) ? requestedCommand : .zsh
-
-            createWorkspace(
-                name: se.name,
-                command: command,
-                customCommand: se.customCommand,
-                cwd: effectiveCwd,
-                shouldSelect: i == entries.count - 1,
-                isSystem: se.isSystem,
-                skipSave: true
-            )
-        }
-
-        if !entries.isEmpty {
-            saveWorkspaces()
-            NSLog("[aterm] restored %d workspaces", entries.count)
-        }
-        return entries.count
+      }
     }
-
-    private func cliAvailable(for command: WorkspaceLaunchCommand) -> Bool {
-        switch command {
-        case .zsh:
-            return true
-        case .claude:
-            return which("claude")
-        case .codex:
-            return which("codex")
-        case .gemini:
-            return which("gemini")
-        case .custom:
-            return true
-        }
+    callbacks.rename_workspace = { userdata, oldNamePtr, newNamePtr in
+      guard let userdata, let oldNamePtr, let newNamePtr else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      let oldName = String(cString: oldNamePtr)
+      let newName = String(cString: newNamePtr)
+      DispatchQueue.main.async {
+        delegate.renameWorkspace(named: oldName, toExact: newName)
+      }
     }
-
-    private func createWorkspaceFromOnboarding(_ result: OnboardingResult) {
-        // Trust user's selection — don't check cliAvailable.
-        // If CLI fails to spawn, PTY termination will trigger zsh fallback.
-        let command: WorkspaceLaunchCommand
-        switch result.defaultCLI {
-        case "claude": command = .claude
-        case "codex": command = .codex
-        case "gemini": command = .gemini
-        default: command = .zsh
-        }
-
-        let userSelectedCli = result.defaultCLI != "none"
-        let name = userSelectedCli ? "orchestrator" : "main"
-        let requestedDirectory = result.initialProjectDirectory?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let cwd: String
-        if let requestedDirectory,
-           !requestedDirectory.isEmpty,
-           FileManager.default.fileExists(atPath: requestedDirectory) {
-            cwd = requestedDirectory
-        } else {
-            cwd = NSHomeDirectory()
-        }
-
-        // Pre-create Claude Code trust directory so the trust prompt is skipped
-        if command == .claude {
-            let sanitized = cwd.replacingOccurrences(of: "/", with: "-")
-            let trustDir = NSHomeDirectory() + "/.claude/projects/\(sanitized)"
-            try? FileManager.default.createDirectory(atPath: trustDir, withIntermediateDirectories: true)
-        }
-
-        NSLog("[aterm] creating workspace from onboarding: name=%@, cli=%@, command=%@", name, result.defaultCLI, command.rawValue)
-        createWorkspace(
-            name: name,
-            command: command,
-            customCommand: "",
-            cwd: cwd,
-            shouldSelect: true,
-            isSystem: userSelectedCli
-        )
+    callbacks.send_key = { userdata, workspacePtr, keyPtr in
+      guard let userdata, let workspacePtr, let keyPtr else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      let workspace = String(cString: workspacePtr)
+      let key = String(cString: keyPtr)
+      DispatchQueue.main.async {
+        delegate.sendKey(toWorkspaceNamed: workspace, key: key)
+      }
     }
-
-    private func createDefaultWorkspace() {
-        // Read defaultCLI from aterm.json (set by TUI wizard)
-        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
-        var defaultCLI = "none"
-        var parsedConfig: [String: Any]?
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-           let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            parsedConfig = config
-            if let ai = config["ai"] as? [String: Any],
-               let cli = ai["defaultCLI"] as? String {
-                defaultCLI = cli
-            }
-        }
-
-        // Map defaultCLI to WorkspaceLaunchCommand
-        let requestedCommand: WorkspaceLaunchCommand
-        switch defaultCLI {
-        case "claude": requestedCommand = .claude
-        case "codex": requestedCommand = .codex
-        case "gemini": requestedCommand = .gemini
-        default: requestedCommand = .zsh
-        }
-
-        // Verify CLI is installed, fallback to zsh if not
-        let command: WorkspaceLaunchCommand
-        if requestedCommand != .zsh && cliAvailable(for: requestedCommand) {
-            command = requestedCommand
-        } else if requestedCommand != .zsh {
-            NSLog("[aterm] %@ not found, starting with zsh", defaultCLI)
-            command = .zsh
-        } else {
-            command = .zsh
-        }
-
-        let workspace = parsedConfig?["workspace"] as? [String: Any]
-        let configuredCwd = workspace?["defaultCwd"] as? String
-        let cwd: String
-        if let configuredCwd,
-           !configuredCwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           FileManager.default.fileExists(atPath: configuredCwd) {
-            cwd = configuredCwd
-        } else {
-            cwd = NSHomeDirectory()
-        }
-
-        // Name is 'orchestrator' if user selected a CLI (even if binary not found)
-        let userSelectedCli = defaultCLI != "none"
-        let name = userSelectedCli ? "orchestrator" : "main"
-
-        createWorkspace(
-            name: name,
-            command: command,
-            customCommand: "",
-            cwd: cwd,
-            shouldSelect: true,
-            isSystem: userSelectedCli
-        )
+    callbacks.attach_external_session = { userdata, sessionIDPtr in
+      guard let userdata, let sessionIDPtr else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      let sessionID = String(cString: sessionIDPtr)
+      DispatchQueue.main.async {
+        delegate.attachExternalSession(sessionID)
+      }
     }
-
-    // MARK: - Onboarding & Preferences
-
-    private func detectClis() -> CliStatus {
-        guard let jsonPtr = aterm_core_detect_clis() else {
-            return CliStatus(claude: false, codex: false, gemini: false)
-        }
-        let json = String(cString: jsonPtr)
-        aterm_core_free_string(jsonPtr)
-        guard let data = json.data(using: .utf8),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Bool] else {
-            return CliStatus(claude: false, codex: false, gemini: false)
-        }
-        return CliStatus(
-            claude: dict["claude"] ?? false,
-            codex: dict["codex"] ?? false,
-            gemini: dict["gemini"] ?? false
-        )
+    callbacks.reload_settings = { userdata in
+      guard let userdata else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      DispatchQueue.main.async {
+        delegate.reloadSettingsFromIPC()
+      }
     }
-
-    private func needsOnboarding() -> Bool {
-        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return true // No config = needs onboarding
-        }
-        if config["setupCompleted"] as? Bool != true { return true }
-        // Field-by-field check for existing users
-        let ai = config["ai"] as? [String: Any]
-        if ai?["defaultCLI"] == nil { return true }
-        return false
-    }
-
-    private func readConfig() -> [String: Any] {
-        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return [:]
-        }
-        return config
-    }
-
-    private func saveOnboardingResult(_ result: OnboardingResult) {
-        let configPath = NSHomeDirectory() + "/.aigentry/config/aterm.json"
-        var config = readConfig()
-        var ai = config["ai"] as? [String: Any] ?? [:]
-        ai["defaultCLI"] = result.defaultCLI
-        config["ai"] = ai
-        var shell = config["shell"] as? [String: Any] ?? [:]
-        shell["default"] = result.defaultShell
-        config["shell"] = shell
-        var tailscale = config["tailscale"] as? [String: Any] ?? [:]
-        tailscale["connect_on_launch"] = result.tailscaleEnabled
-        config["tailscale"] = tailscale
-        if let initialProjectDirectory = result.initialProjectDirectory,
-           !initialProjectDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var workspace = config["workspace"] as? [String: Any] ?? [:]
-            workspace["defaultCwd"] = initialProjectDirectory
-            config["workspace"] = workspace
-        }
-        config["setupCompleted"] = true
-
-        let dir = (configPath as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        if let data = try? JSONSerialization.data(withJSONObject: config, options: .prettyPrinted) {
-            try? data.write(to: URL(fileURLWithPath: configPath))
-        }
-    }
-
-    private func showOnboarding() {
-        let cliStatus = detectClis()
-        var showSheet = true
-
-        let onboardingView = OnboardingView(
-            isPresented: Binding(
-                get: { showSheet },
-                set: { [weak self] newValue in
-                    showSheet = newValue
-                    if !newValue {
-                        self?.window.endSheet(self?.window.attachedSheet ?? NSPanel())
-                    }
-                }
-            ),
-            cliStatus: cliStatus,
-            onComplete: { [weak self] result in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                    self?.promptForInitialProjectDirectory(using: result) { finalizedResult in
-                        self?.saveOnboardingResult(finalizedResult)
-                        if self?.managedWorkspaces.isEmpty ?? true {
-                            self?.createWorkspaceFromOnboarding(finalizedResult)
-                        }
-                    }
-                }
-            }
-        )
-
-        let hostingView = NSHostingView(rootView: onboardingView)
-        let sheet = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 720),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        sheet.contentView = hostingView
-        sheet.title = "Welcome to aterm"
-        window.beginSheet(sheet)
-    }
-
-    private func promptForInitialProjectDirectory(
-        using result: OnboardingResult,
-        completion: @escaping (OnboardingResult) -> Void
-    ) {
-        let panel = NSOpenPanel()
-        panel.title = "Choose Project Folder"
-        panel.message = "Select a folder for the first workspace. Cancel to use your home directory."
-        panel.prompt = AtermLocalization.text(ko: "폴더 사용", en: "Use Folder")
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.resolvesAliases = true
-
-        let projectsDirectory = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("projects", isDirectory: true)
-        panel.directoryURL = FileManager.default.fileExists(atPath: projectsDirectory.path)
-            ? projectsDirectory
-            : URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-
-        panel.beginSheetModal(for: window) { response in
-            let selectedDirectory = response == .OK
-                ? panel.url?.path
-                : NSHomeDirectory()
-            completion(
-                OnboardingResult(
-                    defaultCLI: result.defaultCLI,
-                    defaultShell: result.defaultShell,
-                    tailscaleEnabled: result.tailscaleEnabled,
-                    initialProjectDirectory: selectedDirectory
-                )
-            )
-        }
-    }
-
-    @objc private func showPreferences() {
-        let settings = AtermSettings.shared
-        settings.load()
-
-        let settingsView = SettingsView(
-            settings: settings,
-            onApply: { [weak self] in
-                self?.applySettings()
-            }
-        )
-
-        let hostingView = NSHostingView(rootView: settingsView)
-        let prefsWindow = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        prefsWindow.contentView = hostingView
-        prefsWindow.title = AtermLocalization.text(ko: "설정", en: "Settings")
-        prefsWindow.center()
-        prefsWindow.makeKeyAndOrderFront(nil)
-    }
-
-    /// Apply current settings to all terminal views immediately.
-    func applySettings() {
-        for ws in managedWorkspaces.values {
-            applySettingsToView(ws.terminalView)
-        }
-    }
-
-    /// Apply current settings to a single terminal view.
-    private func applySettingsToView(_ view: TerminalView) {
-        guard let core = view.corePointer else { return }
-        let settings = AtermSettings.shared
-        let schemeIndex = AtermSettings.schemeIndex(settings.colorScheme)
-        let fontSize = Float(settings.fontSize)
-        let lineHeightPx = Float(settings.fontSize * settings.lineHeight)
-
-        aterm_core_set_color_scheme(core, schemeIndex)
-        aterm_core_set_font_size(core, fontSize)
-        aterm_core_set_line_height(core, lineHeightPx)
-
-        // Font size / line height changes affect grid dimensions — trigger resize
-        let backingSize = view.convertToBacking(view.bounds).size
-        if backingSize.width > 0 && backingSize.height > 0 {
-            aterm_core_resize(core, UInt32(backingSize.width), UInt32(backingSize.height))
-        }
-        aterm_core_render(core)
-    }
-
-    private func setupPreferencesMenu() {
-        if let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu {
-            let prefsItem = NSMenuItem(
-                title: "Preferences...",
-                action: #selector(showPreferences),
-                keyEquivalent: ","
-            )
-            prefsItem.target = self
-            // Insert after "About" (index 0) and separator (index 1)
-            let insertIndex = min(2, appMenu.items.count)
-            appMenu.insertItem(prefsItem, at: insertIndex)
-            appMenu.insertItem(NSMenuItem.separator(), at: insertIndex)
-        }
-    }
-
-    private func which(_ command: String) -> Bool {
-        // Use login shell to find binaries — macOS app environment has limited PATH
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: shell)
-        process.arguments = ["-l", "-c", "command -v \(command) >/dev/null 2>&1"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
-    }
-
-    private func whichPath(_ command: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [command]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let value = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let value, !value.isEmpty else { return nil }
-            return value
-        } catch {
-            return nil
-        }
-    }
-
-    private func resolveTeleptyFromShell(_ shellPath: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: shellPath)
-        process.arguments = ["-lc", "command -v telepty 2>/dev/null || which telepty 2>/dev/null"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let value = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let value,
-                  !value.isEmpty,
-                  FileManager.default.isExecutableFile(atPath: value) else { return nil }
-            return value
-        } catch {
-            return nil
-        }
-    }
-
-    private func collectNodeManagerTeleptyPaths(homeDirectory: String) -> [String] {
-        var paths: [String] = []
-        let fileManager = FileManager.default
-
-        let nvmRoot = "\(homeDirectory)/.nvm/versions/node"
-        if let entries = try? fileManager.contentsOfDirectory(atPath: nvmRoot) {
-            for entry in entries.sorted(by: >) {
-                paths.append("\(nvmRoot)/\(entry)/bin/telepty")
-            }
-        }
-
-        let fnmRoot = "\(homeDirectory)/.fnm/node-versions"
-        if let entries = try? fileManager.contentsOfDirectory(atPath: fnmRoot) {
-            for entry in entries.sorted(by: >) {
-                paths.append("\(fnmRoot)/\(entry)/installation/bin/telepty")
-            }
-        }
-
-        return paths
-    }
-
-    /// Returns (path, isJS) — if isJS, run via "node <path> daemon" instead of "<path> daemon"
-    private func findTeleptyBinary() -> (path: String, isJS: Bool)? {
-        let environment = ProcessInfo.processInfo.environment
-        let homeDirectory = environment["HOME"] ?? NSHomeDirectory()
-        let fm = FileManager.default
-
-        // 1. Shell-based resolution (picks up PATH from login shell)
-        let shellCandidates = [
-            environment["SHELL"],
-            "/bin/zsh",
-            "/bin/bash",
-        ].compactMap { $0 }
-
-        for shellPath in shellCandidates {
-            if let resolved = resolveTeleptyFromShell(shellPath) {
-                return (resolved, false)
-            }
-        }
-
-        // 2. which
-        if let resolved = whichPath("telepty"),
-           fm.isExecutableFile(atPath: resolved) {
-            return (resolved, false)
-        }
-
-        // 3. Direct binary paths
-        let directPaths = [
-            "\(homeDirectory)/.volta/bin/telepty",
-            "\(homeDirectory)/.local/bin/telepty",
-            "/opt/homebrew/bin/telepty",
-            "/usr/local/bin/telepty",
-        ] + collectNodeManagerTeleptyPaths(homeDirectory: homeDirectory)
-
-        if let found = directPaths.first(where: { fm.isExecutableFile(atPath: $0) }) {
-            return (found, false)
-        }
-
-        // 4. npm global node_modules cli.js paths (telepty is a dep of aterm, not top-level)
-        let npmCliPaths = collectNpmTeleptyCliPaths(homeDirectory: homeDirectory)
-        if let found = npmCliPaths.first(where: { fm.fileExists(atPath: $0) }) {
-            return (found, true)
-        }
-
-        return nil
-    }
-
-    private func collectNpmTeleptyCliPaths(homeDirectory: String) -> [String] {
-        let fm = FileManager.default
-        let teleptyPkg = "@dmsdc-ai/aigentry-telepty/cli.js"
-        let atermPkg = "@dmsdc-ai/aterm/node_modules/\(teleptyPkg)"
-        var paths: [String] = []
-
-        // Common npm global prefixes
-        let globalPrefixes = [
-            "/usr/local/lib/node_modules",
-            "/opt/homebrew/lib/node_modules",
-            "\(homeDirectory)/.npm-global/lib/node_modules",
+    callbacks.list_workspaces = { userdata in
+      guard let userdata else { return nil }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      let list = delegate.workspaceOrder.compactMap { id -> [String: Any]? in
+        guard let ws = delegate.managedWorkspaces[id] else { return nil }
+        guard ws.status != "dead", ws.status != "closing" else { return nil }
+        var payload: [String: Any] = [
+          "id": ws.name,
+          "name": ws.name,
+          "cli": ws.launchCommand.rawValue,
+          "cwd": ws.cwd,
+          "status": ws.status,
+          "created_at": workspaceInfoTimestampFormatter.string(from: ws.createdAt),
+          "last_activity_at": workspaceInfoTimestampFormatter.string(from: ws.lastActivityAt),
+          "is_system": ws.isSystem,
         ]
-        for prefix in globalPrefixes {
-            // Hoisted (top-level dep)
-            paths.append("\(prefix)/\(teleptyPkg)")
-            // Nested inside aterm
-            paths.append("\(prefix)/\(atermPkg)")
+        if !ws.customCommand.isEmpty {
+          payload["custom_command"] = ws.customCommand
         }
+        return payload
+      }
+      guard let data = try? JSONSerialization.data(withJSONObject: list),
+        let str = String(data: data, encoding: .utf8)
+      else { return nil }
+      return strdup(str)
+    }
+    callbacks.on_events_available = { userdata in
+      guard let userdata else { return }
+      let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
+      DispatchQueue.main.async {
+        delegate.drainEvents()
+      }
+    }
+    callbacks.request_redraw = { _ in
+      // No-op for now — individual TerminalViews handle their own redraw
+    }
+    aterm_set_host(callbacks)
+    NSLog("[aterm-ipc] host callbacks registered")
+  }
 
-        // nvm paths
-        let nvmRoot = "\(homeDirectory)/.nvm/versions/node"
-        if let entries = try? fm.contentsOfDirectory(atPath: nvmRoot) {
-            for entry in entries.sorted(by: >) {
-                let lib = "\(nvmRoot)/\(entry)/lib/node_modules"
-                paths.append("\(lib)/\(teleptyPkg)")
-                paths.append("\(lib)/\(atermPkg)")
-            }
+  private func handleIpcCreateWorkspace(id: String, configJson: String) {
+    // Parse config and create workspace
+    guard let data = configJson.data(using: .utf8),
+      let config = try? JSONDecoder().decode(IpcWorkspaceConfig.self, from: data)
+    else {
+      NSLog("[aterm-ipc] failed to parse workspace config: %@", configJson)
+      return
+    }
+    let command = WorkspaceLaunchCommand(rawValue: config.cli) ?? .zsh
+    let cwd = config.cwd.isEmpty ? NSHomeDirectory() : config.cwd
+    createWorkspace(
+      name: config.name, command: command, customCommand: "", cwd: cwd, shouldSelect: true)
+  }
+
+  /// Wakeup+drain: called on main thread when Rust signals events are available.
+  /// Drains all pending events as C structs — no JSON decode overhead.
+  private func drainEvents() {
+    let batch = aterm_drain_events()
+    guard batch.count > 0, let events = batch.events else {
+      aterm_free_events(batch)
+      return
+    }
+    for i in 0..<Int(batch.count) {
+      let event = events[i]
+      let id = event.id.map { String(cString: $0) } ?? ""
+      switch Int(event.event_type) {
+      case Int(ATERM_EVENT_CLOSED):
+        removeWorkspace(named: id, allowSystem: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+          self?.cleanupStaleWorkspaces()
         }
-
-        // fnm paths
-        let fnmRoot = "\(homeDirectory)/.fnm/node-versions"
-        if let entries = try? fm.contentsOfDirectory(atPath: fnmRoot) {
-            for entry in entries.sorted(by: >) {
-                let lib = "\(fnmRoot)/\(entry)/installation/lib/node_modules"
-                paths.append("\(lib)/\(teleptyPkg)")
-                paths.append("\(lib)/\(atermPkg)")
-            }
+      case Int(ATERM_EVENT_STATUS_CHANGED):
+        let status = event.status.map { String(cString: $0) } ?? ""
+        if status == "dead" || status == "closing" {
+          removeWorkspace(named: id, allowSystem: true)
+          DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            self?.cleanupStaleWorkspaces()
+          }
         }
+      case Int(ATERM_EVENT_SHELL_READY):
+        if let wsID = workspaceID(named: id),
+          let pending = pendingBootstraps.removeValue(forKey: wsID)
+        {
+          pending.fallbackTimer.cancel()
+          NSLog("[aterm] shell_ready received for '%@' — bootstrapping immediately", id)
+          sendBootstrapCommand(workspaceID: wsID, command: pending.command)
+        }
+      case Int(ATERM_EVENT_TRUST_PROMPT):
+        if let wsID = workspaceID(named: id),
+          let workspace = managedWorkspaces[wsID],
+          let core = workspace.terminalView.corePointer
+        {
+          "\r".withCString { ptr in
+            aterm_core_write_pty(core, ptr, 1)
+          }
+          NSLog("[aterm] auto-accepted trust prompt for '%@' (event-driven)", workspace.name)
+        }
+      default:
+        break
+      }
+    }
+    aterm_free_events(batch)
+  }
 
-        // volta
-        paths.append("\(homeDirectory)/.volta/tools/image/packages/@dmsdc-ai/aigentry-telepty/lib/node_modules/\(teleptyPkg)")
+  // MARK: - Workspace Persistence
 
-        return paths
+  private func saveWorkspaces() {
+    let entries: [[String: Any]] = workspaceOrder.compactMap { id in
+      guard let ws = managedWorkspaces[id] else { return nil }
+      let effectiveName =
+        ws.name.isEmpty
+        ? URL(fileURLWithPath: ws.cwd).lastPathComponent
+        : ws.name
+      guard !effectiveName.isEmpty else { return nil }
+      return [
+        "id": effectiveName,
+        "cwd": ws.cwd,
+        "command": ws.launchCommand.rawValue,
+        "args": [] as [String],
+        "customCommand": ws.customCommand,
+        "cliArgs": ws.cliArgs,
+        "isSystem": ws.isSystem,
+        "resumeCommand": ws.launchCommand.bootstrapCommand(customCommand: ws.customCommand, cliArgs: ws.cliArgs) ?? "",
+      ] as [String: Any]
+    }
+    let wrapper: [String: Any] = ["sessions": entries]
+    do {
+      let sessionsURL = URL(fileURLWithPath: AtermSettings.dataRoot + "/data/sessions.json")
+      let dir = sessionsURL.deletingLastPathComponent()
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let data = try JSONSerialization.data(
+        withJSONObject: wrapper, options: [.prettyPrinted, .sortedKeys])
+      // Atomic write: write to .tmp then rename/replace
+      let tmpURL = sessionsURL.appendingPathExtension("tmp")
+      try data.write(to: tmpURL)
+      if FileManager.default.fileExists(atPath: sessionsURL.path) {
+        _ = try FileManager.default.replaceItemAt(sessionsURL, withItemAt: tmpURL)
+      } else {
+        try FileManager.default.moveItem(at: tmpURL, to: sessionsURL)
+      }
+      NSLog("[aterm] saved %d workspaces to %@", entries.count, sessionsURL.path)
+    } catch {
+      NSLog("[aterm] save workspaces failed: %@", error.localizedDescription)
+    }
+  }
+
+  private func hasPersistedSessions() -> Bool {
+    let fm = FileManager.default
+    return fm.fileExists(atPath: AtermSettings.dataRoot + "/data/sessions.json")
+  }
+
+  @discardableResult
+  private func restoreWorkspaces() -> Int {
+    // Distinguish first install from reinstall/upgrade.
+    // NEVER clear sessions just because onboarding is incomplete.
+    if !hasPersistedSessions() {
+      if needsOnboarding() {
+        NSLog("[aterm] first install — no sessions to restore")
+      }
+      return 0
+    }
+    if needsOnboarding() {
+      NSLog("[aterm] reinstall detected — restoring sessions despite incomplete onboarding")
     }
 
-    private func ensureTeleptyDaemon() {
-        DispatchQueue.global(qos: .utility).async {
-            // Check if telepty daemon is already running
-            guard let url = URL(string: "http://127.0.0.1:3848/api/sessions") else { return }
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 2.0
+    let count = Int(aterm_session_count(nil))
+    if count == 0 { return 0 }
 
-            let semaphore = DispatchSemaphore(value: 0)
-            var isRunning = false
+    // Collect all entries FIRST before creating any workspaces.
+    // createWorkspace() calls saveWorkspaces() which overwrites sessions.json,
+    // and aterm_session_get() re-reads from disk each call — so the file would
+    // be truncated to 1 entry after the first workspace is created.
+    struct RestoredEntry {
+      let name: String
+      let cwd: String
+      let command: String
+      let customCommand: String
+      let isSystem: Bool
+    }
+    var entries: [RestoredEntry] = []
+    for i in 0..<count {
+      let entry = aterm_session_get(nil, UInt32(i))
+      defer { aterm_session_free(entry) }
 
-            URLSession.shared.dataTask(with: request) { _, response, _ in
-                if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                    isRunning = true
-                }
-                semaphore.signal()
-            }.resume()
+      guard let idPtr = entry.id else {
+        NSLog("[aterm] skipping session entry %d: nil id", i)
+        continue
+      }
+      let name = String(cString: idPtr)
+      let cwd = entry.cwd.map { String(cString: $0) } ?? NSHomeDirectory()
+      let commandStr = entry.command.map { String(cString: $0) } ?? ""
+      let custom = entry.custom_command.map { String(cString: $0) } ?? ""
 
-            semaphore.wait()
+      let effectiveName =
+        name.isEmpty
+        ? URL(fileURLWithPath: cwd).lastPathComponent
+        : name
+      if effectiveName.isEmpty { continue }
 
-            if isRunning {
-                NSLog("[aterm] telepty daemon already running")
-                return
-            }
-
-            guard let telepty = self.findTeleptyBinary() else {
-                NSLog("[aterm] telepty binary not found")
-                return
-            }
-
-            NSLog("[aterm] starting telepty daemon from %@ (js=%d)", telepty.path, telepty.isJS ? 1 : 0)
-            let process = Process()
-            if telepty.isJS {
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                process.arguments = ["node", telepty.path, "daemon"]
-            } else {
-                process.executableURL = URL(fileURLWithPath: telepty.path)
-                process.arguments = ["daemon"]
-            }
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            process.environment = ProcessInfo.processInfo.environment
-
-            do {
-                try process.run()
-                let daemonPID = process.processIdentifier
-                NSLog("[aterm] telepty daemon started (pid %d)", daemonPID)
-                DispatchQueue.main.async { [weak self] in
-                    self?.excludedChildPIDs.insert(daemonPID)
-                }
-            } catch {
-                NSLog("[aterm] failed to start telepty daemon: %@", error.localizedDescription)
-            }
-        }
+      entries.append(
+        RestoredEntry(
+          name: effectiveName,
+          cwd: cwd,
+          command: commandStr,
+          customCommand: custom,
+          isSystem: entry.is_system
+        ))
     }
 
-    private func startTailscale() {
-        let env = ProcessInfo.processInfo.environment
+    // Now create workspaces from collected data (skipSave until the end)
+    for (i, se) in entries.enumerated() {
+      let effectiveCwd: String
+      if FileManager.default.fileExists(atPath: se.cwd) {
+        effectiveCwd = se.cwd
+      } else if se.isSystem {
+        let orchestratorDir = AtermSettings.shared.effectiveOrchestratorCWD
+        try? FileManager.default.createDirectory(
+          atPath: orchestratorDir, withIntermediateDirectories: true)
+        effectiveCwd = orchestratorDir
+      } else {
+        effectiveCwd = NSHomeDirectory()
+      }
+      let requestedCommand = WorkspaceLaunchCommand(rawValue: se.command) ?? .zsh
+      let command = cliAvailable(for: requestedCommand) ? requestedCommand : .zsh
+      let restoredCliArgs = AtermSettings.shared.cliDefaults[command.rawValue] ?? ""
 
-        // Respect disabled setting: env var, UserDefaults, or aterm.json
-        if let envFlag = env["ATERM_TAILSCALE_ENABLED"], envFlag == "0" || envFlag.lowercased() == "false" || envFlag.lowercased() == "no" {
-            NSLog("[aterm] tailscale disabled via ATERM_TAILSCALE_ENABLED")
-            return
-        }
-        if !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled") && UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil {
-            NSLog("[aterm] tailscale disabled in settings")
-            return
-        }
-        // Check aterm.json config (set by onboarding)
-        let config = readConfig()
-        let tailscale = config["tailscale"] as? [String: Any]
-        let connectOnLaunch = tailscale?["connect_on_launch"] as? Bool ?? false
-        if !connectOnLaunch {
-            NSLog("[aterm] tailscale disabled in aterm.json (connect_on_launch=false)")
-            return
-        }
-
-        let result = withOptionalCString(env["ATERM_TAILSCALE_HOSTNAME"]) { hostnamePtr in
-            withOptionalCString(env["ATERM_TAILSCALE_CONTROL_URL"]) { controlURLPtr in
-                withOptionalCString(env["ATERM_TAILSCALE_AUTHKEY"]) { authKeyPtr in
-                    aterm_tailscale_connect(hostnamePtr, controlURLPtr, authKeyPtr)
-                }
-            }
-        }
-
-        if result != 0 {
-            NSLog("[aterm] tailscale startup failed (no auth key or network issue) — skipping")
-            return
-        }
-
-        logTailscaleStatus(prefix: "startup")
+      createWorkspace(
+        name: se.name,
+        command: command,
+        customCommand: se.customCommand,
+        cliArgs: restoredCliArgs,
+        cwd: effectiveCwd,
+        shouldSelect: i == entries.count - 1,
+        isSystem: se.isSystem,
+        skipSave: true
+      )
     }
 
-    private func logTailscaleStatus(prefix: String) {
-        guard let jsonPtr = aterm_tailscale_status_json() else { return }
-        let json = String(cString: jsonPtr)
-        aterm_core_free_string(jsonPtr)
-        NSLog("[aterm] tailscale %@: %@", prefix, json)
+    if !entries.isEmpty {
+      saveWorkspaces()
+      NSLog("[aterm] restored %d workspaces", entries.count)
+    }
+    return entries.count
+  }
+
+  private func cliAvailable(for command: WorkspaceLaunchCommand) -> Bool {
+    switch command {
+    case .zsh:
+      return true
+    case .claude:
+      return which("claude")
+    case .codex:
+      return which("codex")
+    case .gemini:
+      return which("gemini")
+    case .custom:
+      return true
+    }
+  }
+
+  private func createWorkspaceFromOnboarding(_ result: OnboardingResult) {
+    // Orchestrator uses its own CLI setting, not the default CLI
+    let orchCli = result.orchestratorCLI
+    let command: WorkspaceLaunchCommand
+    switch orchCli {
+    case "claude": command = .claude
+    case "codex": command = .codex
+    case "gemini": command = .gemini
+    default: command = .zsh
     }
 
-    private func beginWorkspaceCreation(_ request: WorkspaceCreationRequest) {
-        let panel = NSOpenPanel()
-        panel.title = "Choose Workspace Folders"
-        panel.message = "Select one or more folders to open as workspaces."
-        panel.prompt = "Choose"
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = false
-        panel.resolvesAliases = true
-
-        if let initialDirectory = request.initialDirectory,
-           !initialDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: initialDirectory, isDirectory: true)
-        }
-
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK else { return }
-            self?.workspaceSidebarModel.presentCreationDrafts(
-                for: panel.urls,
-                preferredCommand: request.preferredCommand,
-                preferredCustomCommand: request.preferredCustomCommand
-            )
-        }
+    let userSelectedOrchestrator = orchCli != "none"
+    let name = userSelectedOrchestrator ? "orchestrator" : "main"
+    let cwd: String
+    if userSelectedOrchestrator {
+      let orchestratorDir = result.orchestratorCWD.isEmpty
+        ? AtermSettings.shared.aigentryRoot + "/orchestrator"
+        : result.orchestratorCWD
+      try? FileManager.default.createDirectory(
+        atPath: orchestratorDir, withIntermediateDirectories: true)
+      cwd = orchestratorDir
+    } else {
+      cwd = NSHomeDirectory()
     }
 
-    private func createWorkspaces(from drafts: [WorkspaceDraft]) {
-        let normalizedDrafts = drafts.filter { !$0.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        guard !normalizedDrafts.isEmpty else { return }
-
-        for (index, draft) in normalizedDrafts.enumerated() {
-            createWorkspace(
-                name: draft.name.trimmingCharacters(in: .whitespacesAndNewlines),
-                command: draft.command,
-                customCommand: draft.customCommand,
-                cwd: draft.cwd,
-                shouldSelect: index == normalizedDrafts.count - 1
-            )
-        }
+    // Pre-create Claude Code trust directory so the trust prompt is skipped
+    if command == .claude {
+      ensureClaudeProjectTrust(cwd: cwd)
     }
 
-    private func createWorkspace(
-        name: String,
-        command: WorkspaceLaunchCommand,
-        customCommand: String,
-        cwd: String,
-        shouldSelect: Bool,
-        isSystem: Bool = false,
-        skipSave: Bool = false
-    ) {
-        let workspaceID = UUID()
-        let resolvedName = uniqueWorkspaceName(for: name, cwd: cwd, excluding: nil)
-        let bootstrapCommand = command.bootstrapCommand(customCommand: customCommand)
-        let baselineChildPIDs: Set<Int32> = []
-        let terminalView = TerminalView(frame: terminalContainerView.bounds)
-        terminalView.workspaceName = resolvedName
-        terminalView.spawnCommand = bootstrapCommand
-        terminalView.initialWorkingDirectory = cwd
-        terminalView.autoresizingMask = [.width, .height]
-        terminalView.isHidden = true
-        terminalView.onShellSpawned = { [weak self] result in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                self.refreshWorkspaceProcesses()
-            }
-        }
+    NSLog(
+      "[aterm] creating workspace from onboarding: name=%@, cli=%@, command=%@, cwd=%@", name,
+      orchCli, command.rawValue, cwd)
+    createWorkspace(
+      name: name,
+      command: command,
+      customCommand: "",
+      cwd: cwd,
+      shouldSelect: true,
+      isSystem: userSelectedOrchestrator
+    )
+  }
 
-        let workspace = ManagedWorkspace(
-            id: workspaceID,
-            name: resolvedName,
-            cwd: cwd,
-            launchCommand: command,
-            customCommand: customCommand,
-            terminalView: terminalView,
-            createdAt: Date(),
-            baselineChildPIDs: baselineChildPIDs,
-            isSystem: isSystem
-        )
-        terminalView.onActivity = { [weak workspace] in
-            workspace?.lastActivityAt = Date()
-        }
-        workspace.lastLaunchTime = Date()
-        managedWorkspaces[workspaceID] = workspace
-        // System workspaces always first
-        if isSystem {
-            workspaceOrder.insert(workspaceID, at: 0)
-        } else {
-            workspaceOrder.append(workspaceID)
-        }
-        terminalContainerView.addSubview(terminalView)
-
-        // Apply user settings (color scheme, font size, line height)
-        applySettingsToView(terminalView)
-
-        if shouldSelect {
-            selectWorkspace(workspaceID)
-        } else {
-            rebuildSidebarState()
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.refreshWorkspaceProcesses()
-        }
-
-        if !skipSave {
-            saveWorkspaces()
-        }
-
-        // Delegate MD generation to aigentry-devkit (skip silently if not installed)
-        devkitWorkspaceInit(cli: command.rawValue, cwd: cwd, workspaceID: workspaceID)
+  private func createDefaultWorkspace() {
+    // Read orchestrator config from aterm.json
+    let configPath = AtermSettings.dataRoot + "/config/aterm.json"
+    var parsedConfig: [String: Any]?
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+      let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    {
+      parsedConfig = config
     }
 
-    private func devkitWorkspaceInit(cli: String, cwd: String, workspaceID: UUID) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = ["aigentry-devkit", "workspace-init", "--cli", cli, "--cwd", cwd]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            do {
-                try task.run()
-                task.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                if output.contains("INJECT:/init") {
-                    NSLog("[aterm] devkit signaled INJECT:/init for workspace %@", workspaceID.uuidString)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                        guard let self,
-                              let workspace = self.managedWorkspaces[workspaceID],
-                              let core = workspace.terminalView.corePointer else { return }
-                        let text = "/init\n"
-                        text.withCString { ptr in
-                            aterm_core_write_pty(core, ptr, text.utf8.count)
-                        }
-                        NSLog("[aterm] auto-injected /init into workspace '%@'", workspace.name)
-                    }
-                }
-            } catch {
-                // aigentry-devkit not installed — standalone mode, skip silently
-            }
-        }
+    // Read orchestrator-specific config, fall back to ai.defaultCLI for migration
+    let orchestratorConfig = parsedConfig?["orchestrator"] as? [String: Any]
+    let ai = parsedConfig?["ai"] as? [String: Any]
+    let orchCli = orchestratorConfig?["cli"] as? String
+      ?? ai?["defaultCLI"] as? String
+      ?? "none"
+
+    // Map CLI to command
+    let requestedCommand: WorkspaceLaunchCommand
+    switch orchCli {
+    case "claude": requestedCommand = .claude
+    case "codex": requestedCommand = .codex
+    case "gemini": requestedCommand = .gemini
+    default: requestedCommand = .zsh
     }
 
-    private func bootstrapWorkspace(id: UUID, command: String) {
-        guard let workspace = managedWorkspaces[id] else { return }
-        workspace.lastLaunchTime = Date()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.sendBootstrapCommand(workspaceID: id, command: command)
-        }
+    // Verify CLI is installed, fallback to zsh if not
+    let command: WorkspaceLaunchCommand
+    if requestedCommand != .zsh && cliAvailable(for: requestedCommand) {
+      command = requestedCommand
+    } else if requestedCommand != .zsh {
+      NSLog("[aterm] %@ not found, starting with zsh", orchCli)
+      command = .zsh
+    } else {
+      command = .zsh
     }
 
-    /// Pre-trust workspace for Claude Code by creating the project directory.
-    private func ensureClaudeProjectTrust(cwd: String) {
-        let encoded = cwd.replacingOccurrences(of: "/", with: "-")
-        let claudeProjectDir = NSHomeDirectory() + "/.claude/projects/" + encoded
-        try? FileManager.default.createDirectory(atPath: claudeProjectDir, withIntermediateDirectories: true)
+    let orchestratorDir = orchestratorConfig?["cwd"] as? String
+      ?? (AtermSettings.shared.aigentryRoot + "/orchestrator")
+    try? FileManager.default.createDirectory(
+      atPath: orchestratorDir, withIntermediateDirectories: true)
+    let cwd = orchestratorDir
+
+    // Pre-create Claude Code trust directory for orchestrator CWD
+    if command == .claude {
+      ensureClaudeProjectTrust(cwd: cwd)
     }
 
-    private func sendBootstrapCommand(workspaceID: UUID, command: String) {
-        guard let workspace = managedWorkspaces[workspaceID],
-              let core = workspace.terminalView.corePointer else { return }
+    // Name is 'orchestrator' if user selected a CLI (even if binary not found)
+    let userSelectedOrchestrator = orchCli != "none"
+    let name = userSelectedOrchestrator ? "orchestrator" : "main"
 
-        // Pre-trust workspace for Claude Code
-        if command.contains("claude") {
-            ensureClaudeProjectTrust(cwd: workspace.cwd)
-        }
+    createWorkspace(
+      name: name,
+      command: command,
+      customCommand: "",
+      cwd: cwd,
+      shouldSelect: true,
+      isSystem: userSelectedOrchestrator
+    )
+  }
 
-        NSLog("[aterm] sending bootstrap to '%@' (len=%d, cliGaveUp=%d): %@",
-              workspace.name, command.count, workspace.cliGaveUp ? 1 : 0, command)
-        let text = command + "\n"
-        text.withCString { ptr in
-            aterm_core_write_pty(core, ptr, text.utf8.count)
-        }
-        workspace.lastLaunchTime = Date()
+  // MARK: - Onboarding & Preferences
 
-        // Watch for trust prompt after CLI starts
-        let isCli = command.contains("claude") || command.contains("codex") || command.contains("gemini")
-        if isCli {
-            watchForTrustPrompt(workspaceID: workspaceID)
+  private func detectClis() -> CliStatus {
+    guard let jsonPtr = aterm_core_detect_clis() else {
+      return CliStatus(claude: false, codex: false, gemini: false)
+    }
+    let json = String(cString: jsonPtr)
+    aterm_core_free_string(jsonPtr)
+    guard let data = json.data(using: .utf8),
+      let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Bool]
+    else {
+      return CliStatus(claude: false, codex: false, gemini: false)
+    }
+    return CliStatus(
+      claude: dict["claude"] ?? false,
+      codex: dict["codex"] ?? false,
+      gemini: dict["gemini"] ?? false
+    )
+  }
+
+  private func needsOnboarding() -> Bool {
+    let config = readConfig()
+    // Flag not set or false → needs onboarding
+    if config["onboarding_completed"] as? Bool != true { return true }
+    // Sessions file missing or empty → re-onboard so orchestrator gets created
+    if !hasPersistedSessions() { return true }
+    if Int(aterm_session_count(nil)) == 0 { return true }
+    return false
+  }
+
+  private func readConfig() -> [String: Any] {
+    let configPath = AtermSettings.dataRoot + "/config/aterm.json"
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+      let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      return [:]
+    }
+    return config
+  }
+
+  private func saveOnboardingResult(_ result: OnboardingResult) {
+    let configPath = AtermSettings.dataRoot + "/config/aterm.json"
+    var config = readConfig()
+    var ai = config["ai"] as? [String: Any] ?? [:]
+    ai["defaultCLI"] = result.defaultCLI
+    config["ai"] = ai
+    var shell = config["shell"] as? [String: Any] ?? [:]
+    shell["default"] = result.defaultShell
+    config["shell"] = shell
+    var tailscale = config["tailscale"] as? [String: Any] ?? [:]
+    tailscale["connect_on_launch"] = result.tailscaleEnabled
+    config["tailscale"] = tailscale
+    var orchestrator = config["orchestrator"] as? [String: Any] ?? [:]
+    orchestrator["cli"] = result.orchestratorCLI
+    let orchestratorDir = result.orchestratorCWD.isEmpty
+      ? AtermSettings.shared.aigentryRoot + "/orchestrator"
+      : result.orchestratorCWD
+    try? FileManager.default.createDirectory(
+      atPath: orchestratorDir, withIntermediateDirectories: true)
+    orchestrator["cwd"] = orchestratorDir
+    config["orchestrator"] = orchestrator
+    // Pre-create Claude Code trust directory for orchestrator CWD
+    if result.orchestratorCLI == "claude" {
+      ensureClaudeProjectTrust(cwd: orchestratorDir)
+    }
+    // Sync CWD to in-memory settings
+    AtermSettings.shared.orchestratorCWD = result.orchestratorCWD
+    config["onboarding_completed"] = true
+
+    let dir = (configPath as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    if let data = try? JSONSerialization.data(withJSONObject: config, options: .prettyPrinted) {
+      try? data.write(to: URL(fileURLWithPath: configPath))
+    }
+  }
+
+  private func showOnboarding() {
+    let cliStatus = detectClis()
+    var showSheet = true
+
+    let onboardingView = OnboardingView(
+      isPresented: Binding(
+        get: { showSheet },
+        set: { [weak self] newValue in
+          showSheet = newValue
+          if !newValue {
+            self?.window.endSheet(self?.window.attachedSheet ?? NSPanel())
+          }
         }
+      ),
+      cliStatus: cliStatus,
+      onComplete: { [weak self] result in
+        self?.saveOnboardingResult(result)
+        if self?.managedWorkspaces.isEmpty ?? true {
+          self?.createWorkspaceFromOnboarding(result)
+        }
+      }
+    )
+
+    let hostingView = NSHostingView(rootView: onboardingView)
+    let sheet = NSPanel(
+      contentRect: NSRect(x: 0, y: 0, width: 440, height: 860),
+      styleMask: [.titled, .closable],
+      backing: .buffered,
+      defer: false
+    )
+    sheet.contentView = hostingView
+    sheet.title = "Welcome to aterm"
+    window.beginSheet(sheet)
+  }
+
+  @objc private func showPreferences() {
+    let settings = AtermSettings.shared
+    settings.load()
+
+    let orchestratorWS = managedWorkspaces.values.first(where: {
+      $0.isSystem && ($0.name == settings.orchestratorName || $0.name == "orchestrator")
+    })
+    let isOrchestratorRunning = orchestratorWS != nil && orchestratorWS?.status != "dead"
+
+    let settingsView = SettingsView(
+      settings: settings,
+      onApply: { [weak self] in
+        self?.applySettings()
+      },
+      onApplyOrchestrator: { [weak self] in
+        self?.restartOrchestrator()
+      },
+      isOrchestratorRunning: isOrchestratorRunning
+    )
+
+    let hostingView = NSHostingView(rootView: settingsView)
+    let prefsWindow = NSPanel(
+      contentRect: NSRect(x: 0, y: 0, width: 480, height: 560),
+      styleMask: [.titled, .closable],
+      backing: .buffered,
+      defer: false
+    )
+    prefsWindow.contentView = hostingView
+    prefsWindow.title = AtermLocalization.text(ko: "설정", en: "Settings")
+    prefsWindow.center()
+    prefsWindow.makeKeyAndOrderFront(nil)
+  }
+
+  private func restartOrchestrator() {
+    let settings = AtermSettings.shared
+    let name = settings.orchestratorName.isEmpty ? "orchestrator" : settings.orchestratorName
+
+    // Close existing orchestrator workspace (allowSystem: true to remove system workspace)
+    if let existingID = managedWorkspaces.first(where: {
+      $0.value.isSystem
+        && ($0.value.name == name || $0.value.name == "orchestrator")
+    })?.key {
+      removeWorkspace(id: existingID, allowSystem: true)
     }
 
-    /// Poll terminal screen for trust prompt; auto-accept with Enter when detected.
-    private static let trustPatterns = ["trust", "Trust", "Do you trust"]
-
-    private func watchForTrustPrompt(workspaceID: UUID, attempts: Int = 0) {
-        guard attempts < 15 else {
-            NSLog("[aterm] trust prompt watch timed out for workspace (15 attempts)")
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self,
-                  let workspace = self.managedWorkspaces[workspaceID],
-                  let core = workspace.terminalView.corePointer else { return }
-
-            // Sync PTY so screen is up to date
-            aterm_core_sync_pty(core)
-
-            var detected = false
-            for pattern in Self.trustPatterns {
-                let found = pattern.withCString { ptr in
-                    aterm_core_screen_contains(core, ptr) != 0
-                }
-                if found {
-                    detected = true
-                    NSLog("[aterm] trust prompt detected (pattern: '%@', attempt: %d)", pattern, attempts)
-                    break
-                }
-            }
-
-            if detected {
-                // Send Enter to accept the default (Yes) trust option
-                "\r".withCString { ptr in
-                    aterm_core_write_pty(core, ptr, 1)
-                }
-                NSLog("[aterm] auto-accepted workspace trust prompt for %@", workspace.name)
-            } else {
-                self.watchForTrustPrompt(workspaceID: workspaceID, attempts: attempts + 1)
-            }
-        }
+    // Map CLI string to command
+    let command: WorkspaceLaunchCommand
+    switch settings.orchestratorCLI {
+    case "claude": command = .claude
+    case "codex": command = .codex
+    case "gemini": command = .gemini
+    case "custom": command = .custom
+    default: command = .claude
     }
 
-    private func restartSystemWorkspace(id: UUID) {
-        guard let workspace = managedWorkspaces[id],
-              workspace.isSystem,
-              workspace.status == "restarting",
-              !workspace.cliGaveUp else { return }
+    let orchestratorDir = settings.effectiveOrchestratorCWD
+    try? FileManager.default.createDirectory(atPath: orchestratorDir, withIntermediateDirectories: true)
+    let cwd = orchestratorDir
 
-        NSLog("[aterm] re-sending CLI bootstrap to '%@' (attempt %d)", workspace.name, workspace.restartCount)
+    // Pre-create Claude Code trust directory
+    if command == .claude {
+      ensureClaudeProjectTrust(cwd: cwd)
+    }
 
-        // Shell (zsh) is already running — just send the CLI command to it
-        if let bootstrapCmd = workspace.launchCommand.bootstrapCommand(customCommand: workspace.customCommand) {
-            bootstrapWorkspace(id: id, command: bootstrapCmd)
+    NSLog("[aterm] restarting orchestrator: name=%@, cli=%@, cwd=%@", name, command.rawValue, cwd)
+    createWorkspace(
+      name: name,
+      command: command,
+      customCommand: settings.orchestratorArgs,
+      cwd: cwd,
+      shouldSelect: true,
+      isSystem: true
+    )
+  }
+
+  /// Apply current settings to all terminal views immediately.
+  func applySettings() {
+    for ws in managedWorkspaces.values {
+      applySettingsToView(ws.terminalView)
+    }
+  }
+
+  /// Apply current settings to a single terminal view.
+  private func applySettingsToView(_ view: TerminalView) {
+    guard let core = view.corePointer else { return }
+    let settings = AtermSettings.shared
+    let schemeIndex = AtermSettings.schemeIndex(settings.colorScheme)
+    let fontSize = Float(settings.fontSize)
+    let lineHeightPx = Float(settings.fontSize * settings.lineHeight)
+
+    aterm_core_set_color_scheme(core, schemeIndex)
+    aterm_core_set_font_size(core, fontSize)
+    aterm_core_set_line_height(core, lineHeightPx)
+
+    // Font size / line height changes affect grid dimensions — trigger resize
+    let backingSize = view.convertToBacking(view.bounds).size
+    if backingSize.width > 0 && backingSize.height > 0 {
+      aterm_core_resize(core, UInt32(backingSize.width), UInt32(backingSize.height))
+    }
+    aterm_core_render(core)
+  }
+
+  private func setupPreferencesMenu() {
+    if let appMenu = NSApp.mainMenu?.item(at: 0)?.submenu {
+      let prefsItem = NSMenuItem(
+        title: "Preferences...",
+        action: #selector(showPreferences),
+        keyEquivalent: ","
+      )
+      prefsItem.target = self
+      // Insert after "About" (index 0) and separator (index 1)
+      let insertIndex = min(2, appMenu.items.count)
+      appMenu.insertItem(prefsItem, at: insertIndex)
+      appMenu.insertItem(NSMenuItem.separator(), at: insertIndex)
+    }
+  }
+
+  private func which(_ command: String) -> Bool {
+    // Use login shell to find binaries — macOS app environment has limited PATH
+    let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: shell)
+    process.arguments = ["-l", "-c", "command -v \(command) >/dev/null 2>&1"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      process.waitUntilExit()
+      return process.terminationStatus == 0
+    } catch {
+      return false
+    }
+  }
+
+  private func whichPath(_ command: String) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+    process.arguments = [command]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      process.waitUntilExit()
+      guard process.terminationStatus == 0 else { return nil }
+      let data = pipe.fileHandleForReading.readDataToEndOfFile()
+      let value = String(data: data, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      guard let value, !value.isEmpty else { return nil }
+      return value
+    } catch {
+      return nil
+    }
+  }
+
+  private func resolveTeleptyFromShell(_ shellPath: String) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: shellPath)
+    process.arguments = ["-lc", "command -v telepty 2>/dev/null || which telepty 2>/dev/null"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      process.waitUntilExit()
+      guard process.terminationStatus == 0 else { return nil }
+      let data = pipe.fileHandleForReading.readDataToEndOfFile()
+      let value = String(data: data, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      guard let value,
+        !value.isEmpty,
+        FileManager.default.isExecutableFile(atPath: value)
+      else { return nil }
+      return value
+    } catch {
+      return nil
+    }
+  }
+
+  private func collectNodeManagerTeleptyPaths(homeDirectory: String) -> [String] {
+    var paths: [String] = []
+    let fileManager = FileManager.default
+
+    let nvmRoot = "\(homeDirectory)/.nvm/versions/node"
+    if let entries = try? fileManager.contentsOfDirectory(atPath: nvmRoot) {
+      for entry in entries.sorted(by: >) {
+        paths.append("\(nvmRoot)/\(entry)/bin/telepty")
+      }
+    }
+
+    let fnmRoot = "\(homeDirectory)/.fnm/node-versions"
+    if let entries = try? fileManager.contentsOfDirectory(atPath: fnmRoot) {
+      for entry in entries.sorted(by: >) {
+        paths.append("\(fnmRoot)/\(entry)/installation/bin/telepty")
+      }
+    }
+
+    return paths
+  }
+
+  /// Returns (path, isJS) — if isJS, run via "node <path> daemon" instead of "<path> daemon"
+  private func findTeleptyBinary() -> (path: String, isJS: Bool)? {
+    let environment = ProcessInfo.processInfo.environment
+    let homeDirectory = environment["HOME"] ?? NSHomeDirectory()
+    let fm = FileManager.default
+
+    // 1. Shell-based resolution (picks up PATH from login shell)
+    let shellCandidates = [
+      environment["SHELL"],
+      "/bin/zsh",
+      "/bin/bash",
+    ].compactMap { $0 }
+
+    for shellPath in shellCandidates {
+      if let resolved = resolveTeleptyFromShell(shellPath) {
+        return (resolved, false)
+      }
+    }
+
+    // 2. which
+    if let resolved = whichPath("telepty"),
+      fm.isExecutableFile(atPath: resolved)
+    {
+      return (resolved, false)
+    }
+
+    // 3. Direct binary paths
+    let directPaths =
+      [
+        "\(homeDirectory)/.volta/bin/telepty",
+        "\(homeDirectory)/.local/bin/telepty",
+        "/opt/homebrew/bin/telepty",
+        "/usr/local/bin/telepty",
+      ] + collectNodeManagerTeleptyPaths(homeDirectory: homeDirectory)
+
+    if let found = directPaths.first(where: { fm.isExecutableFile(atPath: $0) }) {
+      return (found, false)
+    }
+
+    // 4. npm global node_modules cli.js paths (telepty is a dep of aterm, not top-level)
+    let npmCliPaths = collectNpmTeleptyCliPaths(homeDirectory: homeDirectory)
+    if let found = npmCliPaths.first(where: { fm.fileExists(atPath: $0) }) {
+      return (found, true)
+    }
+
+    return nil
+  }
+
+  private func collectNpmTeleptyCliPaths(homeDirectory: String) -> [String] {
+    let fm = FileManager.default
+    let teleptyPkg = "@dmsdc-ai/aigentry-telepty/cli.js"
+    let atermPkg = "@dmsdc-ai/aterm/node_modules/\(teleptyPkg)"
+    var paths: [String] = []
+
+    // Common npm global prefixes
+    let globalPrefixes = [
+      "/usr/local/lib/node_modules",
+      "/opt/homebrew/lib/node_modules",
+      "\(homeDirectory)/.npm-global/lib/node_modules",
+    ]
+    for prefix in globalPrefixes {
+      // Hoisted (top-level dep)
+      paths.append("\(prefix)/\(teleptyPkg)")
+      // Nested inside aterm
+      paths.append("\(prefix)/\(atermPkg)")
+    }
+
+    // nvm paths
+    let nvmRoot = "\(homeDirectory)/.nvm/versions/node"
+    if let entries = try? fm.contentsOfDirectory(atPath: nvmRoot) {
+      for entry in entries.sorted(by: >) {
+        let lib = "\(nvmRoot)/\(entry)/lib/node_modules"
+        paths.append("\(lib)/\(teleptyPkg)")
+        paths.append("\(lib)/\(atermPkg)")
+      }
+    }
+
+    // fnm paths
+    let fnmRoot = "\(homeDirectory)/.fnm/node-versions"
+    if let entries = try? fm.contentsOfDirectory(atPath: fnmRoot) {
+      for entry in entries.sorted(by: >) {
+        let lib = "\(fnmRoot)/\(entry)/installation/lib/node_modules"
+        paths.append("\(lib)/\(teleptyPkg)")
+        paths.append("\(lib)/\(atermPkg)")
+      }
+    }
+
+    // volta
+    paths.append(
+      "\(homeDirectory)/.volta/tools/image/packages/@dmsdc-ai/aigentry-telepty/lib/node_modules/\(teleptyPkg)"
+    )
+
+    return paths
+  }
+
+  private func ensureTeleptyDaemon() {
+    DispatchQueue.global(qos: .utility).async {
+      // Check if telepty daemon is already running
+      guard let url = URL(string: "http://127.0.0.1:3848/api/sessions") else { return }
+      var request = URLRequest(url: url)
+      request.timeoutInterval = 2.0
+
+      let semaphore = DispatchSemaphore(value: 0)
+      var isRunning = false
+
+      URLSession.shared.dataTask(with: request) { _, response, _ in
+        if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+          isRunning = true
         }
+        semaphore.signal()
+      }.resume()
+
+      semaphore.wait()
+
+      if isRunning {
+        NSLog("[aterm] telepty daemon already running")
+        return
+      }
+
+      guard let telepty = self.findTeleptyBinary() else {
+        NSLog("[aterm] telepty binary not found")
+        return
+      }
+
+      NSLog("[aterm] starting telepty daemon from %@ (js=%d)", telepty.path, telepty.isJS ? 1 : 0)
+      let process = Process()
+      if telepty.isJS {
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", telepty.path, "daemon"]
+      } else {
+        process.executableURL = URL(fileURLWithPath: telepty.path)
+        process.arguments = ["daemon"]
+      }
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      process.environment = ProcessInfo.processInfo.environment
+
+      do {
+        try process.run()
+        let daemonPID = process.processIdentifier
+        NSLog("[aterm] telepty daemon started (pid %d)", daemonPID)
+        DispatchQueue.main.async { [weak self] in
+          self?.excludedChildPIDs.insert(daemonPID)
+        }
+      } catch {
+        NSLog("[aterm] failed to start telepty daemon: %@", error.localizedDescription)
+      }
+    }
+  }
+
+  private func startTailscale() {
+    let env = ProcessInfo.processInfo.environment
+
+    // Respect disabled setting: env var, UserDefaults, or aterm.json
+    if let envFlag = env["ATERM_TAILSCALE_ENABLED"],
+      envFlag == "0" || envFlag.lowercased() == "false" || envFlag.lowercased() == "no"
+    {
+      NSLog("[aterm] tailscale disabled via ATERM_TAILSCALE_ENABLED")
+      return
+    }
+    if !UserDefaults.standard.bool(forKey: "AtermTailscaleEnabled")
+      && UserDefaults.standard.object(forKey: "AtermTailscaleEnabled") != nil
+    {
+      NSLog("[aterm] tailscale disabled in settings")
+      return
+    }
+    // Check aterm.json config (set by onboarding)
+    let config = readConfig()
+    let tailscale = config["tailscale"] as? [String: Any]
+    let connectOnLaunch = tailscale?["connect_on_launch"] as? Bool ?? false
+    if !connectOnLaunch {
+      NSLog("[aterm] tailscale disabled in aterm.json (connect_on_launch=false)")
+      return
+    }
+
+    let result = withOptionalCString(env["ATERM_TAILSCALE_HOSTNAME"]) { hostnamePtr in
+      withOptionalCString(env["ATERM_TAILSCALE_CONTROL_URL"]) { controlURLPtr in
+        withOptionalCString(env["ATERM_TAILSCALE_AUTHKEY"]) { authKeyPtr in
+          aterm_tailscale_connect(hostnamePtr, controlURLPtr, authKeyPtr)
+        }
+      }
+    }
+
+    if result != 0 {
+      NSLog("[aterm] tailscale startup failed (no auth key or network issue) — skipping")
+      return
+    }
+
+    logTailscaleStatus(prefix: "startup")
+  }
+
+  private func logTailscaleStatus(prefix: String) {
+    guard let jsonPtr = aterm_tailscale_status_json() else { return }
+    let json = String(cString: jsonPtr)
+    aterm_core_free_string(jsonPtr)
+    NSLog("[aterm] tailscale %@: %@", prefix, json)
+  }
+
+  private func beginWorkspaceCreation(_ request: WorkspaceCreationRequest) {
+    let panel = NSOpenPanel()
+    panel.title = "Choose Workspace Folders"
+    panel.message = "Select one or more folders to open as workspaces."
+    panel.prompt = "Choose"
+    panel.allowsMultipleSelection = true
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = false
+    panel.resolvesAliases = true
+
+    if let initialDirectory = request.initialDirectory,
+      !initialDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    {
+      panel.directoryURL = URL(fileURLWithPath: initialDirectory, isDirectory: true)
+    }
+
+    panel.beginSheetModal(for: window) { [weak self] response in
+      guard response == .OK else { return }
+      self?.workspaceSidebarModel.presentCreationDrafts(
+        for: panel.urls,
+        preferredCommand: request.preferredCommand,
+        preferredCustomCommand: request.preferredCustomCommand
+      )
+    }
+  }
+
+  private func createWorkspaces(from drafts: [WorkspaceDraft]) {
+    let normalizedDrafts = drafts.filter {
+      !$0.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    guard !normalizedDrafts.isEmpty else { return }
+
+    for (index, draft) in normalizedDrafts.enumerated() {
+      createWorkspace(
+        name: draft.name.trimmingCharacters(in: .whitespacesAndNewlines),
+        command: draft.command,
+        customCommand: draft.customCommand,
+        cliArgs: draft.cliArgs,
+        cwd: draft.cwd,
+        shouldSelect: index == normalizedDrafts.count - 1
+      )
+    }
+  }
+
+  private func createWorkspace(
+    name: String,
+    command: WorkspaceLaunchCommand,
+    customCommand: String,
+    cliArgs: String = "",
+    cwd: String,
+    shouldSelect: Bool,
+    isSystem: Bool = false,
+    skipSave: Bool = false
+  ) {
+    // Pre-create Claude Code trust directory so the trust prompt is skipped
+    if command == .claude {
+      ensureClaudeProjectTrust(cwd: cwd)
+    }
+
+    let workspaceID = UUID()
+    let resolvedName = uniqueWorkspaceName(for: name, cwd: cwd, excluding: nil)
+    let bootstrapCommand = command.bootstrapCommand(customCommand: customCommand, cliArgs: cliArgs)
+    let baselineChildPIDs: Set<Int32> = []
+    let terminalView = TerminalView(frame: terminalContainerView.bounds)
+    terminalView.workspaceName = resolvedName
+    terminalView.spawnCommand = bootstrapCommand
+    terminalView.initialWorkingDirectory = cwd
+    terminalView.autoresizingMask = [.width, .height]
+    terminalView.isHidden = true
+    terminalView.onShellSpawned = { [weak self] result in
+      guard let self else { return }
+      DispatchQueue.main.async {
+        self.refreshWorkspaceProcesses()
+      }
+    }
+
+    let workspace = ManagedWorkspace(
+      id: workspaceID,
+      name: resolvedName,
+      cwd: cwd,
+      launchCommand: command,
+      customCommand: customCommand,
+      cliArgs: cliArgs,
+      terminalView: terminalView,
+      createdAt: Date(),
+      baselineChildPIDs: baselineChildPIDs,
+      isSystem: isSystem
+    )
+    terminalView.onActivity = { [weak self, workspaceID] in
+      guard let self else { return }
+      DispatchQueue.main.async {
+        guard let ws = self.managedWorkspaces[workspaceID] else { return }
+        ws.lastActivityAt = Date()
+        if ws.status == "idle" {
+          ws.status = "working"
+          self.rebuildSidebarState()
+        }
+        self.scheduleIdleCheck(for: workspaceID)
+      }
+    }
+    workspace.lastLaunchTime = Date()
+    managedWorkspaces[workspaceID] = workspace
+    // System workspaces always first
+    if isSystem {
+      workspaceOrder.insert(workspaceID, at: 0)
+    } else {
+      workspaceOrder.append(workspaceID)
+    }
+    terminalContainerView.addSubview(terminalView)
+
+    // Apply user settings (color scheme, font size, line height)
+    applySettingsToView(terminalView)
+
+    if shouldSelect {
+      selectWorkspace(workspaceID)
+    } else {
+      rebuildSidebarState()
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+      self?.refreshWorkspaceProcesses()
+    }
+
+    if !skipSave {
+      saveWorkspaces()
+    }
+
+    // Delegate MD generation to aigentry-devkit (skip silently if not installed)
+    devkitWorkspaceInit(cli: command.rawValue, cwd: cwd, workspaceID: workspaceID)
+  }
+
+  private func devkitWorkspaceInit(cli: String, cwd: String, workspaceID: UUID) {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    task.arguments = ["aigentry-devkit", "workspace-init", "--cli", cli, "--cwd", cwd]
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    DispatchQueue.global(qos: .utility).async {
+      do {
+        try task.run()
+        task.waitUntilExit()
+      } catch {
+        // aigentry-devkit not installed — standalone mode, skip silently
+      }
+    }
+  }
+
+  private func bootstrapWorkspace(id: UUID, command: String) {
+    guard let workspace = managedWorkspaces[id] else { return }
+    workspace.lastLaunchTime = Date()
+
+    // Cancel any existing pending bootstrap for this workspace
+    pendingBootstraps[id]?.fallbackTimer.cancel()
+
+    // Create fallback timer (10s) in case ShellReady never fires
+    let fallbackTimer = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      NSLog("[aterm] shell_ready fallback timeout (10s) for workspace %@", workspace.name)
+      self.pendingBootstraps.removeValue(forKey: id)
+      self.sendBootstrapCommand(workspaceID: id, command: command)
+    }
+
+    pendingBootstraps[id] = (command: command, fallbackTimer: fallbackTimer)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: fallbackTimer)
+  }
+
+  /// Pre-trust workspace for Claude Code by creating the project directory.
+  private func ensureClaudeProjectTrust(cwd: String) {
+    let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+    let claudeProjectDir = NSHomeDirectory() + "/.claude/projects/" + encoded
+    try? FileManager.default.createDirectory(
+      atPath: claudeProjectDir, withIntermediateDirectories: true)
+  }
+
+  private func sendBootstrapCommand(workspaceID: UUID, command: String) {
+    guard let workspace = managedWorkspaces[workspaceID],
+      let core = workspace.terminalView.corePointer
+    else { return }
+
+    // Pre-trust workspace for Claude Code
+    if command.contains("claude") {
+      ensureClaudeProjectTrust(cwd: workspace.cwd)
+    }
+
+    NSLog(
+      "[aterm] sending bootstrap to '%@' (len=%d, cliGaveUp=%d): %@",
+      workspace.name, command.count, workspace.cliGaveUp ? 1 : 0, command)
+    let text = command + "\n"
+    text.withCString { ptr in
+      aterm_core_write_pty(core, ptr, text.utf8.count)
+    }
+    workspace.lastLaunchTime = Date()
+  }
+
+  private func restartSystemWorkspace(id: UUID) {
+    guard let workspace = managedWorkspaces[id],
+      workspace.isSystem,
+      workspace.status == "restarting",
+      !workspace.cliGaveUp
+    else { return }
+
+    NSLog(
+      "[aterm] re-sending CLI bootstrap to '%@' (attempt %d)", workspace.name,
+      workspace.restartCount)
+
+    // Shell (zsh) is already running — just send the CLI command to it
+    if let bootstrapCmd = workspace.launchCommand.bootstrapCommand(
+      customCommand: workspace.customCommand, cliArgs: workspace.cliArgs)
+    {
+      bootstrapWorkspace(id: id, command: bootstrapCmd)
+    }
+    workspace.status = "starting"
+  }
+
+  private func workspaceID(named name: String) -> UUID? {
+    managedWorkspaces.first(where: { $0.value.name == name })?.key
+  }
+
+  private func selectWorkspace(_ id: UUID) {
+    guard let workspace = managedWorkspaces[id] else { return }
+
+    for candidateID in workspaceOrder {
+      managedWorkspaces[candidateID]?.terminalView.isHidden = candidateID != id
+    }
+
+    terminalView = workspace.terminalView
+    workspaceSidebarModel.selectedWorkspaceName = workspace.name
+    busClient.setCore(workspace.terminalView.corePointer)
+    window.makeFirstResponder(workspace.terminalView)
+    rebuildSidebarState()
+
+    // Retry shell spawn for views that failed when hidden during initial setup.
+    // This ensures every workspace registers with telepty, not just the first one.
+    if !workspace.terminalView.didSpawnShell {
+      DispatchQueue.main.async {
+        workspace.terminalView.retrySpawnIfNeeded()
+      }
+    }
+  }
+
+  private func selectWorkspace(named name: String) {
+    guard let id = workspaceID(named: name) else { return }
+    selectWorkspace(id)
+  }
+
+  private func renameWorkspace(id: UUID, to nextName: String) {
+    guard let workspace = managedWorkspaces[id] else { return }
+    let trimmed = nextName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let wasSelected = workspaceSidebarModel.selectedWorkspaceName == workspace.name
+    workspace.name = uniqueWorkspaceName(
+      for: trimmed,
+      cwd: workspace.cwd,
+      excluding: id
+    )
+    workspace.terminalView.workspaceName = workspace.name
+    if wasSelected {
+      workspaceSidebarModel.selectedWorkspaceName = workspace.name
+    }
+    rebuildSidebarState()
+    saveWorkspaces()
+  }
+
+  private func renameWorkspace(named currentName: String, toSuggested nextName: String) {
+    guard let id = workspaceID(named: currentName) else { return }
+    renameWorkspace(id: id, to: nextName)
+  }
+
+  private func renameWorkspace(named oldName: String, toExact nextName: String) {
+    guard let id = workspaceID(named: oldName),
+      let workspace = managedWorkspaces[id]
+    else { return }
+
+    let trimmed = nextName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+
+    if let existing = workspaceID(named: trimmed), existing != id {
+      return
+    }
+
+    let wasSelected = workspaceSidebarModel.selectedWorkspaceName == workspace.name
+    workspace.name = trimmed
+    workspace.terminalView.workspaceName = trimmed
+    if wasSelected {
+      workspaceSidebarModel.selectedWorkspaceName = trimmed
+    }
+    rebuildSidebarState()
+    saveWorkspaces()
+  }
+
+  private func removeWorkspace(id: UUID, allowSystem: Bool) {
+    guard let workspace = managedWorkspaces[id] else { return }
+    if workspace.isSystem && !allowSystem { return }
+    workspace.idleTimer?.invalidate()
+    workspace.idleTimer = nil
+    managedWorkspaces.removeValue(forKey: id)
+
+    workspace.terminalView.removeFromSuperview()
+    workspaceOrder.removeAll { $0 == id }
+
+    if workspaceSidebarModel.selectedWorkspaceName == workspace.name {
+      let nextSelection = workspaceOrder.first
+      if let nextSelection {
+        selectWorkspace(nextSelection)
+      } else {
+        terminalView = nil
+        workspaceSidebarModel.selectedWorkspaceName = nil
+        rebuildSidebarState()
+      }
+    } else {
+      rebuildSidebarState()
+    }
+
+    saveWorkspaces()
+  }
+
+  private func closeWorkspace(id: UUID) {
+    removeWorkspace(id: id, allowSystem: false)
+  }
+
+  private func closeWorkspace(named name: String) {
+    guard let id = workspaceID(named: name) else { return }
+    closeWorkspace(id: id)
+  }
+
+  private func changeWorkspaceCLI(named name: String, to newCli: String) {
+    guard let id = workspaceID(named: name),
+      let workspace = managedWorkspaces[id]
+    else { return }
+    let cwd = workspace.cwd
+    let wasSelected = workspaceSidebarModel.selectedWorkspaceName == workspace.name
+    let isSystem = workspace.isSystem
+    let command: WorkspaceLaunchCommand
+    switch newCli {
+    case "claude": command = .claude
+    case "codex": command = .codex
+    case "gemini": command = .gemini
+    case "zsh": command = .zsh
+    default: command = .custom
+    }
+    removeWorkspace(id: id, allowSystem: true)
+    createWorkspace(
+      name: name,
+      command: command,
+      customCommand: command == .custom ? newCli : "",
+      cwd: cwd,
+      shouldSelect: wasSelected,
+      isSystem: isSystem
+    )
+  }
+
+  private func removeWorkspace(named name: String, allowSystem: Bool) {
+    guard let id = workspaceID(named: name) else { return }
+    removeWorkspace(id: id, allowSystem: allowSystem)
+  }
+
+  private func attachExternalSession(_ sessionID: String) {
+    // Check if already attached — find existing workspace running telepty attach for this session
+    for id in workspaceOrder {
+      if let ws = managedWorkspaces[id],
+        ws.launchCommand == .custom,
+        ws.customCommand == "telepty attach \(sessionID)"
+      {
+        selectWorkspace(id)
+        return
+      }
+    }
+
+    // Find the session info from busClient for cwd
+    let session = busClient.sessions.first { $0.id == sessionID }
+    let cwd = session?.cwd ?? NSHomeDirectory()
+
+    createWorkspace(
+      name: sessionID,
+      command: .custom,
+      customCommand: "telepty attach \(sessionID)",
+      cwd: cwd,
+      shouldSelect: true
+    )
+  }
+
+  private func sendKey(toWorkspaceNamed workspaceName: String, key: String) {
+    guard let id = workspaceID(named: workspaceName),
+      let workspace = managedWorkspaces[id],
+      let core = workspace.terminalView.corePointer,
+      let payload = keyPayload(for: key)
+    else { return }
+
+    payload.withCString { ptr in
+      aterm_core_write_pty(core, ptr, payload.utf8.count)
+    }
+    workspace.lastActivityAt = Date()
+  }
+
+  private func keyPayload(for key: String) -> String? {
+    switch key.lowercased() {
+    case "enter", "return":
+      return "\r"
+    case "ctrl+c", "ctrl-c":
+      return "\u{03}"
+    case "ctrl+d", "ctrl-d":
+      return "\u{04}"
+    case "ctrl+l", "ctrl-l":
+      return "\u{0c}"
+    case "ctrl+z", "ctrl-z":
+      return "\u{1a}"
+    case "tab":
+      return "\t"
+    case "esc", "escape":
+      return "\u{1b}"
+    default:
+      return nil
+    }
+  }
+
+  private func reloadSettingsFromIPC() {
+    let oldSettings = AtermSettings.shared
+    let prevOrchestratorCLI = oldSettings.orchestratorCLI
+
+    AtermSettings.shared.load()
+    applySettings()
+    rebuildSidebarState()
+
+    // Detect orchestrator config changes and trigger re-creation
+    let newSettings = AtermSettings.shared
+    if newSettings.orchestratorCLI != prevOrchestratorCLI
+    {
+      NSLog("[aterm] orchestrator config changed via IPC, restarting orchestrator")
+      restartOrchestrator()
+    }
+  }
+
+  private func rebuildSidebarState() {
+    workspaceSidebarModel.refreshWorkspaces()
+  }
+
+  private func cliIcon(for command: WorkspaceLaunchCommand, useAscii: Bool) -> String {
+    if useAscii {
+      switch command {
+      case .claude: return "[C]"
+      case .codex: return "[X]"
+      case .gemini: return "[G]"
+      case .zsh, .custom: return "[S]"
+      }
+    } else {
+      return command.cliIcon
+    }
+  }
+
+  private func statusIcon(for status: String, useAscii: Bool) -> String {
+    if useAscii {
+      switch status {
+      case "working": return "[*]"
+      case "idle": return "[-]"
+      case "dead": return "[!]"
+      case "starting", "restarting": return "[>]"
+      default: return "[?]"
+      }
+    } else {
+      switch status {
+      case "working": return "🔨"
+      case "idle": return "💤"
+      case "dead": return "🔴"
+      case "starting", "restarting": return "🔄"
+      default: return ""
+      }
+    }
+  }
+
+  /// Schedule a 30s idle check for a workspace. Replaces 1Hz polling.
+  private func scheduleIdleCheck(for id: UUID) {
+    guard let ws = managedWorkspaces[id] else { return }
+    ws.idleTimer?.invalidate()
+    ws.idleTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: false) { [weak self] _ in
+      guard let self, let ws = self.managedWorkspaces[id] else { return }
+      let idleTime = Date().timeIntervalSince(ws.lastActivityAt)
+      if idleTime >= 30 && ws.status == "working" {
+        ws.status = "idle"
+        self.rebuildSidebarState()
+      } else if ws.status == "working" {
+        // Still active — reschedule for remaining time
+        self.scheduleIdleCheck(for: id)
+      }
+    }
+  }
+
+  private func cleanupStaleWorkspaces() {
+    let now = Date()
+    let staleThreshold: TimeInterval = 15
+    var staleIDs: [UUID] = []
+
+    for (id, workspace) in managedWorkspaces {
+      if workspace.status == "dead" {
+        if now.timeIntervalSince(workspace.lastActivityAt) > staleThreshold {
+          staleIDs.append(id)
+        }
+      }
+    }
+
+    for id in staleIDs {
+      if let ws = managedWorkspaces[id] {
+        print("[aterm] removing stale dead workspace: \(ws.name)")
+      }
+      removeWorkspace(id: id, allowSystem: true)
+    }
+  }
+
+  private func refreshWorkspaceProcesses() {
+    let now = Date()
+    for id in workspaceOrder {
+      guard let workspace = managedWorkspaces[id] else { continue }
+      let defaultProcessName =
+        workspace.cliGaveUp
+        ? "shell (CLI unavailable)"
+        : workspace.launchCommand.displayTitle(customCommand: workspace.customCommand)
+
+      guard workspace.terminalView.didSpawnShell else {
         workspace.status = "starting"
+        workspace.foregroundProcessName = defaultProcessName
+        continue
+      }
+
+      if workspace.status == "dead" || workspace.status == "closing" {
+        workspace.foregroundProcessName = defaultProcessName
+        continue
+      }
+
+      // Determine if working or idle based on last activity (30s threshold)
+      let idleTime = now.timeIntervalSince(workspace.lastActivityAt)
+      if idleTime < 30 {
+        workspace.status = "working"
+        scheduleIdleCheck(for: id)
+      } else {
+        workspace.status = "idle"
+      }
+
+      workspace.foregroundProcessName = defaultProcessName
     }
 
-    private func workspaceID(named name: String) -> UUID? {
-        managedWorkspaces.first(where: { $0.value.name == name })?.key
+    rebuildSidebarState()
+  }
+
+  private func uniqueWorkspaceName(
+    for preferredName: String,
+    cwd: String,
+    excluding excludedID: UUID? = nil
+  ) -> String {
+    let trimmed = preferredName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let base = trimmed.isEmpty ? defaultWorkspaceName(for: cwd) : trimmed
+    let existingNames = Set(
+      managedWorkspaces
+        .filter { $0.key != excludedID }
+        .map { $0.value.name.lowercased() }
+    )
+
+    if !existingNames.contains(base.lowercased()) {
+      return base
     }
 
-    private func selectWorkspace(_ id: UUID) {
-        guard let workspace = managedWorkspaces[id] else { return }
+    var index = 2
+    while existingNames.contains("\(base) \(index)".lowercased()) {
+      index += 1
+    }
+    return "\(base) \(index)"
+  }
 
-        for candidateID in workspaceOrder {
-            managedWorkspaces[candidateID]?.terminalView.isHidden = candidateID != id
+  private func defaultWorkspaceName(for cwd: String) -> String {
+    let path = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    if path.isEmpty {
+      return "workspace"
+    }
+
+    let folderName = URL(fileURLWithPath: cwd).lastPathComponent
+    return folderName.isEmpty ? "workspace" : folderName
+  }
+
+  private func directChildProcessIDs(of parentPID: Int32) -> Set<Int32> {
+    let output = runPS(arguments: ["-axo", "pid=,ppid="])
+    let pairs =
+      output
+      .split(separator: "\n")
+      .compactMap { line -> (Int32, Int32)? in
+        let parts =
+          line
+          .split(whereSeparator: \.isWhitespace)
+          .map(String.init)
+        guard parts.count >= 2,
+          let pid = Int32(parts[0]),
+          let ppid = Int32(parts[1])
+        else {
+          return nil
         }
+        return (pid, ppid)
+      }
 
-        terminalView = workspace.terminalView
-        workspaceSidebarModel.selectedWorkspaceID = id
-        busClient.setCore(workspace.terminalView.corePointer)
-        window.makeFirstResponder(workspace.terminalView)
-        rebuildSidebarState()
+    return Set(pairs.filter { $0.1 == parentPID }.map(\.0))
+  }
 
-        // Retry shell spawn for views that failed when hidden during initial setup.
-        // This ensures every workspace registers with telepty, not just the first one.
-        if !workspace.terminalView.didSpawnShell {
-            DispatchQueue.main.async {
-                workspace.terminalView.retrySpawnIfNeeded()
-            }
-        }
+  private func processExists(_ pid: Int32) -> Bool {
+    if kill(pid, 0) == 0 {
+      return true
+    }
+    return errno != ESRCH
+  }
+
+  private func processName(for pid: Int32) -> String? {
+    let output = runPS(arguments: ["-o", "comm=", "-p", String(pid)])
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !output.isEmpty else { return nil }
+    return displayProcessName(output)
+  }
+
+  private func foregroundProcessName(forRootPID rootPID: Int32) -> String? {
+    let tty = runPS(arguments: ["-o", "tty=", "-p", String(rootPID)])
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !tty.isEmpty, tty != "??" else {
+      return processName(for: rootPID)
     }
 
-    private func renameWorkspace(id: UUID, to nextName: String) {
-        guard let workspace = managedWorkspaces[id] else { return }
-        let trimmed = nextName.trimmingCharacters(in: .whitespacesAndNewlines)
-        workspace.name = uniqueWorkspaceName(
-            for: trimmed,
-            cwd: workspace.cwd,
-            excluding: id
+    let processes = ttyProcesses(for: tty)
+    guard !processes.isEmpty else {
+      return processName(for: rootPID)
+    }
+
+    let parentByPID = Dictionary(uniqueKeysWithValues: processes.map { ($0.pid, $0.ppid) })
+    let foregroundCandidates = processes.filter { $0.stat.contains("+") }
+    let relevantCandidates = foregroundCandidates.filter {
+      $0.pid == rootPID || isDescendant($0.pid, of: rootPID, parentByPID: parentByPID)
+    }
+
+    let chosen =
+      (relevantCandidates.isEmpty ? processes.filter { $0.pid == rootPID } : relevantCandidates)
+      .sorted(by: { left, right in
+        processPriority(for: left, rootPID: rootPID) > processPriority(for: right, rootPID: rootPID)
+      })
+      .first
+
+    return chosen.map { displayProcessName($0.command) }
+  }
+
+  private func ttyProcesses(for tty: String) -> [TTYProcessSnapshot] {
+    let output = runPS(arguments: ["-t", tty, "-o", "pid=,ppid=,stat=,comm="])
+    return
+      output
+      .split(separator: "\n")
+      .compactMap { line in
+        let parts =
+          line
+          .split(maxSplits: 3, omittingEmptySubsequences: true, whereSeparator: \.isWhitespace)
+          .map(String.init)
+        guard parts.count == 4,
+          let pid = Int32(parts[0]),
+          let ppid = Int32(parts[1])
+        else {
+          return nil
+        }
+        return TTYProcessSnapshot(
+          pid: pid,
+          ppid: ppid,
+          stat: parts[2],
+          command: parts[3]
         )
-        workspace.terminalView.workspaceName = workspace.name
-        rebuildSidebarState()
-        saveWorkspaces()
+      }
+  }
+
+  private func isDescendant(_ pid: Int32, of ancestorPID: Int32, parentByPID: [Int32: Int32])
+    -> Bool
+  {
+    var current = pid
+    while let parent = parentByPID[current] {
+      if parent == ancestorPID {
+        return true
+      }
+      if parent == current {
+        break
+      }
+      current = parent
     }
+    return false
+  }
 
-    private func renameWorkspace(named oldName: String, toExact nextName: String) {
-        guard let id = workspaceID(named: oldName),
-              let workspace = managedWorkspaces[id] else { return }
+  private func processPriority(for process: TTYProcessSnapshot, rootPID: Int32) -> (Int, Int, Int32)
+  {
+    let name = displayProcessName(process.command)
+    return (
+      knownShells.contains(name) ? 0 : 1,
+      process.pid == rootPID ? 0 : 1,
+      process.pid
+    )
+  }
 
-        let trimmed = nextName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+  private func displayProcessName(_ command: String) -> String {
+    URL(fileURLWithPath: command).lastPathComponent
+  }
 
-        if let existing = workspaceID(named: trimmed), existing != id {
-            return
-        }
+  private func runPS(arguments: [String]) -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/ps")
+    process.arguments = arguments
 
-        workspace.name = trimmed
-        workspace.terminalView.workspaceName = trimmed
-        rebuildSidebarState()
-        saveWorkspaces()
+    let stdout = Pipe()
+    process.standardOutput = stdout
+    process.standardError = FileHandle.nullDevice
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+      let data = stdout.fileHandleForReading.readDataToEndOfFile()
+      return String(decoding: data, as: UTF8.self)
+    } catch {
+      return ""
     }
-
-    private func closeWorkspace(id: UUID) {
-        guard let workspace = managedWorkspaces[id] else { return }
-        if workspace.isSystem { return } // System workspaces cannot be closed
-        managedWorkspaces.removeValue(forKey: id)
-
-        workspace.terminalView.removeFromSuperview()
-        workspaceOrder.removeAll { $0 == id }
-
-        if workspaceSidebarModel.selectedWorkspaceID == id {
-            let nextSelection = workspaceOrder.first
-            workspaceSidebarModel.selectedWorkspaceID = nextSelection
-            if let nextSelection {
-                selectWorkspace(nextSelection)
-            } else {
-                terminalView = nil
-                rebuildSidebarState()
-            }
-        } else {
-            rebuildSidebarState()
-        }
-
-        saveWorkspaces()
-    }
-
-    private func attachExternalSession(_ sessionID: String) {
-        // Check if already attached — find existing workspace running telepty attach for this session
-        for id in workspaceOrder {
-            if let ws = managedWorkspaces[id],
-               ws.launchCommand == .custom,
-               ws.customCommand == "telepty attach \(sessionID)" {
-                selectWorkspace(id)
-                return
-            }
-        }
-
-        // Find the session info from busClient for cwd
-        let session = busClient.sessions.first { $0.id == sessionID }
-        let cwd = session?.cwd ?? NSHomeDirectory()
-
-        createWorkspace(
-            name: sessionID,
-            command: .custom,
-            customCommand: "telepty attach \(sessionID)",
-            cwd: cwd,
-            shouldSelect: true
-        )
-    }
-
-    private func sendKey(toWorkspaceNamed workspaceName: String, key: String) {
-        guard let id = workspaceID(named: workspaceName),
-              let workspace = managedWorkspaces[id],
-              let core = workspace.terminalView.corePointer,
-              let payload = keyPayload(for: key) else { return }
-
-        payload.withCString { ptr in
-            aterm_core_write_pty(core, ptr, payload.utf8.count)
-        }
-        workspace.lastActivityAt = Date()
-    }
-
-    private func keyPayload(for key: String) -> String? {
-        switch key.lowercased() {
-        case "enter", "return":
-            return "\r"
-        case "ctrl+c", "ctrl-c":
-            return "\u{03}"
-        case "ctrl+d", "ctrl-d":
-            return "\u{04}"
-        case "ctrl+l", "ctrl-l":
-            return "\u{0c}"
-        case "ctrl+z", "ctrl-z":
-            return "\u{1a}"
-        case "tab":
-            return "\t"
-        case "esc", "escape":
-            return "\u{1b}"
-        default:
-            return nil
-        }
-    }
-
-    private func reloadSettingsFromIPC() {
-        AtermSettings.shared.load()
-        applySettings()
-        rebuildSidebarState()
-    }
-
-    private func rebuildSidebarState() {
-        let settings = AtermSettings.shared
-        workspaceSidebarModel.workspaces = workspaceOrder.compactMap { id in
-            guard let workspace = managedWorkspaces[id] else { return nil }
-            return SidebarWorkspace(
-                id: id,
-                name: workspace.name,
-                cwd: workspace.cwd,
-                launchCommand: workspace.launchCommand,
-                customCommand: workspace.customCommand,
-                foregroundProcessName: workspace.foregroundProcessName,
-                status: workspace.status,
-                cliIcon: cliIcon(for: workspace.launchCommand, useAscii: settings.useAsciiIcons),
-                statusEmoji: statusIcon(for: workspace.status, useAscii: settings.useAsciiIcons),
-                createdAt: workspace.createdAt,
-                lastActivityAt: workspace.lastActivityAt,
-                isSystem: workspace.isSystem
-            )
-        }
-    }
-
-    private func cliIcon(for command: WorkspaceLaunchCommand, useAscii: Bool) -> String {
-        if useAscii {
-            switch command {
-            case .claude: return "[C]"
-            case .codex: return "[X]"
-            case .gemini: return "[G]"
-            case .zsh, .custom: return "[S]"
-            }
-        } else {
-            return command.cliIcon
-        }
-    }
-
-    private func statusIcon(for status: String, useAscii: Bool) -> String {
-        if useAscii {
-            switch status {
-            case "working": return "[*]"
-            case "idle": return "[-]"
-            case "dead": return "[!]"
-            case "starting", "restarting": return "[>]"
-            default: return "[?]"
-            }
-        } else {
-            switch status {
-            case "working": return "🔨"
-            case "idle": return "💤"
-            case "dead": return "🔴"
-            case "starting", "restarting": return "🔄"
-            default: return ""
-            }
-        }
-    }
-
-    private func startProcessPolling() {
-        processPollTimer?.invalidate()
-        processPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.refreshWorkspaceProcesses()
-        }
-        processPollTimer?.tolerance = 0.2
-        refreshWorkspaceProcesses()
-    }
-
-    private func refreshWorkspaceProcesses() {
-        let now = Date()
-        for id in workspaceOrder {
-            guard let workspace = managedWorkspaces[id] else { continue }
-            let defaultProcessName = workspace.cliGaveUp
-                ? "shell (CLI unavailable)"
-                : workspace.launchCommand.displayTitle(customCommand: workspace.customCommand)
-
-            guard workspace.terminalView.didSpawnShell else {
-                workspace.status = "starting"
-                workspace.foregroundProcessName = defaultProcessName
-                continue
-            }
-
-            guard workspace.terminalView.isPtyAlive else {
-                workspace.status = "dead"
-                workspace.foregroundProcessName = defaultProcessName
-                continue
-            }
-
-            // Determine if working or idle based on last activity (30s threshold)
-            let idleTime = now.timeIntervalSince(workspace.lastActivityAt)
-            if idleTime < 30 {
-                workspace.status = "working"
-            } else {
-                workspace.status = "idle"
-            }
-            
-            workspace.foregroundProcessName = defaultProcessName
-        }
-
-        rebuildSidebarState()
-    }
-
-    private func uniqueWorkspaceName(
-        for preferredName: String,
-        cwd: String,
-        excluding excludedID: UUID? = nil
-    ) -> String {
-        let trimmed = preferredName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = trimmed.isEmpty ? defaultWorkspaceName(for: cwd) : trimmed
-        let existingNames = Set(
-            managedWorkspaces
-                .filter { $0.key != excludedID }
-                .map { $0.value.name.lowercased() }
-        )
-
-        if !existingNames.contains(base.lowercased()) {
-            return base
-        }
-
-        var index = 2
-        while existingNames.contains("\(base) \(index)".lowercased()) {
-            index += 1
-        }
-        return "\(base) \(index)"
-    }
-
-    private func defaultWorkspaceName(for cwd: String) -> String {
-        let path = cwd.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if path.isEmpty {
-            return "workspace"
-        }
-
-        let folderName = URL(fileURLWithPath: cwd).lastPathComponent
-        return folderName.isEmpty ? "workspace" : folderName
-    }
-
-    private func directChildProcessIDs(of parentPID: Int32) -> Set<Int32> {
-        let output = runPS(arguments: ["-axo", "pid=,ppid="])
-        let pairs = output
-            .split(separator: "\n")
-            .compactMap { line -> (Int32, Int32)? in
-                let parts = line
-                    .split(whereSeparator: \.isWhitespace)
-                    .map(String.init)
-                guard parts.count >= 2,
-                      let pid = Int32(parts[0]),
-                      let ppid = Int32(parts[1]) else {
-                    return nil
-                }
-                return (pid, ppid)
-            }
-
-        return Set(pairs.filter { $0.1 == parentPID }.map(\.0))
-    }
-
-    private func processExists(_ pid: Int32) -> Bool {
-        if kill(pid, 0) == 0 {
-            return true
-        }
-        return errno != ESRCH
-    }
-
-    private func processName(for pid: Int32) -> String? {
-        let output = runPS(arguments: ["-o", "comm=", "-p", String(pid)])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !output.isEmpty else { return nil }
-        return displayProcessName(output)
-    }
-
-    private func foregroundProcessName(forRootPID rootPID: Int32) -> String? {
-        let tty = runPS(arguments: ["-o", "tty=", "-p", String(rootPID)])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !tty.isEmpty, tty != "??" else {
-            return processName(for: rootPID)
-        }
-
-        let processes = ttyProcesses(for: tty)
-        guard !processes.isEmpty else {
-            return processName(for: rootPID)
-        }
-
-        let parentByPID = Dictionary(uniqueKeysWithValues: processes.map { ($0.pid, $0.ppid) })
-        let foregroundCandidates = processes.filter { $0.stat.contains("+") }
-        let relevantCandidates = foregroundCandidates.filter {
-            $0.pid == rootPID || isDescendant($0.pid, of: rootPID, parentByPID: parentByPID)
-        }
-
-        let chosen = (relevantCandidates.isEmpty ? processes.filter { $0.pid == rootPID } : relevantCandidates)
-            .sorted(by: { left, right in
-                processPriority(for: left, rootPID: rootPID) > processPriority(for: right, rootPID: rootPID)
-            })
-            .first
-
-        return chosen.map { displayProcessName($0.command) }
-    }
-
-    private func ttyProcesses(for tty: String) -> [TTYProcessSnapshot] {
-        let output = runPS(arguments: ["-t", tty, "-o", "pid=,ppid=,stat=,comm="])
-        return output
-            .split(separator: "\n")
-            .compactMap { line in
-                let parts = line
-                    .split(maxSplits: 3, omittingEmptySubsequences: true, whereSeparator: \.isWhitespace)
-                    .map(String.init)
-                guard parts.count == 4,
-                      let pid = Int32(parts[0]),
-                      let ppid = Int32(parts[1]) else {
-                    return nil
-                }
-                return TTYProcessSnapshot(
-                    pid: pid,
-                    ppid: ppid,
-                    stat: parts[2],
-                    command: parts[3]
-                )
-            }
-    }
-
-    private func isDescendant(_ pid: Int32, of ancestorPID: Int32, parentByPID: [Int32: Int32]) -> Bool {
-        var current = pid
-        while let parent = parentByPID[current] {
-            if parent == ancestorPID {
-                return true
-            }
-            if parent == current {
-                break
-            }
-            current = parent
-        }
-        return false
-    }
-
-    private func processPriority(for process: TTYProcessSnapshot, rootPID: Int32) -> (Int, Int, Int32) {
-        let name = displayProcessName(process.command)
-        return (
-            knownShells.contains(name) ? 0 : 1,
-            process.pid == rootPID ? 0 : 1,
-            process.pid
-        )
-    }
-
-    private func displayProcessName(_ command: String) -> String {
-        URL(fileURLWithPath: command).lastPathComponent
-    }
-
-    private func runPS(arguments: [String]) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = arguments
-
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
-            return String(decoding: data, as: UTF8.self)
-        } catch {
-            return ""
-        }
-    }
+  }
 }
 
 private func withOptionalCString<T>(_ value: String?, _ body: (UnsafePointer<CChar>?) -> T) -> T {
-    guard let value,
-          !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        return body(nil)
-    }
+  guard let value,
+    !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  else {
+    return body(nil)
+  }
 
-    return value.withCString { ptr in
-        body(ptr)
-    }
+  return value.withCString { ptr in
+    body(ptr)
+  }
 }
+
+private let workspaceInfoTimestampFormatter: ISO8601DateFormatter = {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter
+}()
 
 private let knownShells: Set<String> = ["bash", "fish", "sh", "zsh"]
 
 private final class ManagedWorkspace {
-    let id: UUID
-    let cwd: String
-    let launchCommand: WorkspaceLaunchCommand
-    let customCommand: String
-    let terminalView: TerminalView
-    let createdAt: Date
-    let baselineChildPIDs: Set<Int32>
+  let id: UUID
+  let cwd: String
+  let launchCommand: WorkspaceLaunchCommand
+  let customCommand: String
+  let cliArgs: String
+  let terminalView: TerminalView
+  let createdAt: Date
+  let baselineChildPIDs: Set<Int32>
 
-    var name: String
-    var rootProcessID: Int32?
-    var foregroundProcessName: String
-    var status: String
-    var isSystem: Bool
-    var restartCount: Int = 0
-    var lastLaunchTime: Date?
-    var lastActivityAt: Date
-    var cliGaveUp: Bool = false
+  var name: String
+  var rootProcessID: Int32?
+  var foregroundProcessName: String
+  var status: String
+  var isSystem: Bool
+  var restartCount: Int = 0
+  var lastLaunchTime: Date?
+  var lastActivityAt: Date
+  var cliGaveUp: Bool = false
+  var idleTimer: Timer?
 
-    init(
-        id: UUID,
-        name: String,
-        cwd: String,
-        launchCommand: WorkspaceLaunchCommand,
-        customCommand: String,
-        terminalView: TerminalView,
-        createdAt: Date,
-        baselineChildPIDs: Set<Int32>,
-        isSystem: Bool = false
-    ) {
-        self.id = id
-        self.name = name
-        self.cwd = cwd
-        self.launchCommand = launchCommand
-        self.customCommand = customCommand
-        self.terminalView = terminalView
-        self.createdAt = createdAt
-        self.baselineChildPIDs = baselineChildPIDs
-        self.foregroundProcessName = launchCommand.displayTitle(customCommand: customCommand)
-        self.status = "starting"
-        self.lastActivityAt = createdAt
-        self.isSystem = isSystem
-    }
+  init(
+    id: UUID,
+    name: String,
+    cwd: String,
+    launchCommand: WorkspaceLaunchCommand,
+    customCommand: String,
+    cliArgs: String = "",
+    terminalView: TerminalView,
+    createdAt: Date,
+    baselineChildPIDs: Set<Int32>,
+    isSystem: Bool = false
+  ) {
+    self.id = id
+    self.name = name
+    self.cwd = cwd
+    self.launchCommand = launchCommand
+    self.customCommand = customCommand
+    self.cliArgs = cliArgs
+    self.terminalView = terminalView
+    self.createdAt = createdAt
+    self.baselineChildPIDs = baselineChildPIDs
+    self.foregroundProcessName = launchCommand.displayTitle(customCommand: customCommand)
+    self.status = "starting"
+    self.lastActivityAt = createdAt
+    self.isSystem = isSystem
+  }
 }
 
 private struct TTYProcessSnapshot {
-    let pid: Int32
-    let ppid: Int32
-    let stat: String
-    let command: String
+  let pid: Int32
+  let ppid: Int32
+  let stat: String
+  let command: String
 }

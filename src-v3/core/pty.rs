@@ -253,7 +253,8 @@ impl PtyManager {
         let idle_state: Arc<Mutex<IdleState>> = Arc::new(Mutex::new(IdleState::new()));
         let size = Arc::new(Mutex::new(size));
         let master: Arc<Mutex<Box<dyn MasterPty + Send>>> = Arc::new(Mutex::new(spawned.master));
-        let child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>> = Arc::new(Mutex::new(spawned.child));
+        let child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>> =
+            Arc::new(Mutex::new(spawned.child));
         let buffer: Arc<Mutex<OutputBuffer>> = Arc::new(Mutex::new(OutputBuffer::new()));
         let term_bytes: PtyByteQueue = Arc::new(Mutex::new(Vec::new()));
         let status: Arc<Mutex<String>> = Arc::new(Mutex::new("running".to_string()));
@@ -407,7 +408,9 @@ impl PtyManager {
     pub fn read_screen(&self, id: &str, max_bytes: Option<usize>) -> Result<String, String> {
         let ws = self.workspace(id)?;
         let buffer = ws.buffer.lock().map_err(|error| error.to_string())?;
-        let bytes = max_bytes.unwrap_or(DEFAULT_SNAPSHOT_BYTES).min(BUFFER_MAX_BYTES);
+        let bytes = max_bytes
+            .unwrap_or(DEFAULT_SNAPSHOT_BYTES)
+            .min(BUFFER_MAX_BYTES);
         Ok(buffer.snapshot(bytes))
     }
 
@@ -502,7 +505,9 @@ fn spawn_workspace_process(
     size: PtySize,
 ) -> Result<SpawnedWorkspace, String> {
     let pty_system = native_pty_system();
-    let pair = pty_system.openpty(size).map_err(|error| error.to_string())?;
+    let pair = pty_system
+        .openpty(size)
+        .map_err(|error| error.to_string())?;
     let resolved_command = resolve_command_binary(command);
 
     let mut cmd = CommandBuilder::new(resolved_command);
@@ -515,9 +520,18 @@ fn spawn_workspace_process(
         cmd.env("PATH", path_env);
     }
 
-    let child = pair.slave.spawn_command(cmd).map_err(|error| error.to_string())?;
-    let reader = pair.master.try_clone_reader().map_err(|error| error.to_string())?;
-    let writer = pair.master.take_writer().map_err(|error| error.to_string())?;
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|error| error.to_string())?;
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| error.to_string())?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| error.to_string())?;
 
     Ok(SpawnedWorkspace {
         master: pair.master,
@@ -545,12 +559,16 @@ fn try_restart_workspace(
 ) -> bool {
     eprintln!("[PTY] auto-restart: attempting respawn for {}", ws_id);
 
-    let current_size = size.lock().ok().map(|s| clone_size(&*s)).unwrap_or(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    });
+    let current_size = size
+        .lock()
+        .ok()
+        .map(|s| clone_size(&*s))
+        .unwrap_or(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
 
     let spawned = match spawn_workspace_process(cwd, command, args, current_size) {
         Ok(s) => s,
@@ -631,7 +649,12 @@ fn try_restart_workspace(
     let injector_writer = writer.clone();
     let injector_status = status.clone();
     thread::spawn(move || {
-        run_injector_loop(injector_queue, injector_idle, injector_writer, injector_status);
+        run_injector_loop(
+            injector_queue,
+            injector_idle,
+            injector_writer,
+            injector_status,
+        );
     });
 
     signal.mark_dirty();
@@ -716,7 +739,6 @@ fn reader_loop(
                 if let Ok(mut idle) = idle_state.lock() {
                     idle.record_output(has_prompt_pattern(&data));
                 }
-
             }
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::Interrupted {
@@ -736,9 +758,20 @@ fn reader_loop(
 
     if auto_restart {
         let restarted = try_restart_workspace(
-            &ws_id, &cwd, &command, &args,
-            &size, &master, &writer, &child,
-            &buffer, &term_bytes, &status, &idle_state, &inject_queue, &signal,
+            &ws_id,
+            &cwd,
+            &command,
+            &args,
+            &size,
+            &master,
+            &writer,
+            &child,
+            &buffer,
+            &term_bytes,
+            &status,
+            &idle_state,
+            &inject_queue,
+            &signal,
         );
         if restarted {
             return; // New reader thread is running

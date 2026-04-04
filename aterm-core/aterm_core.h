@@ -31,11 +31,42 @@
 
 #define ATERM_KEY_PAGE_DOWN 13
 
+#define ATERM_EVENT_CREATED 0
+
+#define ATERM_EVENT_CLOSED 1
+
+#define ATERM_EVENT_STATUS_CHANGED 2
+
+#define ATERM_EVENT_TITLE_CHANGED 3
+
+#define ATERM_EVENT_SHELL_READY 4
+
+#define ATERM_EVENT_TRUST_PROMPT 5
+
 #define BUFFER_MAX_BYTES (1024 * 1024)
 
 #define DEFAULT_SNAPSHOT_BYTES (256 * 1024)
 
 typedef struct AtermCore AtermCore;
+
+/**
+ * C-safe workspace event — flat struct, unused fields are NULL.
+ */
+typedef struct AtermEventFFI {
+  uint8_t event_type;
+  const char *id;
+  const char *name;
+  const char *status;
+  const char *title;
+} AtermEventFFI;
+
+/**
+ * Batch of events returned by aterm_drain_events(). Caller frees with aterm_free_events().
+ */
+typedef struct AtermEventBatch {
+  struct AtermEventFFI *events;
+  uint32_t count;
+} AtermEventBatch;
 
 typedef struct SessionEntryFFI {
   const char *id;
@@ -60,9 +91,20 @@ typedef struct AtermHostCallbacks {
   void (*attach_external_session)(void*, const char*);
   void (*reload_settings)(void*);
   char *(*list_workspaces)(void*);
-  void (*on_workspace_event)(void*, const char*);
+  void (*on_events_available)(void*);
   void (*request_redraw)(void*);
 } AtermHostCallbacks;
+
+typedef struct CoreTextGlyphResult {
+  uint8_t *bitmap;
+  uint32_t width;
+  uint32_t height;
+  int32_t xmin;
+  int32_t ymin;
+  float advance_width;
+  float ascent;
+  float descent;
+} CoreTextGlyphResult;
 
 struct AtermCore *aterm_core_new(void);
 
@@ -111,6 +153,17 @@ void aterm_core_set_dirty_callback(struct AtermCore *core, void (*callback)(void
 
 void aterm_core_sync_pty(struct AtermCore *core);
 
+/**
+ * Drain all pending workspace events as a C struct batch.
+ * Caller must free the returned batch with aterm_free_events().
+ */
+struct AtermEventBatch aterm_drain_events(void);
+
+/**
+ * Free a batch returned by aterm_drain_events().
+ */
+void aterm_free_events(struct AtermEventBatch batch);
+
 void aterm_core_set_theme_mode(struct AtermCore *core, uint8_t mode);
 
 /**
@@ -128,6 +181,12 @@ void aterm_core_set_font_size(struct AtermCore *core, float size);
  * Set line height in pixels (clamped to 12..64)
  */
 void aterm_core_set_line_height(struct AtermCore *core, float height);
+
+/**
+ * Deprecated compatibility no-op. Background blending has been removed and
+ * terminal cell colors are now rendered exactly as provided by the terminal.
+ */
+void aterm_core_set_bg_blend_threshold(struct AtermCore *_core, float _threshold);
 
 void aterm_core_scroll(struct AtermCore *core, int32_t delta);
 
@@ -186,6 +245,12 @@ void aterm_set_host(struct AtermHostCallbacks callbacks);
 char *aterm_dispatch(const char *action_json, uintptr_t action_len);
 
 /**
+ * Re-register all workspaces with telepty daemon.
+ * Call after session restore to ensure all sessions are visible.
+ */
+void aterm_sync_telepty(void);
+
+/**
  * Get the IPC socket path. Caller must free with aterm_core_free_string.
  */
 char *aterm_ipc_socket_path(void);
@@ -194,6 +259,13 @@ char *aterm_ipc_socket_path(void);
  * Get the IPC auth token. Caller must free with aterm_core_free_string.
  */
 char *aterm_ipc_token(void);
+
+extern int32_t aterm_coretext_rasterize_glyph(uint32_t codepoint,
+                                              const char *base_font_name,
+                                              float font_size,
+                                              struct CoreTextGlyphResult *result);
+
+extern void aterm_coretext_free_bitmap(uint8_t *bitmap);
 
 extern int tailscale_new(void);
 

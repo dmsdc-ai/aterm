@@ -1,8 +1,8 @@
 //! wgpu + glyphon terminal grid renderer.
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution,
-    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 
 use alacritty_terminal::event::EventListener;
@@ -320,7 +320,11 @@ impl TerminalGridRenderer {
                 )
             })
             .collect();
-        let shaping = if has_non_ascii { Shaping::Advanced } else { Shaping::Basic };
+        let shaping = if has_non_ascii {
+            Shaping::Advanced
+        } else {
+            Shaping::Basic
+        };
 
         line.buffer.set_metrics(
             &mut self.font_system,
@@ -396,7 +400,11 @@ fn indexed_to_glyphon(idx: u8) -> GlyphonColor {
     if idx < 232 {
         let i = idx - 16;
         let r = if i / 36 > 0 { (i / 36) * 40 + 55 } else { 0 };
-        let g = if (i % 36) / 6 > 0 { ((i % 36) / 6) * 40 + 55 } else { 0 };
+        let g = if (i % 36) / 6 > 0 {
+            ((i % 36) / 6) * 40 + 55
+        } else {
+            0
+        };
         let b = if i % 6 > 0 { (i % 6) * 40 + 55 } else { 0 };
         return GlyphonColor::rgb(r, g, b);
     }

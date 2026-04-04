@@ -8,6 +8,27 @@
 typedef struct AtermCore AtermCore;
 typedef void (*AtermDirtyCallback)(void* userdata);
 
+// Event types for wakeup+drain pattern
+#define ATERM_EVENT_CREATED          0
+#define ATERM_EVENT_CLOSED           1
+#define ATERM_EVENT_STATUS_CHANGED   2
+#define ATERM_EVENT_TITLE_CHANGED    3
+#define ATERM_EVENT_SHELL_READY      4
+#define ATERM_EVENT_TRUST_PROMPT     5
+
+typedef struct AtermEventFFI {
+    uint8_t event_type;
+    const char* id;
+    const char* name;
+    const char* status;
+    const char* title;
+} AtermEventFFI;
+
+typedef struct AtermEventBatch {
+    AtermEventFFI* events;
+    uint32_t count;
+} AtermEventBatch;
+
 // Named key codes
 #define ATERM_KEY_ENTER       1
 #define ATERM_KEY_BACKSPACE   2
@@ -53,6 +74,8 @@ void aterm_core_set_theme_mode(AtermCore* core, uint8_t mode);
 void aterm_core_set_color_scheme(AtermCore* core, uint8_t scheme);
 void aterm_core_set_font_size(AtermCore* core, float size);
 void aterm_core_set_line_height(AtermCore* core, float height);
+// Deprecated compatibility no-op.
+void aterm_core_set_bg_blend_threshold(AtermCore* core, float threshold);
 
 // Scroll
 void aterm_core_scroll(AtermCore* core, int32_t delta);
@@ -104,13 +127,18 @@ typedef struct {
     void (*attach_external_session)(void* userdata, const char* session_id);
     void (*reload_settings)(void* userdata);
     char* (*list_workspaces)(void* userdata);
-    void (*on_workspace_event)(void* userdata, const char* event_json);
+    void (*on_events_available)(void* userdata);
     void (*request_redraw)(void* userdata);
 } AtermHostCallbacks;
 
 void aterm_set_host(AtermHostCallbacks callbacks);
 char* aterm_dispatch(const char* action_json, size_t action_len);
+void aterm_sync_telepty(void);
 char* aterm_ipc_socket_path(void);
 char* aterm_ipc_token(void);
+
+// Wakeup+drain event API
+AtermEventBatch aterm_drain_events(void);
+void aterm_free_events(AtermEventBatch batch);
 
 #endif

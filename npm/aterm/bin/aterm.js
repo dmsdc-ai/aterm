@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   ensureUserLayout,
@@ -49,6 +49,23 @@ env.AIGENTRY_SYSTEM_ROOT = resolvedConfig.systemRoot;
 env.AIGENTRY_USER_ROOT = resolvedConfig.userRoot;
 env.AIGENTRY_PROJECT_ROOT = resolvedConfig.projectRoot;
 env.AIGENTRY_PROJECT_AIGENTRY_ROOT = resolvedConfig.projectAigentryRoot;
+
+// Single instance: if aterm is already running, activate and exit
+// Skip in sandbox mode (ATERM_DATA_ROOT set) — always launch new instance
+if (!process.env.ATERM_DATA_ROOT) {
+  try {
+    execFileSync('pgrep', ['-f', 'aterm.app/Contents/MacOS/aterm'], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    // pgrep succeeded → aterm is running
+    console.log('[aterm] already running, activating existing instance');
+    try { execFileSync('open', [appRoot]); } catch {}
+    process.exit(0);
+  } catch {
+    // pgrep exit 1 = not running, proceed to launch
+  }
+}
 
 const child = spawn(executable, process.argv.slice(2), {
   stdio: 'inherit',

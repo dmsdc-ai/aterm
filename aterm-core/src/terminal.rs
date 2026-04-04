@@ -2,10 +2,11 @@ use alacritty_terminal::{
     event::{Event, EventListener},
     grid::{Dimensions, Scroll},
     term::{Config, Term},
-    vte::ansi,
+    vte::ansi::{self, Color, NamedColor},
 };
 use std::io::Write;
 use std::sync::{Arc, Mutex};
+use unicode_normalization::UnicodeNormalization;
 
 pub type PtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 pub type SharedPtyWriter = Arc<Mutex<Option<PtyWriter>>>;
@@ -92,13 +93,49 @@ impl TerminalState {
     }
 
     /// Feed new PTY bytes incrementally into the terminal -- O(new_bytes) not O(total).
+    ///
+    /// Applies NFC normalization so macOS NFD Korean jamo are composed into
+    /// syllables before the VTE parser stores them. Escape sequences are
+    /// ASCII-only, so NFC is identity for them — safe to normalize the whole buffer.
     pub fn advance(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
+
+        // Fast path: pure ASCII needs no normalization (zero allocation).
+        let has_non_ascii = bytes.iter().any(|&b| b > 0x7F);
+        let normalized_buf: Vec<u8>;
+        let feed: &[u8] = if has_non_ascii {
+            match std::str::from_utf8(bytes) {
+                Ok(s) => {
+                    normalized_buf = s.nfc().collect::<String>().into_bytes();
+                    &normalized_buf
+                }
+                Err(e) => {
+                    // Partial UTF-8 at chunk boundary: normalize the valid prefix,
+                    // pass trailing incomplete bytes through as-is.
+                    let valid_up_to = e.valid_up_to();
+                    if valid_up_to == 0 {
+                        bytes
+                    } else {
+                        let valid =
+                            unsafe { std::str::from_utf8_unchecked(&bytes[..valid_up_to]) };
+                        normalized_buf = {
+                            let mut buf = valid.nfc().collect::<String>().into_bytes();
+                            buf.extend_from_slice(&bytes[valid_up_to..]);
+                            buf
+                        };
+                        &normalized_buf
+                    }
+                }
+            }
+        } else {
+            bytes
+        };
+
         let was_at_bottom = self.scroll_offset == 0;
         if let Ok(mut term) = self.terminal.lock() {
-            self.parser.advance(&mut *term, bytes);
+            self.parser.advance(&mut *term, feed);
             if was_at_bottom {
                 term.scroll_display(Scroll::Bottom);
             }
@@ -155,6 +192,16 @@ impl TerminalState {
 
         if let Ok(mut term) = self.terminal.lock() {
             term.resize(TerminalDimensions { columns, rows });
+
+            // Fix #157: Reset cursor template bg to default after resize.
+            // Industry standard (ghostty/alacritty/wezterm/kitty/contour):
+            // resize new cells = default bg, NOT cursor's current SGR bg.
+            // Without this, child process post-SIGWINCH erase ops inherit
+            // the cursor's SGR bg (e.g. codex's magenta #FF00FF), painting
+            // the entire screen with that color instead of the terminal
+            // background. The child will re-set SGR attributes when it
+            // redraws after SIGWINCH.
+            term.grid_mut().cursor.template.bg = Color::Named(NamedColor::Background);
         }
     }
 }
