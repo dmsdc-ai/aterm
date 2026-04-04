@@ -53,6 +53,15 @@ cd npm/aterm && npm publish --access public
 - macOS 14 ARM 러너, winit은 git clone (v0.30.13 tag)
 - 버전은 package.json에서 동적 읽기
 
+## Role Boundaries (HARD RULE — SAWP)
+- This session does CODE ONLY. No build, no test, no app launch.
+- Builder session handles: make app, cargo build
+- Tester session handles: sandbox app launch, testing, verification
+- After code changes, report immediately. Do NOT run cargo test, cargo build, or make.
+- If you need to verify compilation, use cargo check (not cargo build).
+
+This is SAWP: Code only → Report → Builder builds → Tester tests.
+
 ## Work Principles
 
 - **모든 것은 configurable (HARD RULE)**: 하드코딩 금지. 합리적 기본값 제공하되 잠그지 않는다. Settings UI (Cmd+,) + ~/.aigentry/config/aterm.json으로 변경 가능해야 하는 항목:

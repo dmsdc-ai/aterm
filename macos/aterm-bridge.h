@@ -80,6 +80,9 @@ void aterm_core_set_bg_blend_threshold(AtermCore* core, float threshold);
 
 // Scroll
 void aterm_core_scroll(AtermCore* core, int32_t delta);
+// Scroll to prompt (OSC 133): direction < 0 = up, > 0 = down. Returns 1 if scrolled.
+int32_t aterm_core_scroll_to_prompt(AtermCore* core, int32_t direction);
+uint32_t aterm_core_prompt_mark_count(const AtermCore* core);
 
 // Selection
 void aterm_core_selection_start(AtermCore* core, uint32_t col, int32_t line, uint8_t side);

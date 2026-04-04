@@ -26,14 +26,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   private var excludedChildPIDs: Set<Int32> = []
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    // Single instance enforcement
-    let bundleID = Bundle.main.bundleIdentifier ?? "com.aigentry.aterm"
-    let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-    let others = running.filter { $0 != NSRunningApplication.current }
-    if let existing = others.first {
-      NSLog("[aterm] already running (PID %d), activating existing instance", existing.processIdentifier)
-      existing.activate()
-      exit(0)
+    // Single instance enforcement — skip in sandbox mode (ATERM_DATA_ROOT set)
+    // so sandbox and production aterm can run simultaneously
+    if ProcessInfo.processInfo.environment["ATERM_DATA_ROOT"] == nil {
+      let bundleID = Bundle.main.bundleIdentifier ?? "com.aigentry.aterm"
+      let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+      let others = running.filter { $0 != NSRunningApplication.current }
+      if let existing = others.first {
+        NSLog("[aterm] already running (PID %d), activating existing instance", existing.processIdentifier)
+        existing.activate()
+        exit(0)
+      }
+    } else {
+      NSLog("[aterm] sandbox mode (ATERM_DATA_ROOT set), skipping single-instance check")
     }
 
     ensureTeleptyDaemon()

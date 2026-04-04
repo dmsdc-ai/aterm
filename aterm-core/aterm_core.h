@@ -135,8 +135,17 @@ int32_t aterm_core_workspace_is_alive(const struct AtermCore *core);
 
 void aterm_core_named_key(struct AtermCore *core, uint32_t key_code);
 
+/**
+ * Render — acquires render_lock with brief spin (max 8ms) for direct UI calls
+ * (mouseDown, scroll, theme change). Skips if lock cannot be acquired in time.
+ */
 void aterm_core_render(struct AtermCore *core);
 
+/**
+ * Try to render if dirty. Returns 1 if rendered, 0 if skipped.
+ * Thread-safe — used by CVDisplayLink and PTY dirty callback for immediate
+ * render without CVDisplayLink latency (Ghostty/Alacritty pattern, Fix #153).
+ */
 int32_t aterm_core_try_render(struct AtermCore *core);
 
 void aterm_core_resize(struct AtermCore *core, uint32_t width, uint32_t height);
@@ -191,6 +200,18 @@ void aterm_core_set_line_height(struct AtermCore *core, float height);
 void aterm_core_set_bg_blend_threshold(struct AtermCore *_core, float _threshold);
 
 void aterm_core_scroll(struct AtermCore *core, int32_t delta);
+
+/**
+ * Scroll to the next/previous shell prompt (OSC 133 marks).
+ * direction < 0 = previous prompt (up), direction > 0 = next prompt (down).
+ * Returns 1 if scrolled, 0 if no prompt found in that direction.
+ */
+int32_t aterm_core_scroll_to_prompt(struct AtermCore *core, int32_t direction);
+
+/**
+ * Returns the number of OSC 133 prompt marks currently stored.
+ */
+uint32_t aterm_core_prompt_mark_count(const struct AtermCore *core);
 
 void aterm_core_selection_start(struct AtermCore *core, uint32_t col, int32_t line, uint8_t side);
 

@@ -45,18 +45,41 @@ pub enum PromptSource {
 /// OSC 133 semantic prompt markers (FinalTerm/shell integration protocol).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Osc133Mark {
-    PromptStart,  // A — shell is about to display prompt
-    PromptEnd,    // B — prompt displayed, ready for input
-    CommandStart, // C — user submitted command, execution begins
-    CommandEnd,   // D — command execution finished
+    PromptStart,             // A — shell is about to display prompt
+    PromptEnd,               // B — prompt displayed, ready for input
+    CommandStart,            // C — user submitted command, execution begins
+    CommandEnd(Option<i32>), // D;exit_status — command execution finished
 }
 
 /// Scan data for OSC 133 markers. Returns all markers found.
 /// Handles both BEL-terminated (\x1b]133;X\x07) and ST-terminated (\x1b]133;X\x1b\\) forms.
+/// Also handles D marks with exit status: \x1b]133;D;N\x07 where N is the exit code.
 pub fn detect_osc133(data: &str) -> Vec<Osc133Mark> {
     let mut marks = Vec::new();
     let bytes = data.as_bytes();
     let len = bytes.len();
+
+    // Debug: check if ANY ESC ] sequence exists in the data
+    let esc_count = bytes.iter().filter(|&&b| b == 0x1b).count();
+    if esc_count > 0 {
+        // Look for \x1b] specifically (OSC introducer)
+        let osc_count = bytes
+            .windows(2)
+            .filter(|w| w[0] == 0x1b && w[1] == b']')
+            .count();
+        if osc_count > 0 {
+            // Check if "133" follows any \x1b]
+            let osc133_count = bytes
+                .windows(6)
+                .filter(|w| w[0] == 0x1b && w[1] == b']' && w[2] == b'1' && w[3] == b'3' && w[4] == b'3' && w[5] == b';')
+                .count();
+            log_stderr!(
+                "[osc133-debug] detect_osc133: len={}, esc={}, osc_intros={}, osc133_matches={}",
+                len, esc_count, osc_count, osc133_count
+            );
+        }
+    }
+
     let mut i = 0;
 
     while i + 6 < len {
@@ -68,19 +91,59 @@ pub fn detect_osc133(data: &str) -> Vec<Osc133Mark> {
             && bytes[i + 5] == b';'
         {
             if let Some(&mark_byte) = bytes.get(i + 6) {
-                let terminated = match bytes.get(i + 7) {
-                    Some(&0x07) => true,
-                    Some(&0x1b) => bytes.get(i + 8) == Some(&b'\\'),
-                    _ => false,
-                };
-                if terminated {
-                    match mark_byte {
-                        b'A' => marks.push(Osc133Mark::PromptStart),
-                        b'B' => marks.push(Osc133Mark::PromptEnd),
-                        b'C' => marks.push(Osc133Mark::CommandStart),
-                        b'D' => marks.push(Osc133Mark::CommandEnd),
-                        _ => {}
+                match mark_byte {
+                    b'A' | b'B' | b'C' => {
+                        let terminated = match bytes.get(i + 7) {
+                            Some(&0x07) => true,
+                            Some(&0x1b) => bytes.get(i + 8) == Some(&b'\\'),
+                            _ => false,
+                        };
+                        if terminated {
+                            match mark_byte {
+                                b'A' => marks.push(Osc133Mark::PromptStart),
+                                b'B' => marks.push(Osc133Mark::PromptEnd),
+                                b'C' => marks.push(Osc133Mark::CommandStart),
+                                _ => {}
+                            }
+                        }
+                        // outer i += 7 handles advancement
                     }
+                    b'D' => {
+                        // D can be followed by ;exit_status before the terminator.
+                        // Scan forward (max 16 bytes) for BEL or ST.
+                        let start = i + 7;
+                        let scan_end = (start + 16).min(len);
+                        let mut j = start;
+                        let mut terminated = false;
+                        while j < scan_end {
+                            match bytes[j] {
+                                0x07 => {
+                                    terminated = true;
+                                    break;
+                                }
+                                0x1b if j + 1 < len && bytes[j + 1] == b'\\' => {
+                                    terminated = true;
+                                    break;
+                                }
+                                _ => j += 1,
+                            }
+                        }
+                        if terminated {
+                            // Parse optional exit status from ;N between mark_byte and terminator
+                            let param_slice = &bytes[start..j];
+                            let exit_status = if param_slice.first() == Some(&b';') {
+                                std::str::from_utf8(&param_slice[1..])
+                                    .ok()
+                                    .and_then(|s| s.parse::<i32>().ok())
+                            } else {
+                                None
+                            };
+                            marks.push(Osc133Mark::CommandEnd(exit_status));
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             i += 7;
@@ -771,7 +834,7 @@ mod tests {
         assert_eq!(
             marks,
             vec![
-                Osc133Mark::CommandEnd,
+                Osc133Mark::CommandEnd(None),
                 Osc133Mark::PromptStart,
                 Osc133Mark::PromptEnd,
                 Osc133Mark::CommandStart,
@@ -784,6 +847,31 @@ mod tests {
         assert!(detect_osc133("hello world").is_empty());
         assert!(detect_osc133("133;B").is_empty());
         assert!(detect_osc133("\x1b[32mgreen\x1b[0m").is_empty());
+    }
+
+    #[test]
+    fn detect_osc133_d_with_exit_status() {
+        // zsh emits D;N with exit code
+        let data = "\x1b]133;D;0\x07";
+        let marks = detect_osc133(data);
+        assert_eq!(marks, vec![Osc133Mark::CommandEnd(Some(0))]);
+
+        let data = "\x1b]133;D;127\x07";
+        let marks = detect_osc133(data);
+        assert_eq!(marks, vec![Osc133Mark::CommandEnd(Some(127))]);
+
+        // ST-terminated with exit status
+        let data = "\x1b]133;D;1\x1b\\";
+        let marks = detect_osc133(data);
+        assert_eq!(marks, vec![Osc133Mark::CommandEnd(Some(1))]);
+    }
+
+    #[test]
+    fn detect_osc133_d_without_exit_status() {
+        // bash/fish emit plain D without exit code
+        let data = "\x1b]133;D\x07";
+        let marks = detect_osc133(data);
+        assert_eq!(marks, vec![Osc133Mark::CommandEnd(None)]);
     }
 
     #[test]

@@ -4,15 +4,115 @@ use alacritty_terminal::{
     term::{Config, Term},
     vte::ansi::{self, Color, NamedColor},
 };
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use unicode_normalization::UnicodeNormalization;
+
+use crate::inject::Osc133Mark;
 
 pub type PtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 pub type SharedPtyWriter = Arc<Mutex<Option<PtyWriter>>>;
 pub type SharedTerminal = Arc<Mutex<Term<AtermEventListener>>>;
 
 const SCROLLBACK_LINES: usize = 10000;
+const MAX_PROMPT_MARKS: usize = 2000;
+
+// --- OSC 133 prompt mark store ---
+
+/// Per-line prompt kind, following Kitty's 2-bit pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PromptKind {
+    /// OSC 133;A — shell prompt begins on this line.
+    PromptStart = 1,
+    /// OSC 133;C — command output begins on this line.
+    OutputStart = 2,
+}
+
+/// A single prompt mark, positioned by distance from the bottom of the buffer.
+#[derive(Debug, Clone)]
+struct PromptMarkEntry {
+    /// Distance from the very bottom line of the terminal buffer.
+    /// 0 = bottom-most line, increasing upward.
+    bottom_distance: usize,
+    kind: PromptKind,
+}
+
+/// Stores OSC 133 prompt marks for scroll-to-prompt navigation.
+/// Marks are sorted by `bottom_distance` ascending (newest/closest to bottom first).
+pub struct PromptMarkStore {
+    marks: VecDeque<PromptMarkEntry>,
+    /// Last exit status from OSC 133;D.
+    pub last_exit_status: Option<i32>,
+}
+
+impl PromptMarkStore {
+    fn new() -> Self {
+        Self {
+            marks: VecDeque::new(),
+            last_exit_status: None,
+        }
+    }
+
+    /// Shift all marks upward when new lines are produced.
+    fn shift_marks(&mut self, new_lines: usize, max_distance: usize) {
+        if new_lines == 0 {
+            return;
+        }
+        for mark in &mut self.marks {
+            mark.bottom_distance += new_lines;
+        }
+        // Prune marks that have scrolled beyond the buffer
+        while let Some(front) = self.marks.front() {
+            if front.bottom_distance > max_distance {
+                self.marks.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Record a new mark at the given distance from the buffer bottom.
+    fn add_mark(&mut self, bottom_distance: usize, kind: PromptKind) {
+        // Insert in sorted position (marks are sorted ascending by bottom_distance,
+        // but new marks almost always go to the back since they're near the bottom)
+        self.marks.push_back(PromptMarkEntry {
+            bottom_distance,
+            kind,
+        });
+        // Enforce capacity limit by removing oldest marks (front)
+        while self.marks.len() > MAX_PROMPT_MARKS {
+            self.marks.pop_front();
+        }
+    }
+
+    /// Find the next PromptStart mark ABOVE the current view top.
+    /// Returns the mark's bottom_distance.
+    fn find_prompt_up(&self, current_top_bd: usize) -> Option<usize> {
+        self.marks
+            .iter()
+            .filter(|m| m.kind == PromptKind::PromptStart && m.bottom_distance > current_top_bd)
+            .min_by_key(|m| m.bottom_distance)
+            .map(|m| m.bottom_distance)
+    }
+
+    /// Find the next PromptStart mark BELOW the current view top.
+    /// Returns the mark's bottom_distance.
+    fn find_prompt_down(&self, current_top_bd: usize) -> Option<usize> {
+        self.marks
+            .iter()
+            .filter(|m| m.kind == PromptKind::PromptStart && m.bottom_distance < current_top_bd)
+            .max_by_key(|m| m.bottom_distance)
+            .map(|m| m.bottom_distance)
+    }
+
+    pub fn mark_count(&self) -> usize {
+        self.marks.len()
+    }
+}
+
+pub type PendingOsc133 = Arc<Mutex<Vec<Osc133Mark>>>;
 
 /// Routes terminal write-back events (DA responses, etc.) to the PTY master.
 /// Without this, apps like Codex CLI never receive Device Attributes responses
@@ -57,6 +157,10 @@ pub struct TerminalState {
     columns: usize,
     rows: usize,
     scroll_offset: usize,
+    /// OSC 133 prompt marks for scroll-to-prompt navigation.
+    prompt_marks: PromptMarkStore,
+    /// Pending OSC 133 marks pushed by reader_loop, drained in advance().
+    pending_osc133: PendingOsc133,
 }
 
 impl TerminalState {
@@ -78,6 +182,8 @@ impl TerminalState {
             columns,
             rows,
             scroll_offset: 0,
+            prompt_marks: PromptMarkStore::new(),
+            pending_osc133: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -135,12 +241,62 @@ impl TerminalState {
 
         let was_at_bottom = self.scroll_offset == 0;
         if let Ok(mut term) = self.terminal.lock() {
+            // Capture cursor position before advance for mark shifting
+            let old_history = term.grid().history_size();
+            let old_cursor = term.grid().cursor.point.line.0 as usize;
+
             self.parser.advance(&mut *term, feed);
             if was_at_bottom {
                 term.scroll_display(Scroll::Bottom);
             }
             // Always re-sync from grid to prevent drift after VTE state changes
             self.scroll_offset = term.grid().display_offset();
+
+            // Process OSC 133 marks: shift existing marks and record new ones
+            let new_history = term.grid().history_size();
+            let new_cursor = term.grid().cursor.point.line.0 as usize;
+            let screen_lines = term.grid().screen_lines();
+
+            let new_total = new_history + new_cursor;
+            let old_total = old_history + old_cursor;
+            let new_lines = new_total.saturating_sub(old_total);
+
+            if new_lines > 0 {
+                self.prompt_marks
+                    .shift_marks(new_lines, new_history + screen_lines);
+            }
+
+            if let Ok(mut pending) = self.pending_osc133.lock() {
+                if !pending.is_empty() {
+                    let bottom_dist =
+                        screen_lines.saturating_sub(1).saturating_sub(new_cursor);
+                    log_stderr!(
+                        "[osc133-debug] processing {} pending marks, bottom_dist={}, total_marks={}",
+                        pending.len(),
+                        bottom_dist,
+                        self.prompt_marks.mark_count()
+                    );
+                    for mark in pending.drain(..) {
+                        match mark {
+                            Osc133Mark::PromptStart => {
+                                log_stderr!("[osc133-debug] PromptStart mark stored at bd={}", bottom_dist);
+                                self.prompt_marks
+                                    .add_mark(bottom_dist, PromptKind::PromptStart);
+                            }
+                            Osc133Mark::CommandStart => {
+                                self.prompt_marks
+                                    .add_mark(bottom_dist, PromptKind::OutputStart);
+                            }
+                            Osc133Mark::CommandEnd(status) => {
+                                self.prompt_marks.last_exit_status = status;
+                            }
+                            Osc133Mark::PromptEnd => {
+                                // B marks don't need line storage — used for inject timing only
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -177,6 +333,58 @@ impl TerminalState {
             }
         }
         false
+    }
+
+    /// Number of OSC 133 prompt marks currently stored.
+    pub fn prompt_mark_count(&self) -> usize {
+        self.prompt_marks.mark_count()
+    }
+
+    /// Get a clone of the pending OSC 133 marks handle for sharing with reader_loop.
+    pub fn pending_osc133(&self) -> PendingOsc133 {
+        Arc::clone(&self.pending_osc133)
+    }
+
+    /// Scroll to the next/previous prompt mark.
+    /// direction < 0 = up (previous prompt), direction > 0 = down (next prompt).
+    /// Returns true if scrolled, false if no prompt found in that direction.
+    pub fn scroll_to_prompt(&mut self, direction: i32) -> bool {
+        if let Ok(mut term) = self.terminal.lock() {
+            let screen_lines = term.grid().screen_lines();
+            let display_offset = term.grid().display_offset();
+            let history_size = term.grid().history_size();
+
+            // Top of current view expressed as bottom_distance
+            let current_top_bd = display_offset + screen_lines - 1;
+
+            let target_bd = if direction < 0 {
+                self.prompt_marks.find_prompt_up(current_top_bd)
+            } else {
+                self.prompt_marks.find_prompt_down(current_top_bd)
+            };
+
+            if let Some(bd) = target_bd {
+                // Place the prompt at the top of the visible area
+                let target_offset = bd.saturating_sub(screen_lines - 1);
+                let clamped = target_offset.min(history_size);
+
+                term.scroll_display(Scroll::Bottom);
+                if clamped > 0 {
+                    term.scroll_display(Scroll::Delta(clamped as i32));
+                }
+                self.scroll_offset = term.grid().display_offset();
+                true
+            } else if direction > 0 {
+                // No prompt below → scroll to bottom
+                term.scroll_display(Scroll::Bottom);
+                self.scroll_offset = 0;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
     pub fn resize(&mut self, columns: usize, rows: usize) {

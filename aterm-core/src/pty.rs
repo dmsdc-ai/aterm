@@ -128,6 +128,8 @@ struct Workspace {
     custom_command: Option<String>,
     is_system: bool,
     resume_command: Option<String>,
+    /// Pending OSC 133 marks detected in reader_loop, drained by sync_pty.
+    pending_osc133: crate::terminal::PendingOsc133,
 }
 
 pub struct PtyManager {
@@ -253,6 +255,7 @@ impl PtyManager {
         custom_command: Option<String>,
         is_system: bool,
         resume_command: Option<String>,
+        pending_osc133_handle: Option<crate::terminal::PendingOsc133>,
     ) -> Result<String, String> {
         if self.workspaces.contains_key(&id) {
             return Err(format!("Workspace '{}' already exists", id));
@@ -303,6 +306,14 @@ impl PtyManager {
         let reader_inject_signal = inject_signal.clone();
         let restart_count: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
         let reader_restart_count = restart_count.clone();
+        let pending_osc133: crate::terminal::PendingOsc133 =
+            pending_osc133_handle.unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+        log_stderr!(
+            "[osc133-debug] create: pending_osc133 Arc ptr={:p}, from_terminal={}",
+            Arc::as_ptr(&pending_osc133),
+            pending_osc133.lock().map(|_| true).unwrap_or(false)
+        );
+        let reader_pending_osc133 = pending_osc133.clone();
 
         thread::spawn(move || {
             reader_loop(
@@ -325,6 +336,7 @@ impl PtyManager {
                 reader_inject_queue,
                 reader_inject_signal,
                 reader_restart_count,
+                reader_pending_osc133,
             );
         });
 
@@ -365,6 +377,7 @@ impl PtyManager {
             custom_command,
             is_system,
             resume_command,
+            pending_osc133,
         };
 
         self.workspaces.insert(id.clone(), workspace);
@@ -396,6 +409,7 @@ impl PtyManager {
             entry.custom_command,
             entry.is_system,
             entry.resume_command,
+            None, // no terminal yet during restore
         )
     }
 
@@ -579,6 +593,7 @@ impl PtyManager {
         Ok(std::mem::take(&mut *queue))
     }
 
+
     /// Get a clone of the workspace's PTY writer for terminal write-back (DA responses, etc.).
     pub fn workspace_writer(&self, id: &str) -> Option<Arc<Mutex<Box<dyn Write + Send>>>> {
         self.workspaces.get(id).map(|ws| ws.writer.clone())
@@ -663,6 +678,7 @@ fn mark_workspace_dead_handles(
 
 const OSC133_ZSH: &str = r#"# aterm OSC 133 shell integration (zsh)
 # Emits semantic prompt markers for reliable inject timing.
+echo "[osc133-debug] aterm-osc133.zsh sourced" >&2
 _aterm_osc133_precmd() {
     local ret=$?
     printf '\e]133;D;%d\a' "$ret"
@@ -677,6 +693,7 @@ _aterm_osc133_prompt_ready() {
 }
 precmd_functions=(_aterm_osc133_precmd "${precmd_functions[@]}")
 precmd_functions+=(_aterm_osc133_prompt_ready)
+echo "[osc133-debug] precmd registered, precmd_functions=${(j:,:)precmd_functions}" >&2
 preexec_functions=(_aterm_osc133_preexec "${preexec_functions[@]}")
 # Emit initial A+B for first prompt
 printf '\e]133;A\a\e]133;B\a'
@@ -703,15 +720,31 @@ function __aterm_osc133_postexec --on-event fish_postexec
 end
 "#;
 
-const ZDOTDIR_ZSHENV: &str = r#"# aterm ZDOTDIR wrapper — restore original then source it
-ZDOTDIR="${ATERM_ORIGINAL_ZDOTDIR:-$HOME}"
+const ZDOTDIR_ZSHENV: &str = r#"# aterm ZDOTDIR wrapper (VS Code pattern) — save, restore, source, re-save
+# 1. Save wrapper dir so .zshrc can find us
+ATERM_ZDOTDIR="$ZDOTDIR"
+# 2. Restore user's original ZDOTDIR
+ATERM_USER_ZDOTDIR="${ATERM_ORIGINAL_ZDOTDIR:-$HOME}"
+ZDOTDIR="$ATERM_USER_ZDOTDIR"
 unset ATERM_ORIGINAL_ZDOTDIR
+# 3. Source user's .zshenv
 [[ -f "${ZDOTDIR}/.zshenv" ]] && source "${ZDOTDIR}/.zshenv"
+# 4. CRITICAL: Restore wrapper ZDOTDIR so zsh finds our .zshrc next
+ZDOTDIR="$ATERM_ZDOTDIR"
 "#;
 
-const ZDOTDIR_ZSHRC: &str = r#"# aterm ZDOTDIR wrapper — source user rc then load OSC 133 integration
-[[ -f "${ZDOTDIR}/.zshrc" ]] && source "${ZDOTDIR}/.zshrc"
-source "${ATERM_DATA_ROOT:-$HOME/.aigentry}/shell-integration/aterm-osc133.zsh"
+const ZDOTDIR_ZSHRC: &str = r#"# aterm ZDOTDIR wrapper (VS Code pattern) — source user rc then inject OSC 133
+# 1. Source user's .zshrc using saved original path
+echo "[osc133-debug] .zshrc wrapper sourced, ATERM_USER_ZDOTDIR=$ATERM_USER_ZDOTDIR" >&2
+[[ -f "${ATERM_USER_ZDOTDIR}/.zshrc" ]] && source "${ATERM_USER_ZDOTDIR}/.zshrc"
+# 2. Source OSC 133 shell integration
+_aterm_osc133_path="${ATERM_DATA_ROOT:-$HOME/.aigentry}/shell-integration/aterm-osc133.zsh"
+echo "[osc133-debug] sourcing $_aterm_osc133_path (exists=$([[ -f "$_aterm_osc133_path" ]] && echo yes || echo no))" >&2
+source "$_aterm_osc133_path"
+unset _aterm_osc133_path
+# 3. Restore user's ZDOTDIR for the rest of the session
+ZDOTDIR="$ATERM_USER_ZDOTDIR"
+unset ATERM_ZDOTDIR ATERM_USER_ZDOTDIR
 "#;
 
 /// Write shell integration scripts to ~/.aigentry/shell-integration/ if missing or outdated.
@@ -852,11 +885,20 @@ fn spawn_workspace_process(
     let socket_path = format!("/tmp/aterm-{}.sock", std::process::id());
     cmd.env("ATERM_IPC_SOCKET", &socket_path);
 
+    // Propagate ATERM_DATA_ROOT to child so shell integration scripts resolve correctly
+    let data_root = crate::session::data_root();
+    cmd.env("ATERM_DATA_ROOT", data_root.to_string_lossy().as_ref());
+
     // OSC 133 shell integration — only applicable for shell commands (zsh/bash/fish).
     // AI CLIs (claude/codex/gemini) are TUI apps that don't source shell rc files
     // and don't emit OSC 133 sequences. For those, ShellReady uses heuristic
     // prompt detection and inject uses heuristic + force-inject.
-    if is_shell_command(command) {
+    let is_shell = is_shell_command(command);
+    log_stderr!(
+        "[osc133-debug] spawn: command={command}, is_shell={is_shell}, is_zsh={}",
+        is_zsh_command(command)
+    );
+    if is_shell {
         if let Some(base) = ensure_shell_integration() {
             cmd.env("ATERM_SHELL_INTEGRATION", "1");
             cmd.env(
@@ -870,7 +912,9 @@ fn spawn_workspace_process(
                 if !original.is_empty() {
                     cmd.env("ATERM_ORIGINAL_ZDOTDIR", &original);
                 }
-                cmd.env("ZDOTDIR", base.join("zsh").to_string_lossy().as_ref());
+                let zdotdir = base.join("zsh");
+                log_stderr!("[osc133-debug] ZDOTDIR set to {}", zdotdir.display());
+                cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
             } else if is_bash_command(command) {
                 // BASH_ENV sources integration for non-interactive; --rcfile for interactive
                 let integration = base.join("aterm-osc133.bash");
@@ -917,6 +961,7 @@ fn try_restart_workspace(
     inject_signal: &InjectSignal,
     signal: &PtyOutputSignal,
     restart_count: &Arc<AtomicU32>,
+    pending_osc133: &crate::terminal::PendingOsc133,
 ) -> bool {
     log_stderr!("[PTY] auto-restart: attempting respawn for {}", ws_id);
 
@@ -995,6 +1040,7 @@ fn try_restart_workspace(
     let restart_inject_queue = inject_queue.clone();
     let restart_inject_signal = inject_signal.clone();
     let restart_restart_count = restart_count.clone();
+    let restart_pending_osc133 = pending_osc133.clone();
 
     thread::spawn(move || {
         reader_loop(
@@ -1017,6 +1063,7 @@ fn try_restart_workspace(
             restart_inject_queue,
             restart_inject_signal,
             restart_restart_count,
+            restart_pending_osc133,
         );
     });
 
@@ -1203,6 +1250,7 @@ fn reader_loop(
     inject_queue: SharedInjectQueue,
     inject_signal: InjectSignal,
     restart_count: Arc<AtomicU32>,
+    pending_osc133: crate::terminal::PendingOsc133,
 ) {
     let mut buf = [0u8; 4096];
     let mut leftover: Vec<u8> = Vec::new();
@@ -1213,11 +1261,32 @@ fn reader_loop(
     let mut shell_ready = ShellReadyDetector::new();
     let mut trust_prompt = TrustPromptDetector::new();
     let mut osc133_detected = false;
+    let mut first_output_logged = false;
 
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                // Debug: log raw bytes from first few reads to see if OSC 133 is present
+                if !first_output_logged {
+                    let raw = &buf[..n.min(256)];
+                    let has_esc_bracket = raw.windows(2).any(|w| w[0] == 0x1b && w[1] == b']');
+                    let hex: String = raw.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                    log_stderr!(
+                        "[osc133-debug] first PTY output: {} bytes, has_osc_intro={}, hex(first 64)={}",
+                        n, has_esc_bracket, hex
+                    );
+                    first_output_logged = true;
+                }
+                // Log any read that contains ESC ] (potential OSC sequence)
+                if buf[..n].windows(2).any(|w| w[0] == 0x1b && w[1] == b']') {
+                    let hex: String = buf[..n.min(128)].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                    log_stderr!(
+                        "[osc133-debug] raw ESC] in PTY read: {} bytes, hex={}",
+                        n, hex
+                    );
+                }
+
                 // Feed RAW bytes to VTE parser immediately — no UTF-8 filtering.
                 // Prevents escape sequence loss when non-UTF-8 bytes are present.
                 if let Ok(mut tb) = term_bytes.lock() {
@@ -1274,6 +1343,24 @@ fn reader_loop(
                 let osc_marks = detect_osc133(&data);
                 let has_osc133_prompt = osc_marks.contains(&Osc133Mark::PromptEnd);
                 let has_osc133_cmd = osc_marks.contains(&Osc133Mark::CommandStart);
+
+                // Push marks to pending queue for TerminalState to resolve positions
+                if !osc_marks.is_empty() {
+                    log_stderr!(
+                        "[osc133-debug] reader_loop detected {} marks: {:?}",
+                        osc_marks.len(),
+                        osc_marks
+                    );
+                    if let Ok(mut pending) = pending_osc133.lock() {
+                        let before = pending.len();
+                        pending.extend_from_slice(&osc_marks);
+                        log_stderr!(
+                            "[osc133-debug] pending queue: {} -> {}",
+                            before,
+                            pending.len()
+                        );
+                    }
+                }
 
                 if !osc133_detected && !osc_marks.is_empty() {
                     osc133_detected = true;
@@ -1399,6 +1486,7 @@ fn reader_loop(
                 &inject_signal,
                 &signal,
                 &restart_count,
+                &pending_osc133,
             );
             if restarted {
                 return; // New reader thread is running, don't mark dead

@@ -301,6 +301,7 @@ impl AtermCore {
             _ => (None, None),
         };
         log_stderr!("[aterm-core] spawn_shell: name={name} cmd={cmd:?} args={args:?}");
+        let osc133_handle = self.terminal.as_ref().map(|t| t.pending_osc133());
         match self.pty_manager.create(
             name.to_string(),
             cwd.to_string(),
@@ -312,6 +313,7 @@ impl AtermCore {
             None,
             false,
             None,
+            osc133_handle,
         ) {
             Ok(id) => {
                 log_stderr!("[aterm-core] spawned: {id}");
@@ -1033,6 +1035,45 @@ pub unsafe extern "C" fn aterm_core_scroll(core: *mut AtermCore, delta: i32) {
             terminal.scroll(delta);
         }
     });
+}
+
+/// Scroll to the next/previous shell prompt (OSC 133 marks).
+/// direction < 0 = previous prompt (up), direction > 0 = next prompt (down).
+/// Returns 1 if scrolled, 0 if no prompt found in that direction.
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_scroll_to_prompt(
+    core: *mut AtermCore,
+    direction: i32,
+) -> i32 {
+    if core.is_null() {
+        return 0;
+    }
+    ffi_catch!(0, {
+        if let Some(ref mut terminal) = (*core).terminal {
+            if terminal.scroll_to_prompt(direction) {
+                1
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    })
+}
+
+/// Returns the number of OSC 133 prompt marks currently stored.
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_prompt_mark_count(core: *const AtermCore) -> u32 {
+    if core.is_null() {
+        return 0;
+    }
+    ffi_catch!(0, {
+        if let Some(ref terminal) = (*core).terminal {
+            terminal.prompt_mark_count() as u32
+        } else {
+            0
+        }
+    })
 }
 
 #[no_mangle]
