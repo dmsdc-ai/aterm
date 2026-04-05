@@ -81,6 +81,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       onChangeWorkspaceCLI: { [weak self] workspaceName, newCli in
         self?.changeWorkspaceCLI(named: workspaceName, to: newCli)
       },
+      onRestartWorkspace: { [weak self] workspaceName in
+        self?.restartWorkspace(named: workspaceName)
+      },
       onAttachExternalSession: { [weak self] sessionID in
         self?.attachExternalSession(sessionID)
       },
@@ -388,8 +391,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   // MARK: - Workspace Persistence
 
   private func saveWorkspaces() {
-    let entries: [[String: Any]] = workspaceOrder.compactMap { id in
-      guard let ws = managedWorkspaces[id] else { return nil }
+    // Build ordered entries from workspaceOrder, then append any orphaned
+    // workspaces in managedWorkspaces that aren't tracked in workspaceOrder.
+    // This ensures dynamically created workspaces are always persisted (#177).
+    var seenIDs = Set<UUID>()
+    var entries: [[String: Any]] = []
+
+    func entryDict(for ws: ManagedWorkspace) -> [String: Any]? {
       let effectiveName =
         ws.name.isEmpty
         ? URL(fileURLWithPath: ws.cwd).lastPathComponent
@@ -405,6 +413,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         "isSystem": ws.isSystem,
         "resumeCommand": ws.launchCommand.bootstrapCommand(customCommand: ws.customCommand, cliArgs: ws.cliArgs) ?? "",
       ] as [String: Any]
+    }
+
+    for id in workspaceOrder {
+      guard let ws = managedWorkspaces[id], let entry = entryDict(for: ws) else { continue }
+      seenIDs.insert(id)
+      entries.append(entry)
+    }
+
+    // Capture orphaned workspaces not in workspaceOrder (defensive — #177)
+    for (id, ws) in managedWorkspaces where !seenIDs.contains(id) {
+      guard let entry = entryDict(for: ws) else { continue }
+      NSLog("[aterm] saveWorkspaces: orphaned workspace '%@' not in workspaceOrder — including", ws.name)
+      entries.append(entry)
     }
     let wrapper: [String: Any] = ["sessions": entries]
     do {
@@ -1284,6 +1305,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       saveWorkspaces()
     }
 
+    // Pre-spawn PTY for non-selected workspaces created mid-session (#177).
+    // Without this, only the launch-time pre-spawn loop covers background init;
+    // dynamically added workspaces would stay unspawned until first switch.
+    if !shouldSelect, window.isVisible {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        guard let self,
+              let ws = self.managedWorkspaces[workspaceID],
+              !ws.terminalView.didSpawnShell else { return }
+        ws.terminalView.preSpawnInBackground()
+      }
+    }
+
     // Delegate MD generation to aigentry-devkit (skip silently if not installed)
     devkitWorkspaceInit(cli: command.rawValue, cwd: cwd, workspaceID: workspaceID)
   }
@@ -1479,6 +1512,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   private func closeWorkspace(named name: String) {
     guard let id = workspaceID(named: name) else { return }
     closeWorkspace(id: id)
+  }
+
+  private func restartWorkspace(named name: String) {
+    guard let id = workspaceID(named: name),
+      let workspace = managedWorkspaces[id]
+    else { return }
+    let cwd = workspace.cwd
+    let wasSelected = workspaceSidebarModel.selectedWorkspaceName == workspace.name
+    let isSystem = workspace.isSystem
+    let command = workspace.launchCommand
+    let customCommand = workspace.customCommand
+    let cliArgs = workspace.cliArgs
+    removeWorkspace(id: id, allowSystem: true)
+    createWorkspace(
+      name: name,
+      command: command,
+      customCommand: customCommand,
+      cliArgs: cliArgs,
+      cwd: cwd,
+      shouldSelect: wasSelected,
+      isSystem: isSystem
+    )
   }
 
   private func changeWorkspaceCLI(named name: String, to newCli: String) {

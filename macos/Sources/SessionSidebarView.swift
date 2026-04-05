@@ -698,12 +698,15 @@ struct SessionSidebarView: View {
     let onRenameWorkspace: (String, String) -> Void
     let onCloseWorkspace: (String) -> Void
     let onChangeWorkspaceCLI: (String, String) -> Void
+    let onRestartWorkspace: (String) -> Void
     let onAttachExternalSession: (String) -> Void
     let onOpenSettings: () -> Void
 
     @StateObject private var taskLoader = TaskQueueLoader()
     @State private var renameTarget: SidebarWorkspace?
     @State private var renameText = ""
+    @State private var selectedWorkspaceIds: Set<String> = []
+    @State private var lastSelectionIndex: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -733,27 +736,60 @@ struct SessionSidebarView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     } else {
-                        ForEach(workspaceModel.workspaces) { workspace in
+                        let orchestrators = workspaceModel.workspaces.enumerated().filter { $0.element.isSystem }
+                        let regulars = workspaceModel.workspaces.enumerated().filter { !$0.element.isSystem }
+
+                        // — Orchestrator section (#181)
+                        if !orchestrators.isEmpty {
+                            HStack(spacing: 5) {
+                                Image(systemName: "tower.broadcast")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundColor(Color(nsColor: AtermTheme.orchestrator))
+                                Text("ORCHESTRATOR")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
+
+                            ForEach(Array(orchestrators), id: \.element.id) { item in
+                                let index = item.offset
+                                let workspace = item.element
+                                OrchestratorRowView(
+                                    workspace: workspace,
+                                    isActive: workspace.id == workspaceModel.selectedWorkspaceName,
+                                    isInMultiSelection: selectedWorkspaceIds.contains(workspace.id),
+                                    onSelect: {
+                                        handleWorkspaceClick(workspace: workspace, index: index)
+                                    }
+                                )
+                                .contextMenu {
+                                    workspaceContextMenu(for: workspace)
+                                }
+                            }
+
+                            Divider()
+                                .overlay(Color(nsColor: AtermTheme.orchestratorBorder))
+                                .padding(.vertical, 8)
+                                .padding(.horizontal, 8)
+                        }
+
+                        // — Regular workspaces
+                        ForEach(Array(regulars), id: \.element.id) { item in
+                            let index = item.offset
+                            let workspace = item.element
                             WorkspaceRowView(
                                 workspace: workspace,
-                                isSelected: workspace.id == workspaceModel.selectedWorkspaceName,
-                                onSelect: { onSelectWorkspace(workspace.id) },
-                                onNew: {
-                                    onBeginWorkspaceCreation(
-                                        WorkspaceCreationRequest(
-                                            preferredCommand: workspace.launchCommand,
-                                            preferredCustomCommand: workspace.customCommand,
-                                            initialDirectory: workspace.cwd
-                                        )
-                                    )
-                                },
-                                onRename: {
-                                    renameTarget = workspace
-                                    renameText = workspace.name
-                                },
-                                onClose: { onCloseWorkspace(workspace.id) },
-                                onChangeCLI: { newCli in onChangeWorkspaceCLI(workspace.id, newCli) }
+                                isActive: workspace.id == workspaceModel.selectedWorkspaceName,
+                                isInMultiSelection: selectedWorkspaceIds.contains(workspace.id),
+                                onSelect: {
+                                    handleWorkspaceClick(workspace: workspace, index: index)
+                                }
                             )
+                            .contextMenu {
+                                workspaceContextMenu(for: workspace)
+                            }
                         }
                     }
 
@@ -904,6 +940,119 @@ struct SessionSidebarView: View {
             .padding(.horizontal, 12)
             .padding(.top, 10)
             .padding(.bottom, 4)
+    }
+
+    // MARK: - Multi-Selection
+
+    private func handleWorkspaceClick(workspace: SidebarWorkspace, index: Int) {
+        let flags = NSEvent.modifierFlags
+        let hasCmd = flags.contains(.command)
+        let hasShift = flags.contains(.shift)
+
+        if hasCmd && hasShift {
+            // Cmd+Shift+click: union range into existing selection
+            if let lastIndex = lastSelectionIndex {
+                let lo = min(lastIndex, index)
+                let hi = max(lastIndex, index)
+                for i in lo...hi where i < workspaceModel.workspaces.count {
+                    selectedWorkspaceIds.insert(workspaceModel.workspaces[i].id)
+                }
+            } else {
+                selectedWorkspaceIds.insert(workspace.id)
+                lastSelectionIndex = index
+            }
+        } else if hasCmd {
+            // Cmd+click: toggle individual
+            if selectedWorkspaceIds.contains(workspace.id) {
+                selectedWorkspaceIds.remove(workspace.id)
+            } else {
+                selectedWorkspaceIds.insert(workspace.id)
+            }
+            lastSelectionIndex = index
+        } else if hasShift {
+            // Shift+click: range select from lastSelectionIndex
+            if let lastIndex = lastSelectionIndex {
+                selectedWorkspaceIds.removeAll()
+                let lo = min(lastIndex, index)
+                let hi = max(lastIndex, index)
+                for i in lo...hi where i < workspaceModel.workspaces.count {
+                    selectedWorkspaceIds.insert(workspaceModel.workspaces[i].id)
+                }
+            } else {
+                selectedWorkspaceIds = [workspace.id]
+                lastSelectionIndex = index
+            }
+        } else {
+            // Plain click: reset to single selection
+            selectedWorkspaceIds = [workspace.id]
+            lastSelectionIndex = index
+        }
+
+        // Always switch terminal to clicked workspace
+        onSelectWorkspace(workspace.id)
+    }
+
+    @ViewBuilder
+    private func workspaceContextMenu(for workspace: SidebarWorkspace) -> some View {
+        let isInSelection = selectedWorkspaceIds.contains(workspace.id) && selectedWorkspaceIds.count > 1
+        let targets = isInSelection
+            ? workspaceModel.workspaces.filter { selectedWorkspaceIds.contains($0.id) }
+            : [workspace]
+        let count = targets.count
+        let nonSystemTargets = targets.filter { !$0.isSystem }
+
+        Button("New Session") {
+            onBeginWorkspaceCreation(
+                WorkspaceCreationRequest(
+                    preferredCommand: workspace.launchCommand,
+                    preferredCustomCommand: workspace.customCommand,
+                    initialDirectory: workspace.cwd
+                )
+            )
+        }
+
+        if !workspace.isSystem {
+            if count == 1 {
+                Button("Rename") {
+                    renameTarget = workspace
+                    renameText = workspace.name
+                }
+            }
+
+            Menu("Change CLI") {
+                ForEach(WorkspaceLaunchCommand.allCases.filter { $0 != .custom }) { command in
+                    Button(command.title) {
+                        for target in nonSystemTargets {
+                            onChangeWorkspaceCLI(target.id, command.rawValue)
+                        }
+                    }
+                    .disabled(count == 1 && command == workspace.launchCommand)
+                }
+            }
+
+            Divider()
+
+            Button(count > 1 ? "Restart Workspaces" : "Restart Workspace") {
+                for target in nonSystemTargets {
+                    onRestartWorkspace(target.id)
+                }
+            }
+
+            Button(count > 1 ? "Close Workspaces" : "Close Workspace", role: .destructive) {
+                for target in nonSystemTargets {
+                    onCloseWorkspace(target.id)
+                }
+                selectedWorkspaceIds.removeAll()
+                lastSelectionIndex = nil
+            }
+
+            Button("Close Other Workspaces", role: .destructive) {
+                let targetIds = Set(targets.map(\.id))
+                for ws in workspaceModel.workspaces where !targetIds.contains(ws.id) && !ws.isSystem {
+                    onCloseWorkspace(ws.id)
+                }
+            }
+        }
     }
 }
 
@@ -1066,12 +1215,9 @@ private struct WorkspaceRenameSheet: View {
 
 struct WorkspaceRowView: View {
     let workspace: SidebarWorkspace
-    let isSelected: Bool
+    let isActive: Bool
+    let isInMultiSelection: Bool
     let onSelect: () -> Void
-    let onNew: () -> Void
-    let onRename: () -> Void
-    let onClose: () -> Void
-    let onChangeCLI: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1123,16 +1269,20 @@ struct WorkspaceRowView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(
-            isSelected
+            isActive
                 ? Color(nsColor: AtermTheme.selectedRowBackground)
-                : Color(nsColor: AtermTheme.secondaryRowBackground)
+                : isInMultiSelection
+                    ? Color(nsColor: AtermTheme.accent).opacity(0.25)
+                    : Color(nsColor: AtermTheme.secondaryRowBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 4)
                 .stroke(
-                    isSelected
+                    isActive
                         ? Color(nsColor: AtermTheme.selectedRowStroke)
-                        : Color(nsColor: AtermTheme.border).opacity(0.35),
+                        : isInMultiSelection
+                            ? Color(nsColor: AtermTheme.accent).opacity(0.35)
+                            : Color(nsColor: AtermTheme.border).opacity(0.35),
                     lineWidth: 1
                 )
         )
@@ -1140,22 +1290,6 @@ struct WorkspaceRowView: View {
         .padding(.horizontal, 4)
         .contentShape(RoundedRectangle(cornerRadius: 4))
         .onTapGesture(perform: onSelect)
-        .contextMenu {
-            Button("New Session", action: onNew)
-            if !workspace.isSystem {
-                Button("Rename", action: onRename)
-                Menu("Change CLI") {
-                    ForEach(WorkspaceLaunchCommand.allCases.filter { $0 != .custom }) { command in
-                        Button(command.title) {
-                            onChangeCLI(command.rawValue)
-                        }
-                        .disabled(command == workspace.launchCommand)
-                    }
-                }
-                Divider()
-                Button("Close", role: .destructive, action: onClose)
-            }
-        }
     }
 
     private var statusColor: Color {
@@ -1173,6 +1307,104 @@ struct WorkspaceRowView: View {
         default:
             return Color(nsColor: AtermTheme.statusWarning)
         }
+    }
+}
+
+// MARK: - Orchestrator Row (#181)
+struct OrchestratorRowView: View {
+    let workspace: SidebarWorkspace
+    let isActive: Bool
+    let isInMultiSelection: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Left accent border — always visible
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Color(nsColor: AtermTheme.orchestrator))
+                .frame(width: 2)
+                .padding(.vertical, 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "tower.broadcast")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: AtermTheme.orchestrator))
+
+                    Text(workspace.name)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                        .lineLimit(1)
+
+                    // CTRL badge
+                    Text("CTRL")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(Color(nsColor: AtermTheme.orchestrator))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color(nsColor: AtermTheme.orchestratorSubtle))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3)
+                                .stroke(Color(nsColor: AtermTheme.orchestratorBorder), lineWidth: 1)
+                        )
+                        .cornerRadius(3)
+
+                    Spacer()
+
+                    if AtermSettings.shared.showStatusEmoji {
+                        Text(workspace.statusEmoji)
+                            .font(.system(size: 11))
+                    } else {
+                        Text(workspace.status)
+                            .font(.system(size: 9))
+                            .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    Text(shortSidebarPath(workspace.cwd))
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                        .lineLimit(1)
+                    Text("·")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                    Text(workspace.foregroundProcessName)
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: AtermTheme.orchestrator).opacity(0.75))
+                        .lineLimit(1)
+                }
+
+                Text(relativeSidebarTime(workspace.createdAt))
+                    .font(.system(size: 9))
+                    .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
+            .padding(.vertical, 7)
+        }
+        .background(
+            isActive
+                ? Color(nsColor: AtermTheme.orchestrator).opacity(0.20)
+                : isInMultiSelection
+                    ? Color(nsColor: AtermTheme.orchestrator).opacity(0.25)
+                    : Color(nsColor: AtermTheme.orchestratorSubtle)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(
+                    isActive
+                        ? Color(nsColor: AtermTheme.orchestrator).opacity(0.45)
+                        : isInMultiSelection
+                            ? Color(nsColor: AtermTheme.orchestrator).opacity(0.35)
+                            : Color(nsColor: AtermTheme.orchestratorBorder),
+                    lineWidth: 1
+                )
+        )
+        .cornerRadius(4)
+        .padding(.horizontal, 4)
+        .contentShape(RoundedRectangle(cornerRadius: 4))
+        .onTapGesture(perform: onSelect)
     }
 }
 

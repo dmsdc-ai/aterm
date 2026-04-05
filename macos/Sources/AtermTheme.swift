@@ -105,6 +105,19 @@ enum AtermTheme {
         light: .atermHex(0xD97706, alpha: 0.34),
         dark: .atermHex(0xD97706, alpha: 0.38)
     )
+    // Orchestrator — indigo accent for isSystem workspaces (#181)
+    static let orchestrator = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5),
+        dark: .atermHex(0x818CF8)
+    )
+    static let orchestratorSubtle = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5, alpha: 0.10),
+        dark: .atermHex(0x818CF8, alpha: 0.12)
+    )
+    static let orchestratorBorder = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5, alpha: 0.25),
+        dark: .atermHex(0x818CF8, alpha: 0.30)
+    )
 
     static func mode(for appearance: NSAppearance?) -> AtermThemeMode {
         AtermThemeMode.resolve(from: appearance)
