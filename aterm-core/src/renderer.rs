@@ -1489,7 +1489,7 @@ impl TerminalGridRenderer {
 
         let total_elapsed = render_start.elapsed();
         if total_elapsed.as_millis() > 8 {
-            log_stderr!(
+            debug_log!(
                 "[perf] build={:.1}ms gpu={:.1}ms total={:.1}ms | instances={} glyph_lookups={} active={} changed={} damaged={}/{} full={}",
                 build_instances_elapsed.as_secs_f64() * 1000.0,
                 gpu_elapsed.as_secs_f64() * 1000.0,
@@ -1692,7 +1692,7 @@ fn log_last_non_empty_line_cells(
         *slot = Some(message.clone());
     }
 
-    log_stderr!("{}", message);
+    debug_log!("{}", message);
 }
 
 fn format_prompt_debug_char(ch: char) -> String {

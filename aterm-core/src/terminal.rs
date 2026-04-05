@@ -161,6 +161,8 @@ pub struct TerminalState {
     prompt_marks: PromptMarkStore,
     /// Pending OSC 133 marks pushed by reader_loop, drained in advance().
     pending_osc133: PendingOsc133,
+    /// Max scrollback capacity (from Config) — used for mark pruning boundary.
+    max_scrollback: usize,
 }
 
 impl TerminalState {
@@ -170,10 +172,12 @@ impl TerminalState {
 
         let listener = AtermEventListener::new();
         let pty_writer = listener.writer.clone();
+        let config = Config::default();
+        let max_scrollback = config.scrolling_history;
 
         Self {
             terminal: Arc::new(Mutex::new(Term::new(
-                Config::default(),
+                config,
                 &TerminalDimensions { columns, rows },
                 listener,
             ))),
@@ -184,6 +188,7 @@ impl TerminalState {
             scroll_offset: 0,
             prompt_marks: PromptMarkStore::new(),
             pending_osc133: Arc::new(Mutex::new(Vec::new())),
+            max_scrollback,
         }
     }
 
@@ -243,7 +248,7 @@ impl TerminalState {
         if let Ok(mut term) = self.terminal.lock() {
             // Capture cursor position before advance for mark shifting
             let old_history = term.grid().history_size();
-            let old_cursor = term.grid().cursor.point.line.0 as usize;
+            let old_cursor = term.grid().cursor.point.line.0.max(0) as usize;
 
             self.parser.advance(&mut *term, feed);
             if was_at_bottom {
@@ -254,7 +259,7 @@ impl TerminalState {
 
             // Process OSC 133 marks: shift existing marks and record new ones
             let new_history = term.grid().history_size();
-            let new_cursor = term.grid().cursor.point.line.0 as usize;
+            let new_cursor = term.grid().cursor.point.line.0.max(0) as usize;
             let screen_lines = term.grid().screen_lines();
 
             let new_total = new_history + new_cursor;
@@ -263,14 +268,14 @@ impl TerminalState {
 
             if new_lines > 0 {
                 self.prompt_marks
-                    .shift_marks(new_lines, new_history + screen_lines);
+                    .shift_marks(new_lines, self.max_scrollback + screen_lines);
             }
 
             if let Ok(mut pending) = self.pending_osc133.lock() {
                 if !pending.is_empty() {
                     let bottom_dist =
                         screen_lines.saturating_sub(1).saturating_sub(new_cursor);
-                    log_stderr!(
+                    debug_log!(
                         "[osc133-debug] processing {} pending marks, bottom_dist={}, total_marks={}",
                         pending.len(),
                         bottom_dist,
@@ -279,7 +284,7 @@ impl TerminalState {
                     for mark in pending.drain(..) {
                         match mark {
                             Osc133Mark::PromptStart => {
-                                log_stderr!("[osc133-debug] PromptStart mark stored at bd={}", bottom_dist);
+                                debug_log!("[osc133-debug] PromptStart mark stored at bd={}", bottom_dist);
                                 self.prompt_marks
                                     .add_mark(bottom_dist, PromptKind::PromptStart);
                             }

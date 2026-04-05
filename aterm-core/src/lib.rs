@@ -8,6 +8,28 @@ macro_rules! log_stderr {
     }};
 }
 
+/// Returns true when debug logging is enabled.
+/// Enabled only by ATERM_DEBUG_LOG=1 (or "true"). Cached at first call.
+pub(crate) fn debug_log_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ATERM_DEBUG_LOG")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Debug-only stderr logging — gated by ATERM_DEBUG_LOG=1.
+/// Use for development diagnostics that should not appear in production npm builds.
+macro_rules! debug_log {
+    ($($arg:tt)*) => {{
+        if $crate::debug_log_enabled() {
+            log_stderr!($($arg)*);
+        }
+    }};
+}
+
 /// Catch panics at FFI boundary — prevents abort from unwinding through extern "C".
 macro_rules! ffi_catch {
     ($default:expr, $body:expr) => {

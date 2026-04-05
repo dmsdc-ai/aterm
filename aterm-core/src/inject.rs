@@ -73,7 +73,7 @@ pub fn detect_osc133(data: &str) -> Vec<Osc133Mark> {
                 .windows(6)
                 .filter(|w| w[0] == 0x1b && w[1] == b']' && w[2] == b'1' && w[3] == b'3' && w[4] == b'3' && w[5] == b';')
                 .count();
-            log_stderr!(
+            debug_log!(
                 "[osc133-debug] detect_osc133: len={}, esc={}, osc_intros={}, osc133_matches={}",
                 len, esc_count, osc_count, osc133_count
             );

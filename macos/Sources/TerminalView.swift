@@ -269,18 +269,18 @@ class TerminalView: NSView, NSTextInputClient {
             switch event.keyCode {
             case 126: // Cmd+Option+Up → scroll to previous prompt
                 let markCount = aterm_core_prompt_mark_count(core)
-                NSLog("[scroll-to-prompt] Cmd+Option+Up pressed, marks=%d", markCount)
+                if ProcessInfo.processInfo.environment["ATERM_DEBUG_LOG"] != nil { NSLog("[scroll-to-prompt] Cmd+Option+Up pressed, marks=%d", markCount) }
                 let scrolled = aterm_core_scroll_to_prompt(core, -1)
-                NSLog("[scroll-to-prompt] scroll_to_prompt(-1) returned %d", scrolled)
+                if ProcessInfo.processInfo.environment["ATERM_DEBUG_LOG"] != nil { NSLog("[scroll-to-prompt] scroll_to_prompt(-1) returned %d", scrolled) }
                 if scrolled != 0 {
                     aterm_core_render(core)
                 }
                 return
             case 125: // Cmd+Option+Down → scroll to next prompt
                 let markCount = aterm_core_prompt_mark_count(core)
-                NSLog("[scroll-to-prompt] Cmd+Option+Down pressed, marks=%d", markCount)
+                if ProcessInfo.processInfo.environment["ATERM_DEBUG_LOG"] != nil { NSLog("[scroll-to-prompt] Cmd+Option+Down pressed, marks=%d", markCount) }
                 let scrolled = aterm_core_scroll_to_prompt(core, 1)
-                NSLog("[scroll-to-prompt] scroll_to_prompt(1) returned %d", scrolled)
+                if ProcessInfo.processInfo.environment["ATERM_DEBUG_LOG"] != nil { NSLog("[scroll-to-prompt] scroll_to_prompt(1) returned %d", scrolled) }
                 if scrolled != 0 {
                     aterm_core_render(core)
                 }

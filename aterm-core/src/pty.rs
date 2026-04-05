@@ -308,7 +308,7 @@ impl PtyManager {
         let reader_restart_count = restart_count.clone();
         let pending_osc133: crate::terminal::PendingOsc133 =
             pending_osc133_handle.unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
-        log_stderr!(
+        debug_log!(
             "[osc133-debug] create: pending_osc133 Arc ptr={:p}, from_terminal={}",
             Arc::as_ptr(&pending_osc133),
             pending_osc133.lock().map(|_| true).unwrap_or(false)
@@ -678,7 +678,7 @@ fn mark_workspace_dead_handles(
 
 const OSC133_ZSH: &str = r#"# aterm OSC 133 shell integration (zsh)
 # Emits semantic prompt markers for reliable inject timing.
-echo "[osc133-debug] aterm-osc133.zsh sourced" >&2
+[ -n "$ATERM_DEBUG_LOG" ] && echo "[osc133-debug] aterm-osc133.zsh sourced" >&2
 _aterm_osc133_precmd() {
     local ret=$?
     printf '\e]133;D;%d\a' "$ret"
@@ -693,7 +693,7 @@ _aterm_osc133_prompt_ready() {
 }
 precmd_functions=(_aterm_osc133_precmd "${precmd_functions[@]}")
 precmd_functions+=(_aterm_osc133_prompt_ready)
-echo "[osc133-debug] precmd registered, precmd_functions=${(j:,:)precmd_functions}" >&2
+[ -n "$ATERM_DEBUG_LOG" ] && echo "[osc133-debug] precmd registered, precmd_functions=${(j:,:)precmd_functions}" >&2
 preexec_functions=(_aterm_osc133_preexec "${preexec_functions[@]}")
 # Emit initial A+B for first prompt
 printf '\e]133;A\a\e]133;B\a'
@@ -735,11 +735,11 @@ ZDOTDIR="$ATERM_ZDOTDIR"
 
 const ZDOTDIR_ZSHRC: &str = r#"# aterm ZDOTDIR wrapper (VS Code pattern) — source user rc then inject OSC 133
 # 1. Source user's .zshrc using saved original path
-echo "[osc133-debug] .zshrc wrapper sourced, ATERM_USER_ZDOTDIR=$ATERM_USER_ZDOTDIR" >&2
+[ -n "$ATERM_DEBUG_LOG" ] && echo "[osc133-debug] .zshrc wrapper sourced, ATERM_USER_ZDOTDIR=$ATERM_USER_ZDOTDIR" >&2
 [[ -f "${ATERM_USER_ZDOTDIR}/.zshrc" ]] && source "${ATERM_USER_ZDOTDIR}/.zshrc"
 # 2. Source OSC 133 shell integration
 _aterm_osc133_path="${ATERM_DATA_ROOT:-$HOME/.aigentry}/shell-integration/aterm-osc133.zsh"
-echo "[osc133-debug] sourcing $_aterm_osc133_path (exists=$([[ -f "$_aterm_osc133_path" ]] && echo yes || echo no))" >&2
+[ -n "$ATERM_DEBUG_LOG" ] && echo "[osc133-debug] sourcing $_aterm_osc133_path (exists=$([[ -f "$_aterm_osc133_path" ]] && echo yes || echo no))" >&2
 source "$_aterm_osc133_path"
 unset _aterm_osc133_path
 # 3. Restore user's ZDOTDIR for the rest of the session
@@ -889,12 +889,17 @@ fn spawn_workspace_process(
     let data_root = crate::session::data_root();
     cmd.env("ATERM_DATA_ROOT", data_root.to_string_lossy().as_ref());
 
+    // Propagate ATERM_DEBUG_LOG to child so shell integration scripts respect it
+    if let Ok(v) = std::env::var("ATERM_DEBUG_LOG") {
+        cmd.env("ATERM_DEBUG_LOG", v);
+    }
+
     // OSC 133 shell integration — only applicable for shell commands (zsh/bash/fish).
     // AI CLIs (claude/codex/gemini) are TUI apps that don't source shell rc files
     // and don't emit OSC 133 sequences. For those, ShellReady uses heuristic
     // prompt detection and inject uses heuristic + force-inject.
     let is_shell = is_shell_command(command);
-    log_stderr!(
+    debug_log!(
         "[osc133-debug] spawn: command={command}, is_shell={is_shell}, is_zsh={}",
         is_zsh_command(command)
     );
@@ -913,7 +918,7 @@ fn spawn_workspace_process(
                     cmd.env("ATERM_ORIGINAL_ZDOTDIR", &original);
                 }
                 let zdotdir = base.join("zsh");
-                log_stderr!("[osc133-debug] ZDOTDIR set to {}", zdotdir.display());
+                debug_log!("[osc133-debug] ZDOTDIR set to {}", zdotdir.display());
                 cmd.env("ZDOTDIR", zdotdir.to_string_lossy().as_ref());
             } else if is_bash_command(command) {
                 // BASH_ENV sources integration for non-interactive; --rcfile for interactive
@@ -1272,7 +1277,7 @@ fn reader_loop(
                     let raw = &buf[..n.min(256)];
                     let has_esc_bracket = raw.windows(2).any(|w| w[0] == 0x1b && w[1] == b']');
                     let hex: String = raw.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    log_stderr!(
+                    debug_log!(
                         "[osc133-debug] first PTY output: {} bytes, has_osc_intro={}, hex(first 64)={}",
                         n, has_esc_bracket, hex
                     );
@@ -1281,7 +1286,7 @@ fn reader_loop(
                 // Log any read that contains ESC ] (potential OSC sequence)
                 if buf[..n].windows(2).any(|w| w[0] == 0x1b && w[1] == b']') {
                     let hex: String = buf[..n.min(128)].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-                    log_stderr!(
+                    debug_log!(
                         "[osc133-debug] raw ESC] in PTY read: {} bytes, hex={}",
                         n, hex
                     );
@@ -1346,7 +1351,7 @@ fn reader_loop(
 
                 // Push marks to pending queue for TerminalState to resolve positions
                 if !osc_marks.is_empty() {
-                    log_stderr!(
+                    debug_log!(
                         "[osc133-debug] reader_loop detected {} marks: {:?}",
                         osc_marks.len(),
                         osc_marks
@@ -1354,7 +1359,7 @@ fn reader_loop(
                     if let Ok(mut pending) = pending_osc133.lock() {
                         let before = pending.len();
                         pending.extend_from_slice(&osc_marks);
-                        log_stderr!(
+                        debug_log!(
                             "[osc133-debug] pending queue: {} -> {}",
                             before,
                             pending.len()

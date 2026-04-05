@@ -357,7 +357,7 @@ impl GlyphCache {
         };
         unsafe { aterm_coretext_free_bitmap(result.bitmap) };
 
-        log_stderr!(
+        debug_log!(
             "[aterm] Core Text fallback: U+{:04X} '{}' → {}x{}",
             codepoint, ch, result.width, result.height
         );
@@ -476,13 +476,13 @@ fn log_special_glyph_source(ch: char, font_name: &str, source: &str) {
     static REPORTED_PLAN_GLYPH: AtomicBool = AtomicBool::new(false);
 
     if ch == '❯' && !REPORTED_PROMPT_GLYPH.swap(true, Ordering::Relaxed) {
-        log_stderr!("[aterm] glyph source for U+276F '❯': {source} font={font_name}");
+        debug_log!("[aterm] glyph source for U+276F '❯': {source} font={font_name}");
     }
     if ch == '⏵' && !REPORTED_BYPASS_GLYPH.swap(true, Ordering::Relaxed) {
-        log_stderr!("[aterm] glyph source for U+23F5 '⏵': {source} font={font_name}");
+        debug_log!("[aterm] glyph source for U+23F5 '⏵': {source} font={font_name}");
     }
     if ch == '⏸' && !REPORTED_PLAN_GLYPH.swap(true, Ordering::Relaxed) {
-        log_stderr!("[aterm] glyph source for U+23F8 '⏸': {source} font={font_name}");
+        debug_log!("[aterm] glyph source for U+23F8 '⏸': {source} font={font_name}");
     }
 }
 
