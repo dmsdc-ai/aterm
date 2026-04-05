@@ -142,6 +142,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       aterm_sync_telepty()
     }
     refreshWorkspaceProcesses()
+
+    // Background pre-spawn: stagger PTY init for non-selected workspaces
+    // to eliminate delay on first session switch (#177)
+    if restoredCount > 1 {
+      var staggerIndex = 0
+      for wsID in workspaceOrder {
+        guard let ws = managedWorkspaces[wsID],
+              !ws.terminalView.didSpawnShell else { continue }
+        staggerIndex += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(staggerIndex) * 0.3) { [weak self] in
+          guard let self, let ws = self.managedWorkspaces[wsID] else { return }
+          guard !ws.terminalView.didSpawnShell else { return }
+          ws.terminalView.preSpawnInBackground()
+          if !ws.terminalView.didSpawnShell {
+            NSLog("[aterm] background pre-spawn failed for '%@'", ws.name)
+          }
+        }
+      }
+      if staggerIndex > 0 {
+        NSLog("[aterm] background pre-spawn: %d workspaces queued (300ms stagger)", staggerIndex)
+      }
+    }
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

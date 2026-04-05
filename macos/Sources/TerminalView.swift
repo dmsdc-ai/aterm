@@ -19,6 +19,7 @@ class TerminalView: NSView, NSTextInputClient {
     private var inputContext_: NSTextInputContext?
     private var hasInitializedCore = false
     private var shellSpawned = false
+    private var backgroundSpawnAllowed = false
     private var lastAppliedThemeMode: AtermThemeMode?
     private var isDraggingSelection = false
     private var dragStartGridPoint: (col: UInt32, row: Int32)?
@@ -602,7 +603,7 @@ class TerminalView: NSView, NSTextInputClient {
 
     private func spawnShellIfNeeded() {
         guard !shellSpawned, let core = core else { return }
-        guard hasInitializedCore, hasObservedLayoutBounds, window != nil, !isHidden else { return }
+        guard hasInitializedCore, hasObservedLayoutBounds, window != nil, (!isHidden || backgroundSpawnAllowed) else { return }
 
         let backingSize = convertToBacking(bounds).size
         guard backingSize.width > 0, backingSize.height > 0 else { return }
@@ -675,6 +676,15 @@ class TerminalView: NSView, NSTextInputClient {
         needsLayout = true
         layoutSubtreeIfNeeded()
         spawnShellIfNeeded()
+    }
+
+    /// Pre-spawn PTY for background workspaces to eliminate delay on first switch (#177).
+    /// Bypasses the isHidden guard in spawnShellIfNeeded().
+    func preSpawnInBackground() {
+        guard !shellSpawned else { return }
+        backgroundSpawnAllowed = true
+        defer { backgroundSpawnAllowed = false }
+        retrySpawnIfNeeded()
     }
 
     private func currentBackingScaleFactor() -> CGFloat {
