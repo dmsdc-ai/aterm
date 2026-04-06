@@ -463,23 +463,30 @@ class TerminalView: NSView, NSTextInputClient {
         guard let core = core else { return nil }
         let location = convert(event.locationInWindow, from: nil)
         
-        // Convert to backing pixels
-        let backingPoint = convertToBacking(NSRect(origin: location, size: .zero)).origin
+        // Convert to backing pixels — bypass convertToBacking (CAMetalLayer transform contaminates all overloads)
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         let backingSize = convertToBacking(bounds).size
-        
-        let x = Float(backingPoint.x)
-        let y = Float(backingPoint.y)
+
+        let x = Float(location.x * scale)
+        let y = Float(location.y * scale)
         
         var cw: Float = 0
         var ch: Float = 0
         aterm_core_cell_size(core, &cw, &ch)
         
         guard cw > 0 && ch > 0 else { return nil }
-        
+
+        // Get actual grid padding from renderer
+        var padX: Float = 0
+        var padY: Float = 0
+        aterm_core_grid_padding(core, Float(backingSize.width), Float(backingSize.height), &padX, &padY)
+
         // Clamp to grid
-        let col = max(0, Int32((x - 4.0) / cw))
-        let row = max(0, Int32((y - 4.0) / ch))
-        
+        let col = max(0, Int32((x - padX) / cw))
+        let row = max(0, Int32((y - padY) / ch))
+
+        NSLog("[selection-debug] mouse backing: x=%.1f y=%.1f, pad: x=%.1f y=%.1f, cell: w=%.1f h=%.1f, grid: col=%d row=%d, bounds: w=%.1f h=%.1f", x, y, padX, padY, cw, ch, col, row, Float(backingSize.width), Float(backingSize.height))
+
         return (col: UInt32(col), row: row)
     }
 
@@ -493,6 +500,9 @@ class TerminalView: NSView, NSTextInputClient {
         aterm_core_selection_clear(core)
         isDraggingSelection = false
         dragStartGridPoint = gridPoint(for: event)
+        if let pt = dragStartGridPoint {
+            NSLog("[selection-debug] mouseDown → col=%d row=%d", pt.col, pt.row)
+        }
         aterm_core_render(core)
     }
 
@@ -506,6 +516,7 @@ class TerminalView: NSView, NSTextInputClient {
         }
 
         if isDraggingSelection, let pt = gridPoint(for: event) {
+            NSLog("[selection-debug] mouseDragged → col=%d row=%d", pt.col, pt.row)
             aterm_core_selection_update(core, pt.col, pt.row, 0)
             aterm_core_render(core)
         }
@@ -513,7 +524,7 @@ class TerminalView: NSView, NSTextInputClient {
         // Auto-scroll when dragging near edges
         lastDragEvent = event
         let location = convert(event.locationInWindow, from: nil)
-        let edgeThreshold: CGFloat = 20.0
+        let edgeThreshold: CGFloat = 5.0
 
         if location.y < edgeThreshold {
             // Near top edge (isFlipped: y=0 is top) → scroll back (up)
@@ -536,7 +547,7 @@ class TerminalView: NSView, NSTextInputClient {
         if autoScrollDirection == direction, autoScrollTimer != nil { return }
         stopAutoScroll()
         autoScrollDirection = direction
-        autoScrollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        autoScrollTimer = Timer.scheduledTimer(withTimeInterval: 0.015, repeats: true) { [weak self] _ in
             self?.performAutoScroll()
         }
     }
@@ -553,7 +564,22 @@ class TerminalView: NSView, NSTextInputClient {
             stopAutoScroll()
             return
         }
-        aterm_core_scroll(core, autoScrollDirection)
+        // Calculate scroll speed proportional to distance from edge (Alacritty: delta / 20px step)
+        var scrollLines = autoScrollDirection  // base: 1 line
+        if let event = lastDragEvent {
+            let location = convert(event.locationInWindow, from: nil)
+            let scrollStep: CGFloat = 20.0  // Alacritty SELECTION_SCROLLING_STEP
+            if autoScrollDirection > 0 {
+                // Scrolling up — mouse is near top (y < 5)
+                let overshoot = max(0, 5.0 - location.y)
+                scrollLines = max(1, Int32(overshoot / scrollStep) + 1)
+            } else {
+                // Scrolling down — mouse is near bottom
+                let overshoot = max(0, location.y - (bounds.height - 5.0))
+                scrollLines = -max(1, Int32(overshoot / scrollStep) + 1)
+            }
+        }
+        aterm_core_scroll(core, scrollLines)
         // Update selection endpoint to match the edge row
         if let event = lastDragEvent, let pt = gridPoint(for: event) {
             aterm_core_selection_update(core, pt.col, pt.row, 0)

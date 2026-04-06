@@ -990,6 +990,7 @@ impl DamageTracker {
                 false
             }
         };
+        let full_damage = full_damage || term.selection.is_some();
         self.apply_damage_rows(rows, full_damage, &damaged_lines);
         term.reset_damage();
     }

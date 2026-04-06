@@ -64,6 +64,7 @@ int32_t aterm_core_try_render(AtermCore* core);
 void aterm_core_resize(AtermCore* core, uint32_t width, uint32_t height);
 void aterm_core_grid_size(const AtermCore* core, float width, float height, uint16_t* out_cols, uint16_t* out_rows);
 void aterm_core_cell_size(const AtermCore* core, float* out_width, float* out_height);
+void aterm_core_grid_padding(const AtermCore* core, float width, float height, float* out_pad_x, float* out_pad_y);
 
 // Dirty state
 int32_t aterm_core_take_dirty(AtermCore* core);

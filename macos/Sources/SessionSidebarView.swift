@@ -762,11 +762,11 @@ struct SessionSidebarView: View {
                                     isInMultiSelection: selectedWorkspaceIds.contains(workspace.id),
                                     onSelect: {
                                         handleWorkspaceClick(workspace: workspace, index: index)
+                                    },
+                                    contextMenuContent: {
+                                        workspaceContextMenu(for: workspace)
                                     }
                                 )
-                                .contextMenu {
-                                    workspaceContextMenu(for: workspace)
-                                }
                             }
 
                             Divider()
@@ -785,11 +785,11 @@ struct SessionSidebarView: View {
                                 isInMultiSelection: selectedWorkspaceIds.contains(workspace.id),
                                 onSelect: {
                                     handleWorkspaceClick(workspace: workspace, index: index)
+                                },
+                                contextMenuContent: {
+                                    workspaceContextMenu(for: workspace)
                                 }
                             )
-                            .contextMenu {
-                                workspaceContextMenu(for: workspace)
-                            }
                         }
                     }
 
@@ -1213,11 +1213,12 @@ private struct WorkspaceRenameSheet: View {
     }
 }
 
-struct WorkspaceRowView: View {
+struct WorkspaceRowView<MenuContent: View>: View {
     let workspace: SidebarWorkspace
     let isActive: Bool
     let isInMultiSelection: Bool
     let onSelect: () -> Void
+    @ViewBuilder let contextMenuContent: () -> MenuContent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1290,6 +1291,7 @@ struct WorkspaceRowView: View {
         .padding(.horizontal, 4)
         .contentShape(RoundedRectangle(cornerRadius: 4))
         .onTapGesture(perform: onSelect)
+        .contextMenu { contextMenuContent() }
     }
 
     private var statusColor: Color {
@@ -1311,11 +1313,12 @@ struct WorkspaceRowView: View {
 }
 
 // MARK: - Orchestrator Row (#181)
-struct OrchestratorRowView: View {
+struct OrchestratorRowView<MenuContent: View>: View {
     let workspace: SidebarWorkspace
     let isActive: Bool
     let isInMultiSelection: Bool
     let onSelect: () -> Void
+    @ViewBuilder let contextMenuContent: () -> MenuContent
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1405,6 +1408,7 @@ struct OrchestratorRowView: View {
         .padding(.horizontal, 4)
         .contentShape(RoundedRectangle(cornerRadius: 4))
         .onTapGesture(perform: onSelect)
+        .contextMenu { contextMenuContent() }
     }
 }
 

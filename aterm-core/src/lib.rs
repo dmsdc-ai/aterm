@@ -838,6 +838,30 @@ pub unsafe extern "C" fn aterm_core_cell_size(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn aterm_core_grid_padding(
+    core: *const AtermCore,
+    width: f32,
+    height: f32,
+    out_pad_x: *mut f32,
+    out_pad_y: *mut f32,
+) {
+    if core.is_null() {
+        return;
+    }
+    ffi_catch!({
+        if let Some(ref renderer) = (*core).renderer {
+            let (pad_x, pad_y) = renderer.grid_padding(width, height);
+            if !out_pad_x.is_null() {
+                *out_pad_x = pad_x;
+            }
+            if !out_pad_y.is_null() {
+                *out_pad_y = pad_y;
+            }
+        }
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn aterm_core_take_dirty(core: *mut AtermCore) -> i32 {
     if core.is_null() {
         return 0;

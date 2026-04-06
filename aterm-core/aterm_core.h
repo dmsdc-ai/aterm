@@ -158,6 +158,8 @@ void aterm_core_grid_size(const struct AtermCore *core,
 
 void aterm_core_cell_size(const struct AtermCore *core, float *out_width, float *out_height);
 
+void aterm_core_grid_padding(const struct AtermCore *core, float width, float height, float *out_pad_x, float *out_pad_y);
+
 int32_t aterm_core_take_dirty(struct AtermCore *core);
 
 void aterm_core_set_dirty_callback(struct AtermCore *core, void (*callback)(void*), void *userdata);
