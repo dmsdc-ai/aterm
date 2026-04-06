@@ -873,4 +873,64 @@ class TerminalView: NSView, NSTextInputClient {
             break
         }
     }
+
+    // MARK: - Context Menu
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+
+        // Copy — only if there's a selection
+        if let core = core, let textPtr = aterm_core_selection_text(core) {
+            let text = String(cString: textPtr)
+            aterm_core_free_string(textPtr)
+            if !text.isEmpty {
+                let copyItem = NSMenuItem(title: "Copy", action: #selector(contextCopy(_:)), keyEquivalent: "c")
+                copyItem.keyEquivalentModifierMask = .command
+                menu.addItem(copyItem)
+            }
+        }
+
+        // Paste
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(contextPaste(_:)), keyEquivalent: "v")
+        pasteItem.keyEquivalentModifierMask = .command
+        menu.addItem(pasteItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Select All
+        let selectAllItem = NSMenuItem(title: "Select All", action: #selector(contextSelectAll(_:)), keyEquivalent: "a")
+        selectAllItem.keyEquivalentModifierMask = .command
+        menu.addItem(selectAllItem)
+
+        return menu
+    }
+
+    @objc private func contextCopy(_ sender: Any?) {
+        guard let core = core else { return }
+        if let textPtr = aterm_core_selection_text(core) {
+            let text = String(cString: textPtr)
+            aterm_core_free_string(textPtr)
+            if !text.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                aterm_core_selection_clear(core)
+                aterm_core_render(core)
+            }
+        }
+    }
+
+    @objc private func contextPaste(_ sender: Any?) {
+        guard let core = core else { return }
+        if let text = NSPasteboard.general.string(forType: .string) {
+            text.withCString { ptr in
+                aterm_core_write_pty(core, ptr, text.utf8.count)
+            }
+        }
+    }
+
+    @objc private func contextSelectAll(_ sender: Any?) {
+        guard let core = core else { return }
+        aterm_core_select_all(core)
+        aterm_core_render(core)
+    }
 }

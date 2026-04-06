@@ -626,6 +626,28 @@ impl AtermCore {
         }
         None
     }
+
+    fn select_all(&mut self) {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+        use alacritty_terminal::selection::{Selection, SelectionType};
+
+        if let Some(ref mut terminal) = self.terminal {
+            if let Ok(mut term) = terminal.terminal().lock() {
+                let history = term.grid().history_size() as i32;
+                let screen_lines = term.grid().screen_lines();
+                let cols = term.grid().columns();
+
+                let start = Point::new(Line(-(history)), Column(0));
+                let end = Point::new(Line(screen_lines as i32 - 1), Column(cols.saturating_sub(1)));
+
+                let mut sel = Selection::new(SelectionType::Simple, start, alacritty_terminal::index::Side::Left);
+                sel.update(end, alacritty_terminal::index::Side::Right);
+                term.selection = Some(sel);
+            }
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
 }
 
 // -- C-FFI Functions --
@@ -1171,6 +1193,14 @@ pub unsafe extern "C" fn aterm_core_selection_text(core: *const AtermCore) -> *m
             None => std::ptr::null_mut(),
         }
     })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aterm_core_select_all(core: *mut AtermCore) {
+    if core.is_null() {
+        return;
+    }
+    ffi_catch!((*core).select_all());
 }
 
 /// Check if the visible terminal screen contains a text pattern. Returns 1 if found, 0 otherwise.

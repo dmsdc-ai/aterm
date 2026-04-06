@@ -90,6 +90,7 @@ void aterm_core_selection_start(AtermCore* core, uint32_t col, int32_t line, uin
 void aterm_core_selection_update(AtermCore* core, uint32_t col, int32_t line, uint8_t side);
 void aterm_core_selection_clear(AtermCore* core);
 char* aterm_core_selection_text(const AtermCore* core);
+void aterm_core_select_all(AtermCore* core);
 
 // Screen text search
 int32_t aterm_core_screen_contains(const AtermCore* core, const char* pattern);
