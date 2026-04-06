@@ -261,8 +261,10 @@ impl PtyManager {
             return Err(format!("Workspace '{}' already exists", id));
         }
 
-        let shell = command
-            .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()));
+        let shell = command.unwrap_or_else(|| {
+            read_default_shell()
+                .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()))
+        });
         let launch_args = args.unwrap_or_default();
         let launch_args = crate::session::ensure_codex_resume_last_arg(&shell, &launch_args);
         let auto_restart = is_restartable_cli(&shell, &launch_args);
@@ -2097,6 +2099,21 @@ mod tests {
         // Pattern should still be detectable after buffer trimming
         let fired = detector.feed("Do you trust");
         assert!(fired, "Should detect pattern after UTF-8 boundary trim");
+    }
+}
+
+/// Read the default shell from ~/.aigentry/config/aterm.json (shell.default).
+/// Returns None if config doesn't exist or shell.default is not set.
+/// Used by GAP 5: aterm.json shell.default takes priority over $SHELL env var.
+fn read_default_shell() -> Option<String> {
+    let config_path = crate::session::data_root().join("config/aterm.json");
+    let data = std::fs::read_to_string(&config_path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let shell = config.get("shell")?.get("default")?.as_str()?;
+    if shell.is_empty() {
+        None
+    } else {
+        Some(shell.to_string())
     }
 }
 

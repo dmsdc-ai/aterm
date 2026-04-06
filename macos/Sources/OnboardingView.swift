@@ -2,7 +2,8 @@ import SwiftUI
 
 struct OnboardingView: View {
     @Binding var isPresented: Bool
-    let cliStatus: CliStatus
+    @State private var cliStatus: CliStatus
+    let onRefreshClis: () -> CliStatus
     let onComplete: (OnboardingResult) -> Void
 
     @State private var currentStep = 0
@@ -14,9 +15,10 @@ struct OnboardingView: View {
 
     private let totalSteps = 4
 
-    init(isPresented: Binding<Bool>, cliStatus: CliStatus, onComplete: @escaping (OnboardingResult) -> Void) {
+    init(isPresented: Binding<Bool>, cliStatus: CliStatus, onRefreshClis: @escaping () -> CliStatus, onComplete: @escaping (OnboardingResult) -> Void) {
         self._isPresented = isPresented
-        self.cliStatus = cliStatus
+        self._cliStatus = State(initialValue: cliStatus)
+        self.onRefreshClis = onRefreshClis
         self.onComplete = onComplete
         let initialCLI: String
         if cliStatus.claude {
@@ -154,9 +156,24 @@ struct OnboardingView: View {
 
     private var stepChooseCLI: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Choose your Orchestrator CLI")
-                .font(.system(size: 20, weight: .bold))
-                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+            HStack {
+                Text("Choose your Orchestrator CLI")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+                Spacer()
+                Button(action: {
+                    cliStatus = onRefreshClis()
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11))
+                        Text("Refresh")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(Color(nsColor: AtermTheme.accent))
+                }
+                .buttonStyle(.plain)
+            }
 
             Text("Which AI CLI should power your Orchestrator?")
                 .font(.system(size: 13))
@@ -361,7 +378,12 @@ struct OnboardingView: View {
 
     private func advance() {
         if currentStep < totalSteps - 1 {
-            withAnimation { currentStep += 1 }
+            let nextStep = currentStep + 1
+            // GAP 6: Re-detect CLIs when entering the CLI selection step
+            if nextStep == 2 {
+                cliStatus = onRefreshClis()
+            }
+            withAnimation { currentStep = nextStep }
         } else {
             complete()
         }

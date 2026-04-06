@@ -721,6 +721,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     config["tailscale"] = tailscale
     var orchestrator = config["orchestrator"] as? [String: Any] ?? [:]
     orchestrator["cli"] = result.orchestratorCLI
+    // GAP 4: Save orchestrator name so Rust read_orchestrator_session_name() can find it
+    orchestrator["name"] = result.orchestratorCLI != "none" ? "orchestrator" : "main"
     let orchestratorDir = result.orchestratorCWD.isEmpty
       ? AtermSettings.shared.aigentryRoot + "/orchestrator"
       : result.orchestratorCWD
@@ -758,6 +760,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
       ),
       cliStatus: cliStatus,
+      onRefreshClis: { [weak self] in
+        self?.detectClis() ?? CliStatus(claude: false, codex: false, gemini: false)
+      },
       onComplete: { [weak self] result in
         self?.saveOnboardingResult(result)
         if self?.managedWorkspaces.isEmpty ?? true {
@@ -1322,18 +1327,109 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func devkitWorkspaceInit(cli: String, cwd: String, workspaceID: UUID) {
+    // GAP 4: Read orchestrator session name from config for hook routing
+    let config = readConfig()
+    let orchestratorName = (config["orchestrator"] as? [String: Any])?["name"] as? String
+
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    task.arguments = ["aigentry-devkit", "workspace-init", "--cli", cli, "--cwd", cwd]
-    task.standardOutput = FileHandle.nullDevice
+    var arguments = ["aigentry-devkit", "workspace-init", "--cli", cli, "--cwd", cwd]
+    // GAP 4: Pass orchestrator session name so devkit can configure hooks correctly
+    if let orchName = orchestratorName, !orchName.isEmpty {
+      arguments += ["--orchestrator-session", orchName]
+    }
+    task.arguments = arguments
+
+    // GAP 2: Capture stdout to parse INJECT: lines (was FileHandle.nullDevice)
+    let stdoutPipe = Pipe()
+    task.standardOutput = stdoutPipe
     task.standardError = FileHandle.nullDevice
-    DispatchQueue.global(qos: .utility).async {
+
+    DispatchQueue.global(qos: .utility).async { [weak self] in
       do {
         try task.run()
         task.waitUntilExit()
+
+        // GAP 2: Parse stdout for INJECT: lines and forward to workspace PTY
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        if let output = String(data: stdoutData, encoding: .utf8) {
+          let injectLines = output.components(separatedBy: "\n")
+            .filter { $0.hasPrefix("INJECT:") }
+          if !injectLines.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+              guard let self,
+                    let workspace = self.managedWorkspaces[workspaceID],
+                    let core = workspace.terminalView.corePointer else { return }
+              for line in injectLines {
+                let payload = String(line.dropFirst("INJECT:".count))
+                  .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !payload.isEmpty {
+                  let typed = payload + "\r"
+                  typed.withCString { ptr in
+                    aterm_core_write_pty(core, ptr, typed.utf8.count)
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // GAP 3: Log MCP registration status
+        let exitCode = task.terminationStatus
+        if exitCode == 0 {
+          NSLog("[aterm] devkit workspace-init succeeded for %@ — MCP registered", cwd)
+        } else {
+          NSLog("[aterm] devkit workspace-init exited with %d for %@ — MCP may not be registered", exitCode, cwd)
+          if exitCode == 127 {
+            NSLog("[aterm] devkit not installed (exit 127) — generating fallback CLAUDE.md/AGENTS.md for %@", cwd)
+            self?.generateFallbackMDFiles(cli: cli, cwd: cwd)
+          }
+        }
       } catch {
-        // aigentry-devkit not installed — standalone mode, skip silently
+        // GAP 1: devkit not installed — generate fallback CLAUDE.md/AGENTS.md
+        NSLog("[aterm] aigentry-devkit not installed — generating fallback CLAUDE.md/AGENTS.md for %@", cwd)
+        // GAP 3: Log MCP not registered
+        NSLog("[aterm] MCP not registered (devkit not installed)")
+        self?.generateFallbackMDFiles(cli: cli, cwd: cwd)
       }
+    }
+  }
+
+  /// GAP 1: Generate minimal CLAUDE.md and AGENTS.md when aigentry-devkit is not installed.
+  private func generateFallbackMDFiles(cli: String, cwd: String) {
+    let fm = FileManager.default
+    let projectName = (cwd as NSString).lastPathComponent
+
+    let claudePath = (cwd as NSString).appendingPathComponent("CLAUDE.md")
+    if !fm.fileExists(atPath: claudePath) {
+      let content = """
+        # \(projectName)
+
+        ## Session
+        - CLI: \(cli)
+        - Working Directory: \(cwd)
+
+        ## Guidelines
+        - Follow project conventions
+        - Write clean, tested code
+        """.replacingOccurrences(of: "        ", with: "")
+      try? content.write(toFile: claudePath, atomically: true, encoding: .utf8)
+      NSLog("[aterm] generated fallback CLAUDE.md at %@", claudePath)
+    }
+
+    let agentsPath = (cwd as NSString).appendingPathComponent("AGENTS.md")
+    if !fm.fileExists(atPath: agentsPath) {
+      let content = """
+        # \(projectName)
+
+        ## Role
+        AI development workspace managed by aterm.
+
+        ## Directory
+        \(cwd)
+        """.replacingOccurrences(of: "        ", with: "")
+      try? content.write(toFile: agentsPath, atomically: true, encoding: .utf8)
+      NSLog("[aterm] generated fallback AGENTS.md at %@", agentsPath)
     }
   }
 
