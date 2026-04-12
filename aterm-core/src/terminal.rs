@@ -6,16 +6,19 @@ use alacritty_terminal::{
 };
 use std::collections::VecDeque;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::inject::Osc133Mark;
+use crate::sync::FairMutex;
 
 pub type PtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 pub type SharedPtyWriter = Arc<Mutex<Option<PtyWriter>>>;
-pub type SharedTerminal = Arc<Mutex<Term<AtermEventListener>>>;
+pub type SharedTerminal = Arc<FairMutex<Term<AtermEventListener>>>;
 
-const SCROLLBACK_LINES: usize = 10000;
+const SCROLLBACK_LINES: usize = 2000;
 const MAX_PROMPT_MARKS: usize = 2000;
 
 // --- OSC 133 prompt mark store ---
@@ -56,7 +59,7 @@ impl PromptMarkStore {
     }
 
     /// Shift all marks upward when new lines are produced.
-    fn shift_marks(&mut self, new_lines: usize, max_distance: usize) {
+    pub fn shift_marks(&mut self, new_lines: usize, max_distance: usize) {
         if new_lines == 0 {
             return;
         }
@@ -74,9 +77,7 @@ impl PromptMarkStore {
     }
 
     /// Record a new mark at the given distance from the buffer bottom.
-    fn add_mark(&mut self, bottom_distance: usize, kind: PromptKind) {
-        // Insert in sorted position (marks are sorted ascending by bottom_distance,
-        // but new marks almost always go to the back since they're near the bottom)
+    pub fn add_mark(&mut self, bottom_distance: usize, kind: PromptKind) {
         self.marks.push_back(PromptMarkEntry {
             bottom_distance,
             kind,
@@ -88,7 +89,6 @@ impl PromptMarkStore {
     }
 
     /// Find the next PromptStart mark ABOVE the current view top.
-    /// Returns the mark's bottom_distance.
     fn find_prompt_up(&self, current_top_bd: usize) -> Option<usize> {
         self.marks
             .iter()
@@ -98,7 +98,6 @@ impl PromptMarkStore {
     }
 
     /// Find the next PromptStart mark BELOW the current view top.
-    /// Returns the mark's bottom_distance.
     fn find_prompt_down(&self, current_top_bd: usize) -> Option<usize> {
         self.marks
             .iter()
@@ -120,12 +119,64 @@ pub type PendingOsc133 = Arc<Mutex<Vec<Osc133Mark>>>;
 #[derive(Clone)]
 pub struct AtermEventListener {
     writer: SharedPtyWriter,
+    /// Terminal foreground color [R, G, B] for OSC 10 query response (#196).
+    fg_color: Arc<Mutex<[u8; 3]>>,
+    /// Terminal background color [R, G, B] for OSC 11 query response (#196).
+    bg_color: Arc<Mutex<[u8; 3]>>,
+    /// Buffered responses for when writer is None (Fix 2: writer race).
+    /// Flushed when set_pty_writer connects the writer.
+    pending_responses: Arc<Mutex<Vec<String>>>,
 }
 
 impl AtermEventListener {
     pub fn new() -> Self {
         Self {
             writer: Arc::new(Mutex::new(None)),
+            // Dark theme defaults (Tokyo Night Storm)
+            fg_color: Arc::new(Mutex::new([0xc0, 0xca, 0xf5])),
+            bg_color: Arc::new(Mutex::new([0x1a, 0x1b, 0x26])),
+            pending_responses: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Update terminal colors for OSC 10/11 responses (call on theme change).
+    pub fn set_colors(&self, fg: [u8; 3], bg: [u8; 3]) {
+        if let Ok(mut f) = self.fg_color.lock() {
+            *f = fg;
+        }
+        if let Ok(mut b) = self.bg_color.lock() {
+            *b = bg;
+        }
+    }
+
+    pub fn fg_color_arc(&self) -> Arc<Mutex<[u8; 3]>> {
+        self.fg_color.clone()
+    }
+
+    pub fn bg_color_arc(&self) -> Arc<Mutex<[u8; 3]>> {
+        self.bg_color.clone()
+    }
+
+    pub fn pending_responses_arc(&self) -> Arc<Mutex<Vec<String>>> {
+        self.pending_responses.clone()
+    }
+
+    /// Write text to PTY, or buffer if writer not yet connected.
+    fn write_or_buffer(&self, text: &str) {
+        if let Ok(guard) = self.writer.lock() {
+            if let Some(ref writer) = *guard {
+                if let Ok(mut w) = writer.lock() {
+                    let _ = w.write_all(text.as_bytes());
+                    let _ = w.flush();
+                    debug_log!("[osc-color] wrote to PTY ({} bytes): {:?}", text.len(), &text[..text.len().min(60)]);
+                    return;
+                }
+            }
+        }
+        // Writer not connected yet — buffer for flush on set_pty_writer
+        debug_log!("[osc-color] writer not connected — buffering ({} bytes)", text.len());
+        if let Ok(mut pending) = self.pending_responses.lock() {
+            pending.push(text.to_string());
         }
     }
 }
@@ -134,86 +185,90 @@ impl EventListener for AtermEventListener {
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => {
-                if let Ok(guard) = self.writer.lock() {
-                    if let Some(ref writer) = *guard {
-                        if let Ok(mut w) = writer.lock() {
-                            let _ = w.write_all(text.as_bytes());
-                            let _ = w.flush();
-                        }
-                    }
+                // Override DA1: report VT220 + ANSI color instead of VT102.
+                // Gemini CLI uses DA1 to detect terminal capabilities.
+                if text == "\x1b[?6c" {
+                    self.write_or_buffer("\x1b[?62;22c");
+                } else {
+                    self.write_or_buffer(&text);
                 }
             }
-            // Other events (Title, Bell, Clipboard, etc.) are not critical for
-            // fixing the rendering residue. Can be handled later as needed.
+            Event::ColorRequest(index, formatter) => {
+                debug_log!("[osc-color] ColorRequest received: index={}", index);
+                let rgb = match index {
+                    256 => self
+                        .fg_color
+                        .lock()
+                        .ok()
+                        .map(|c| ansi::Rgb { r: c[0], g: c[1], b: c[2] }),
+                    257 => self
+                        .bg_color
+                        .lock()
+                        .ok()
+                        .map(|c| ansi::Rgb { r: c[0], g: c[1], b: c[2] }),
+                    258 => self
+                        .fg_color
+                        .lock()
+                        .ok()
+                        .map(|c| ansi::Rgb { r: c[0], g: c[1], b: c[2] }),
+                    _ => None,
+                };
+                if let Some(rgb) = rgb {
+                    debug_log!(
+                        "[osc-color] responding: index={} rgb=({},{},{})",
+                        index, rgb.r, rgb.g, rgb.b
+                    );
+                    let response = formatter(rgb);
+                    self.write_or_buffer(&response);
+                } else {
+                    debug_log!("[osc-color] no color for index={} — no response", index);
+                }
+            }
             _ => {}
         }
     }
 }
 
-pub struct TerminalState {
+// ---------------------------------------------------------------------------
+// AdvanceHandle — owns the VTE parser, lives on the PTY reader thread.
+// ---------------------------------------------------------------------------
+
+/// Thread-safe handle for advancing terminal state from the PTY reader thread.
+/// Owns the VTE parser.  Shares the terminal grid via FairMutex.
+pub struct AdvanceHandle {
     terminal: SharedTerminal,
-    pty_writer: SharedPtyWriter,
     parser: ansi::Processor,
-    columns: usize,
-    rows: usize,
-    scroll_offset: usize,
-    /// OSC 133 prompt marks for scroll-to-prompt navigation.
-    prompt_marks: PromptMarkStore,
-    /// Pending OSC 133 marks pushed by reader_loop, drained in advance().
+    sync_active: Arc<AtomicBool>,
+    /// Main thread sets this to request sync flush on next advance.
+    force_stop_sync: Arc<AtomicBool>,
     pending_osc133: PendingOsc133,
-    /// Max scrollback capacity (from Config) — used for mark pruning boundary.
+    prompt_marks: Arc<Mutex<PromptMarkStore>>,
+    scroll_offset: Arc<AtomicUsize>,
     max_scrollback: usize,
+    /// PTY writer for XTVERSION responses (CSI > q) that VTE doesn't handle.
+    pty_writer: SharedPtyWriter,
 }
 
-impl TerminalState {
-    pub fn new(columns: usize, rows: usize) -> Self {
-        let columns = columns.max(2);
-        let rows = rows.max(1);
-
-        let listener = AtermEventListener::new();
-        let pty_writer = listener.writer.clone();
-        let config = Config::default();
-        let max_scrollback = config.scrolling_history;
-
-        Self {
-            terminal: Arc::new(Mutex::new(Term::new(
-                config,
-                &TerminalDimensions { columns, rows },
-                listener,
-            ))),
-            pty_writer,
-            parser: ansi::Processor::new(),
-            columns,
-            rows,
-            scroll_offset: 0,
-            prompt_marks: PromptMarkStore::new(),
-            pending_osc133: Arc::new(Mutex::new(Vec::new())),
-            max_scrollback,
-        }
-    }
-
-    /// Connect the PTY writer so DA responses flow back to the child process.
-    pub fn set_pty_writer(&self, writer: PtyWriter) {
-        if let Ok(mut slot) = self.pty_writer.lock() {
-            *slot = Some(writer);
-        }
-    }
-
-    pub fn terminal(&self) -> SharedTerminal {
-        Arc::clone(&self.terminal)
-    }
-
-    /// Feed new PTY bytes incrementally into the terminal -- O(new_bytes) not O(total).
+impl AdvanceHandle {
+    /// Advance terminal with new PTY bytes.  Called from reader thread.
     ///
-    /// Applies NFC normalization so macOS NFD Korean jamo are composed into
-    /// syllables before the VTE parser stores them. Escape sequences are
-    /// ASCII-only, so NFC is identity for them — safe to normalize the whole buffer.
+    /// Follows alacritty's pattern: lease → try_lock_unfair → advance.
+    /// Terminal lock is dropped BEFORE prompt_marks to prevent deadlock.
     pub fn advance(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
 
-        // Fast path: pure ASCII needs no normalization (zero allocation).
+        // Handle force-stop-sync request from main thread (resize / timeout).
+        if self.force_stop_sync.load(Ordering::Acquire) {
+            self.force_stop_sync.store(false, Ordering::Release);
+            let mut term = self.terminal.lock_unfair();
+            self.parser.stop_sync(&mut *term);
+            drop(term);
+            self.sync_active.store(false, Ordering::Release);
+        }
+
+        // NFC normalization — Korean jamo → syllable composition.
         let has_non_ascii = bytes.iter().any(|&b| b > 0x7F);
         let normalized_buf: Vec<u8>;
         let feed: &[u8] = if has_non_ascii {
@@ -223,8 +278,6 @@ impl TerminalState {
                     &normalized_buf
                 }
                 Err(e) => {
-                    // Partial UTF-8 at chunk boundary: normalize the valid prefix,
-                    // pass trailing incomplete bytes through as-is.
                     let valid_up_to = e.valid_up_to();
                     if valid_up_to == 0 {
                         bytes
@@ -244,56 +297,88 @@ impl TerminalState {
             bytes
         };
 
-        let was_at_bottom = self.scroll_offset == 0;
-        if let Ok(mut term) = self.terminal.lock() {
-            // Capture cursor position before advance for mark shifting
-            let old_history = term.grid().history_size();
-            let old_cursor = term.grid().cursor.point.line.0.max(0) as usize;
-
-            self.parser.advance(&mut *term, feed);
-            if was_at_bottom {
-                term.scroll_display(Scroll::Bottom);
+        // XTVERSION: respond to CSI > q (\x1b[>q) — VTE parser doesn't handle this.
+        // Gemini CLI sends this to detect terminal type; respond so it uses proper colors.
+        const XTVERSION_SEQ: &[u8] = b"\x1b[>q";
+        if feed.len() >= 4 && feed.windows(4).any(|w| w == XTVERSION_SEQ) {
+            if let Ok(guard) = self.pty_writer.lock() {
+                if let Some(ref writer) = *guard {
+                    if let Ok(mut w) = writer.lock() {
+                        // DCS >| aterm 3.0 ST
+                        let _ = w.write_all(b"\x1bP>|aterm 3.0\x1b\\");
+                        let _ = w.flush();
+                    }
+                }
             }
-            // Always re-sync from grid to prevent drift after VTE state changes
-            self.scroll_offset = term.grid().display_offset();
+        }
 
-            // Process OSC 133 marks: shift existing marks and record new ones
-            let new_history = term.grid().history_size();
-            let new_cursor = term.grid().cursor.point.line.0.max(0) as usize;
-            let screen_lines = term.grid().screen_lines();
+        let was_at_bottom = self.scroll_offset.load(Ordering::Acquire) == 0;
 
-            let new_total = new_history + new_cursor;
-            let old_total = old_history + old_cursor;
-            let new_lines = new_total.saturating_sub(old_total);
+        // Alacritty pattern: lease reserves turn, try_lock_unfair avoids blocking.
+        let _lease = self.terminal.lease();
+        let mut term = self.terminal.try_lock_unfair()
+            .unwrap_or_else(|| self.terminal.lock_unfair());
 
-            if new_lines > 0 {
-                self.prompt_marks
-                    .shift_marks(new_lines, self.max_scrollback + screen_lines);
+        let old_history = term.grid().history_size();
+        let old_cursor = term.grid().cursor.point.line.0.max(0) as usize;
+
+        self.parser.advance(&mut *term, feed);
+        let in_sync = self.parser.sync_bytes_count() > 0;
+        self.sync_active.store(in_sync, Ordering::Release);
+
+        if was_at_bottom {
+            term.scroll_display(Scroll::Bottom);
+        }
+        self.scroll_offset
+            .store(term.grid().display_offset(), Ordering::Release);
+
+        // Capture grid metrics while lock is held.
+        let new_history = term.grid().history_size();
+        let new_cursor = term.grid().cursor.point.line.0.max(0) as usize;
+        let screen_lines = term.grid().screen_lines();
+
+        // DROP terminal lock BEFORE touching prompt_marks (lock ordering rule).
+        drop(term);
+        drop(_lease);
+
+        let new_lines = (new_history + new_cursor).saturating_sub(old_history + old_cursor);
+
+        // Drain pending OSC 133 marks (lock independently from prompt_marks).
+        let drained_marks: Vec<Osc133Mark> = if let Ok(mut pending) = self.pending_osc133.lock() {
+            if !pending.is_empty() {
+                pending.drain(..).collect()
+            } else {
+                Vec::new()
             }
+        } else {
+            Vec::new()
+        };
 
-            if let Ok(mut pending) = self.pending_osc133.lock() {
-                if !pending.is_empty() {
+        if new_lines > 0 || !drained_marks.is_empty() {
+            if let Ok(mut marks) = self.prompt_marks.lock() {
+                if new_lines > 0 {
+                    marks.shift_marks(new_lines, self.max_scrollback + screen_lines);
+                }
+                if !drained_marks.is_empty() {
                     let bottom_dist =
                         screen_lines.saturating_sub(1).saturating_sub(new_cursor);
                     debug_log!(
                         "[osc133-debug] processing {} pending marks, bottom_dist={}, total_marks={}",
-                        pending.len(),
+                        drained_marks.len(),
                         bottom_dist,
-                        self.prompt_marks.mark_count()
+                        marks.mark_count()
                     );
-                    for mark in pending.drain(..) {
+                    for mark in drained_marks {
                         match mark {
                             Osc133Mark::PromptStart => {
                                 debug_log!("[osc133-debug] PromptStart mark stored at bd={}", bottom_dist);
-                                self.prompt_marks
-                                    .add_mark(bottom_dist, PromptKind::PromptStart);
+                                marks.add_mark(bottom_dist, PromptKind::PromptStart);
                             }
                             Osc133Mark::CommandStart => {
-                                self.prompt_marks
-                                    .add_mark(bottom_dist, PromptKind::OutputStart);
+                                marks.add_mark(bottom_dist, PromptKind::OutputStart);
                             }
                             Osc133Mark::CommandEnd(status) => {
-                                self.prompt_marks.last_exit_status = status;
+                                marks.last_exit_status = status;
                             }
                             Osc133Mark::PromptEnd => {
                                 // B marks don't need line storage — used for inject timing only
@@ -305,26 +390,245 @@ impl TerminalState {
         }
     }
 
-    pub fn scroll(&mut self, delta: i32) {
-        if let Ok(mut term) = self.terminal.lock() {
-            term.scroll_display(Scroll::Delta(delta));
-            self.scroll_offset = term.grid().display_offset();
+    /// Create a fresh handle for a restarted child process.
+    /// Reuses shared state (terminal, marks, etc.) but resets the VTE parser.
+    pub fn fresh_for_restart(&self) -> AdvanceHandle {
+        AdvanceHandle {
+            terminal: Arc::clone(&self.terminal),
+            parser: ansi::Processor::new(),
+            sync_active: Arc::clone(&self.sync_active),
+            force_stop_sync: Arc::clone(&self.force_stop_sync),
+            pending_osc133: Arc::clone(&self.pending_osc133),
+            prompt_marks: Arc::clone(&self.prompt_marks),
+            scroll_offset: Arc::clone(&self.scroll_offset),
+            max_scrollback: self.max_scrollback,
+            pty_writer: Arc::clone(&self.pty_writer),
+        }
+    }
+}
+
+// SAFETY: AdvanceHandle is moved to the reader thread exactly once.
+// All fields are either Send (Arc<...>, ansi::Processor) or primitive.
+// ansi::Processor contains vte::Parser which is Send.
+unsafe impl Send for AdvanceHandle {}
+
+// ---------------------------------------------------------------------------
+// TerminalState — main thread interface to the terminal.
+// ---------------------------------------------------------------------------
+
+pub struct TerminalState {
+    terminal: SharedTerminal,
+    pty_writer: SharedPtyWriter,
+    columns: usize,
+    rows: usize,
+    /// Shared with AdvanceHandle — atomic for cross-thread access.
+    scroll_offset: Arc<AtomicUsize>,
+    /// Shared with AdvanceHandle — mutex-protected for cross-thread access.
+    prompt_marks: Arc<Mutex<PromptMarkStore>>,
+    /// Pending OSC 133 marks pushed by reader_loop, drained in AdvanceHandle::advance().
+    pending_osc133: PendingOsc133,
+    /// Max scrollback capacity — used for mark pruning boundary.
+    max_scrollback: usize,
+    /// When synchronized output (?2026h) started. None = not in sync.
+    /// Timeout after 1000ms forces render (ghostty pattern). #201.
+    sync_started_at: Option<Instant>,
+    /// Shared sync flag — updated by AdvanceHandle, read by main thread.
+    sync_active: Arc<AtomicBool>,
+    /// Signal to AdvanceHandle to flush sync bytes on next advance.
+    force_stop_sync: Arc<AtomicBool>,
+    /// Listener color arcs for theme sync (Fix 1: OSC 10/11 theme sync).
+    listener_fg: Arc<Mutex<[u8; 3]>>,
+    listener_bg: Arc<Mutex<[u8; 3]>>,
+    /// Buffered responses waiting for writer connection (Fix 2: writer race).
+    listener_pending: Arc<Mutex<Vec<String>>>,
+}
+
+impl TerminalState {
+    /// Create a new terminal and its companion AdvanceHandle.
+    ///
+    /// The AdvanceHandle must be passed to the PTY reader thread so that
+    /// VTE parsing happens off the main thread.
+    pub fn new(
+        columns: usize,
+        rows: usize,
+        sync_active: Option<Arc<AtomicBool>>,
+    ) -> (Self, AdvanceHandle) {
+        let columns = columns.max(2);
+        let rows = rows.max(1);
+
+        let listener = AtermEventListener::new();
+        let pty_writer = listener.writer.clone();
+        let listener_fg = listener.fg_color_arc();
+        let listener_bg = listener.bg_color_arc();
+        let listener_pending = listener.pending_responses_arc();
+        let config = Config::default();
+        let max_scrollback = config.scrolling_history;
+        let sync_active =
+            sync_active.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let force_stop_sync = Arc::new(AtomicBool::new(false));
+        let scroll_offset = Arc::new(AtomicUsize::new(0));
+        let prompt_marks = Arc::new(Mutex::new(PromptMarkStore::new()));
+        let pending_osc133: PendingOsc133 = Arc::new(Mutex::new(Vec::new()));
+        let parser = ansi::Processor::new();
+
+        let terminal: SharedTerminal = Arc::new(FairMutex::new(Term::new(
+            config,
+            &TerminalDimensions { columns, rows },
+            listener,
+        )));
+
+        let advance_handle = AdvanceHandle {
+            terminal: Arc::clone(&terminal),
+            parser,
+            sync_active: Arc::clone(&sync_active),
+            force_stop_sync: Arc::clone(&force_stop_sync),
+            pending_osc133: Arc::clone(&pending_osc133),
+            prompt_marks: Arc::clone(&prompt_marks),
+            scroll_offset: Arc::clone(&scroll_offset),
+            max_scrollback,
+            pty_writer: pty_writer.clone(),
+        };
+
+        let state = Self {
+            terminal,
+            pty_writer,
+            columns,
+            rows,
+            scroll_offset,
+            prompt_marks,
+            pending_osc133,
+            max_scrollback,
+            sync_started_at: None,
+            sync_active,
+            force_stop_sync,
+            listener_fg,
+            listener_bg,
+            listener_pending,
+        };
+
+        (state, advance_handle)
+    }
+
+    /// Create a new AdvanceHandle for this terminal (e.g. after workspace restart).
+    /// The returned handle has a fresh VTE parser but shares all state.
+    pub fn create_advance_handle(&self) -> AdvanceHandle {
+        AdvanceHandle {
+            terminal: Arc::clone(&self.terminal),
+            parser: ansi::Processor::new(),
+            sync_active: Arc::clone(&self.sync_active),
+            force_stop_sync: Arc::clone(&self.force_stop_sync),
+            pending_osc133: Arc::clone(&self.pending_osc133),
+            prompt_marks: Arc::clone(&self.prompt_marks),
+            scroll_offset: Arc::clone(&self.scroll_offset),
+            max_scrollback: self.max_scrollback,
+            pty_writer: self.pty_writer.clone(),
         }
     }
 
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = 0;
-        if let Ok(mut term) = self.terminal.lock() {
-            term.scroll_display(Scroll::Bottom);
+    /// Connect the PTY writer so DA responses flow back to the child process.
+    /// Also flushes any buffered responses from before the writer was connected (Fix 2).
+    pub fn set_pty_writer(&self, writer: PtyWriter) {
+        if let Ok(mut slot) = self.pty_writer.lock() {
+            *slot = Some(writer.clone());
         }
+        // Flush buffered responses (OSC 10/11 queries that arrived before writer was set)
+        if let Ok(mut pending) = self.listener_pending.lock() {
+            if !pending.is_empty() {
+                if let Ok(mut w) = writer.lock() {
+                    for response in pending.drain(..) {
+                        let _ = w.write_all(response.as_bytes());
+                    }
+                    let _ = w.flush();
+                }
+            }
+        }
+    }
+
+    /// Check if GPU render should be skipped (synchronized output active).
+    /// Returns true = skip render, false = render now.
+    /// Handles 1000ms timeout: auto-forces render if ?2026l never arrives (#201).
+    pub fn should_skip_render(&mut self) -> bool {
+        if !self.sync_active.load(Ordering::Acquire) {
+            self.sync_started_at = None;
+            return false;
+        }
+        // In sync mode — check timeout
+        const SYNC_TIMEOUT_MS: u64 = 1000;
+        match self.sync_started_at {
+            None => {
+                self.sync_started_at = Some(Instant::now());
+                true
+            }
+            Some(started) => {
+                if started.elapsed().as_millis() as u64 >= SYNC_TIMEOUT_MS {
+                    debug_log!(
+                        "[sync-output] timeout expired ({}ms), forcing render",
+                        SYNC_TIMEOUT_MS
+                    );
+                    self.force_stop_sync();
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    /// Force exit synchronized output mode.
+    /// Signals the reader thread to flush buffered sync bytes on next advance.
+    /// Called on timeout and resize (ghostty/kitty pattern).
+    fn force_stop_sync(&mut self) {
+        self.force_stop_sync.store(true, Ordering::Release);
+        self.sync_active.store(false, Ordering::Release);
+        self.sync_started_at = None;
+    }
+
+    /// Shared flag for reader thread: true = parser in sync, suppress mark_dirty().
+    pub fn sync_active_flag(&self) -> Arc<AtomicBool> {
+        self.sync_active.clone()
+    }
+
+    /// Update listener colors for OSC 10/11 responses (call on theme/scheme change).
+    pub fn set_listener_colors(&self, fg: [u8; 3], bg: [u8; 3]) {
+        if let Ok(mut f) = self.listener_fg.lock() {
+            *f = fg;
+        }
+        if let Ok(mut b) = self.listener_bg.lock() {
+            *b = bg;
+        }
+    }
+
+    pub fn terminal(&self) -> SharedTerminal {
+        Arc::clone(&self.terminal)
+    }
+
+    /// One-time drain of startup bytes that arrived before the AdvanceHandle
+    /// was connected to the reader thread.  Called on main thread.
+    pub fn advance_startup(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut term = self.terminal.lock();
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut *term, bytes);
+    }
+
+    pub fn scroll(&mut self, delta: i32) {
+        let mut term = self.terminal.lock();
+        term.scroll_display(Scroll::Delta(delta));
+        self.scroll_offset
+            .store(term.grid().display_offset(), Ordering::Release);
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset.store(0, Ordering::Release);
+        let mut term = self.terminal.lock();
+        term.scroll_display(Scroll::Bottom);
     }
 
     /// Check if the visible screen contains a text pattern.
     pub fn screen_contains(&self, pattern: &str) -> bool {
-        let term = match self.terminal.lock() {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
+        let term = self.terminal.lock();
         let grid = term.grid();
         let cols = grid.columns();
         let rows = grid.screen_lines();
@@ -342,7 +646,10 @@ impl TerminalState {
 
     /// Number of OSC 133 prompt marks currently stored.
     pub fn prompt_mark_count(&self) -> usize {
-        self.prompt_marks.mark_count()
+        self.prompt_marks
+            .lock()
+            .map(|m| m.mark_count())
+            .unwrap_or(0)
     }
 
     /// Get a clone of the pending OSC 133 marks handle for sharing with reader_loop.
@@ -354,39 +661,48 @@ impl TerminalState {
     /// direction < 0 = up (previous prompt), direction > 0 = down (next prompt).
     /// Returns true if scrolled, false if no prompt found in that direction.
     pub fn scroll_to_prompt(&mut self, direction: i32) -> bool {
-        if let Ok(mut term) = self.terminal.lock() {
+        // Step 1: Read current view position (terminal lock).
+        let (current_top_bd, _screen_lines) = {
+            let term = self.terminal.lock();
             let screen_lines = term.grid().screen_lines();
             let display_offset = term.grid().display_offset();
-            let history_size = term.grid().history_size();
+            (display_offset + screen_lines - 1, screen_lines)
+        };
+        // Terminal lock dropped here.
 
-            // Top of current view expressed as bottom_distance
-            let current_top_bd = display_offset + screen_lines - 1;
-
-            let target_bd = if direction < 0 {
-                self.prompt_marks.find_prompt_up(current_top_bd)
+        // Step 2: Find target mark (prompt_marks lock, no terminal lock held).
+        let target_bd = if let Ok(marks) = self.prompt_marks.lock() {
+            if direction < 0 {
+                marks.find_prompt_up(current_top_bd)
             } else {
-                self.prompt_marks.find_prompt_down(current_top_bd)
-            };
-
-            if let Some(bd) = target_bd {
-                // Place the prompt at the top of the visible area
-                let target_offset = bd.saturating_sub(screen_lines - 1);
-                let clamped = target_offset.min(history_size);
-
-                term.scroll_display(Scroll::Bottom);
-                if clamped > 0 {
-                    term.scroll_display(Scroll::Delta(clamped as i32));
-                }
-                self.scroll_offset = term.grid().display_offset();
-                true
-            } else if direction > 0 {
-                // No prompt below → scroll to bottom
-                term.scroll_display(Scroll::Bottom);
-                self.scroll_offset = 0;
-                true
-            } else {
-                false
+                marks.find_prompt_down(current_top_bd)
             }
+        } else {
+            None
+        };
+        // prompt_marks lock dropped here.
+
+        // Step 3: Scroll to target (terminal lock only).
+        if let Some(bd) = target_bd {
+            let mut term = self.terminal.lock();
+            let screen_lines = term.grid().screen_lines();
+            let history_size = term.grid().history_size();
+            let target_offset = bd.saturating_sub(screen_lines - 1);
+            let clamped = target_offset.min(history_size);
+
+            term.scroll_display(Scroll::Bottom);
+            if clamped > 0 {
+                term.scroll_display(Scroll::Delta(clamped as i32));
+            }
+            self.scroll_offset
+                .store(term.grid().display_offset(), Ordering::Release);
+            true
+        } else if direction > 0 {
+            // No prompt below → scroll to bottom
+            let mut term = self.terminal.lock();
+            term.scroll_display(Scroll::Bottom);
+            self.scroll_offset.store(0, Ordering::Release);
+            true
         } else {
             false
         }
@@ -396,6 +712,12 @@ impl TerminalState {
         let columns = columns.max(2);
         let rows = rows.max(1);
 
+        // Resize clears synchronized output (ghostty/kitty pattern) #201
+        if self.sync_active.load(Ordering::Acquire) {
+            debug_log!("[sync-output] resize clears sync state");
+            self.force_stop_sync();
+        }
+
         if self.columns == columns && self.rows == rows {
             return;
         }
@@ -403,19 +725,11 @@ impl TerminalState {
         self.columns = columns;
         self.rows = rows;
 
-        if let Ok(mut term) = self.terminal.lock() {
-            term.resize(TerminalDimensions { columns, rows });
+        let mut term = self.terminal.lock();
+        term.resize(TerminalDimensions { columns, rows });
 
-            // Fix #157: Reset cursor template bg to default after resize.
-            // Industry standard (ghostty/alacritty/wezterm/kitty/contour):
-            // resize new cells = default bg, NOT cursor's current SGR bg.
-            // Without this, child process post-SIGWINCH erase ops inherit
-            // the cursor's SGR bg (e.g. codex's magenta #FF00FF), painting
-            // the entire screen with that color instead of the terminal
-            // background. The child will re-set SGR attributes when it
-            // redraws after SIGWINCH.
-            term.grid_mut().cursor.template.bg = Color::Named(NamedColor::Background);
-        }
+        // Fix #157: Reset cursor template bg to default after resize.
+        term.grid_mut().cursor.template.bg = Color::Named(NamedColor::Background);
     }
 }
 

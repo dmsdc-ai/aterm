@@ -55,6 +55,8 @@ pub struct GlyphInfo {
     pub advance: f32,
     pub uv_rect: [f32; 4],
     pub cell_width: u8,
+    /// LRU epoch — incremented on each access (#208).
+    pub last_access: u64,
 }
 
 struct RasterizedGlyph {
@@ -75,6 +77,8 @@ struct FallbackFont {
     font: Font,
 }
 
+const MAX_GLYPH_CACHE_SIZE: usize = 4096;
+
 pub struct GlyphCache {
     font_name: String,
     font: Font,
@@ -82,6 +86,8 @@ pub struct GlyphCache {
     fallback_fonts: Vec<FallbackFont>,
     glyphs: HashMap<GlyphKey, GlyphInfo>,
     missing_from_all: HashSet<char>,
+    /// Monotonic access counter for LRU eviction (#208).
+    access_epoch: u64,
 }
 
 impl GlyphCache {
@@ -102,6 +108,7 @@ impl GlyphCache {
             fallback_fonts: Vec::new(),
             glyphs: HashMap::new(),
             missing_from_all: HashSet::new(),
+            access_epoch: 0,
         })
     }
 
@@ -158,6 +165,10 @@ impl GlyphCache {
         }
     }
 
+    pub fn glyph_count(&self) -> usize {
+        self.glyphs.len()
+    }
+
     pub fn get(&self, size_px: f32, ch: char) -> Option<&GlyphInfo> {
         let key = self.make_key(size_px, ch);
         self.glyphs.get(&key)
@@ -179,6 +190,7 @@ impl GlyphCache {
             let gw = rasterized.metrics.width as u32;
             let gh = rasterized.metrics.height as u32;
 
+            let epoch = self.access_epoch;
             if gw > 0 && gh > 0 {
                 let padded = self.pad_to_cell_size(&rasterized, size_px, cell_w, cell_h);
                 let region =
@@ -194,21 +206,78 @@ impl GlyphCache {
                     advance: rasterized.metrics.advance_width,
                     uv_rect: region.uv_rect(atlas.atlas_size()),
                     cell_width: rasterized.cell_width,
+                    last_access: epoch,
                 };
                 self.glyphs.insert(key.clone(), info);
             } else {
                 let region = atlas.upload_glyph(device, queue, &rasterized.rgba_bitmap, gw, gh);
-                let info = Self::build_glyph_info(
+                let mut info = Self::build_glyph_info(
                     &rasterized.metrics,
                     region,
                     atlas.atlas_size(),
                     rasterized.cell_width,
                 );
+                info.last_access = epoch;
                 self.glyphs.insert(key.clone(), info);
+            }
+        } else {
+            // Update access epoch on cache hit (LRU tracking)
+            if let Some(entry) = self.glyphs.get_mut(&key) {
+                entry.last_access = self.access_epoch;
             }
         }
 
         self.glyphs.get(&key)
+    }
+
+    /// Advance frame epoch. Call once per frame BEFORE rendering.
+    pub fn begin_frame(&mut self) {
+        self.access_epoch += 1;
+    }
+
+    /// Evict stale glyphs if cache exceeds MAX_GLYPH_CACHE_SIZE (#208).
+    /// MUST be called at frame boundary (after render), NOT during rendering.
+    /// Constraints: ASCII pinned, recently-used preserved.
+    pub fn maybe_evict(&mut self) {
+        if self.glyphs.len() <= MAX_GLYPH_CACHE_SIZE {
+            return;
+        }
+
+        let epoch = self.access_epoch;
+        // Keep glyphs accessed within last 60 frames (~1s at 60fps)
+        let stale_threshold = epoch.saturating_sub(60);
+
+        let evict_keys: Vec<GlyphKey> = self
+            .glyphs
+            .iter()
+            .filter(|(key, info)| {
+                // Never evict ASCII (0x20-0x7E) — pinned
+                let cp = key.ch as u32;
+                if cp >= 0x20 && cp <= 0x7E {
+                    return false;
+                }
+                // Evict if not accessed recently
+                info.last_access < stale_threshold
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        if evict_keys.is_empty() {
+            return;
+        }
+
+        // Batch evict (up to 50% of cache)
+        let max_evict = self.glyphs.len() / 2;
+        let evict_count = evict_keys.len().min(max_evict);
+        for key in &evict_keys[..evict_count] {
+            self.glyphs.remove(key);
+        }
+        debug_log!(
+            "[mem] glyph eviction: removed {}/{} stale (cache now {})",
+            evict_count,
+            evict_keys.len(),
+            self.glyphs.len()
+        );
     }
 
     fn make_key(&self, size_px: f32, ch: char) -> GlyphKey {
@@ -458,6 +527,7 @@ impl GlyphCache {
             advance: metrics.advance_width,
             uv_rect: region.uv_rect(atlas_size),
             cell_width,
+            last_access: 0,
         }
     }
 }

@@ -50,6 +50,25 @@
 typedef struct AtermCore AtermCore;
 
 /**
+ * Per-cell terminal data for Metal renderer — populated by aterm_core_get_render_data().
+ * Swift allocates a flat array of these and passes it to the Metal render pass.
+ */
+typedef struct CellDataFFI {
+  uint16_t col;
+  uint16_t row;
+  uint8_t fg_r;
+  uint8_t fg_g;
+  uint8_t fg_b;
+  uint8_t fg_a;
+  uint8_t bg_r;
+  uint8_t bg_g;
+  uint8_t bg_b;
+  uint8_t bg_a;
+  uint32_t character;
+  uint8_t flags;
+} CellDataFFI;
+
+/**
  * C-safe workspace event — flat struct, unused fields are NULL.
  */
 typedef struct AtermEventFFI {
@@ -67,6 +86,21 @@ typedef struct AtermEventBatch {
   struct AtermEventFFI *events;
   uint32_t count;
 } AtermEventBatch;
+
+/**
+ * Per-row selection range for Metal renderer — 12 bytes, matches Shaders.metal SelectionRange.
+ * Each range covers one row of selected cells (multi-line selections split into per-row ranges).
+ */
+typedef struct SelectionRangeFFI {
+  uint16_t start_col;
+  uint16_t start_row;
+  uint16_t end_col;
+  uint16_t end_row;
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+  uint8_t a;
+} SelectionRangeFFI;
 
 typedef struct SessionEntryFFI {
   const char *id;
@@ -111,6 +145,17 @@ struct AtermCore *aterm_core_new(void);
 void aterm_core_free(struct AtermCore *core);
 
 /**
+ * Suspend GPU resources for inactive workspace (#208 memory optimization).
+ * Drops Surface + renderer caches. Terminal state preserved. Call resume to reactivate.
+ */
+void aterm_core_suspend_gpu(struct AtermCore *core);
+
+/**
+ * No-op stub when wgpu feature is disabled (Metal renderer handles GPU lifecycle).
+ */
+void aterm_core_suspend_gpu(struct AtermCore *_core);
+
+/**
  * Stop the PTY output signal callback. Must be called BEFORE aterm_core_free
  * to prevent use-after-free when the host view is deallocated.
  */
@@ -121,6 +166,16 @@ int32_t aterm_core_init_gpu(struct AtermCore *core,
                             uint32_t width,
                             uint32_t height,
                             float scale);
+
+/**
+ * No-wgpu init: skip GPU setup but create Terminal state (alacritty_terminal is GPU-independent).
+ * Without this, c.terminal stays None and get_render_data returns empty.
+ */
+int32_t aterm_core_init_gpu(struct AtermCore *core,
+                            void *_ns_view,
+                            uint32_t width,
+                            uint32_t height,
+                            float _scale);
 
 int32_t aterm_core_spawn_shell(struct AtermCore *core,
                                const char *name,
@@ -142,11 +197,21 @@ void aterm_core_named_key(struct AtermCore *core, uint32_t key_code);
 void aterm_core_render(struct AtermCore *core);
 
 /**
+ * No-op stub when wgpu feature is disabled (Metal renderer on Swift side).
+ */
+void aterm_core_render(struct AtermCore *_core);
+
+/**
  * Try to render if dirty. Returns 1 if rendered, 0 if skipped.
  * Thread-safe — used by CVDisplayLink and PTY dirty callback for immediate
  * render without CVDisplayLink latency (Ghostty/Alacritty pattern, Fix #153).
  */
 int32_t aterm_core_try_render(struct AtermCore *core);
+
+/**
+ * No-op stub when wgpu feature is disabled.
+ */
+int32_t aterm_core_try_render(struct AtermCore *_core);
 
 void aterm_core_resize(struct AtermCore *core, uint32_t width, uint32_t height);
 
@@ -156,15 +221,80 @@ void aterm_core_grid_size(const struct AtermCore *core,
                           uint16_t *out_cols,
                           uint16_t *out_rows);
 
+/**
+ * Compute grid size from pixel dimensions (no-wgpu: uses hardcoded cell metrics).
+ */
+void aterm_core_grid_size(const struct AtermCore *_core,
+                          float width,
+                          float height,
+                          uint16_t *out_cols,
+                          uint16_t *out_rows);
+
+/**
+ * Set IME preedit text for inline rendering (#206). Empty string clears.
+ */
+void aterm_core_set_preedit(struct AtermCore *core, const uint8_t *text, uint32_t len);
+
+/**
+ * Get cursor position in backing pixels (for IME popup placement, #206).
+ */
+void aterm_core_cursor_position(const struct AtermCore *core,
+                                float width,
+                                float height,
+                                float *out_x,
+                                float *out_y);
+
+/**
+ * Compute cursor position from terminal grid (no-wgpu: uses hardcoded cell metrics).
+ */
+void aterm_core_cursor_position(const struct AtermCore *core,
+                                float width,
+                                float height,
+                                float *out_x,
+                                float *out_y);
+
 void aterm_core_cell_size(const struct AtermCore *core, float *out_width, float *out_height);
 
-void aterm_core_grid_padding(const struct AtermCore *core, float width, float height, float *out_pad_x, float *out_pad_y);
+/**
+ * Return cell dimensions (no-wgpu: uses runtime value from set_line_height, or default).
+ */
+void aterm_core_cell_size(const struct AtermCore *_core, float *out_width, float *out_height);
+
+void aterm_core_grid_padding(const struct AtermCore *core,
+                             float width,
+                             float height,
+                             float *out_pad_x,
+                             float *out_pad_y);
+
+/**
+ * Compute centered grid padding (no-wgpu: uses hardcoded cell metrics).
+ */
+void aterm_core_grid_padding(const struct AtermCore *_core,
+                             float width,
+                             float height,
+                             float *out_pad_x,
+                             float *out_pad_y);
 
 int32_t aterm_core_take_dirty(struct AtermCore *core);
 
 void aterm_core_set_dirty_callback(struct AtermCore *core, void (*callback)(void*), void *userdata);
 
 void aterm_core_sync_pty(struct AtermCore *core);
+
+/**
+ * Collect terminal grid data for Metal renderer.
+ * Swift calls this each frame; Rust locks the terminal grid and fills
+ * out_cells[0..out_count] with per-cell character + color + flags.
+ * PTY advance happens on the reader thread — this is a pure read.
+ * Colors are resolved using the Tokyo Night Dark palette. Returns 0 on success, -1 on error.
+ */
+int32_t aterm_core_get_render_data(struct AtermCore *core,
+                                   struct CellDataFFI *out_cells,
+                                   uint32_t max_cells,
+                                   uint32_t *out_count,
+                                   uint16_t *out_cols,
+                                   uint16_t *out_rows,
+                                   uint8_t *out_dirty_rows);
 
 /**
  * Drain all pending workspace events as a C struct batch.
@@ -180,10 +310,49 @@ void aterm_free_events(struct AtermEventBatch batch);
 void aterm_core_set_theme_mode(struct AtermCore *core, uint8_t mode);
 
 /**
+ * Store theme mode when wgpu feature is disabled (used by get_render_data).
+ */
+void aterm_core_set_theme_mode(struct AtermCore *core, uint8_t mode);
+
+/**
  * Set color scheme: 0=Dark, 1=Light, 2=SolarizedDark, 3=SolarizedLight,
  * 4=Monokai, 5=Dracula, 6=Nord, 7=TokyoNight
  */
 void aterm_core_set_color_scheme(struct AtermCore *core, uint8_t scheme);
+
+void aterm_core_set_color_scheme(struct AtermCore *_core, uint8_t scheme);
+
+/**
+ * Set preedit (IME composition) active state.
+ * When active, cursor cell INVERSE is suppressed so preedit text is visible.
+ */
+void aterm_core_set_preedit_active(struct AtermCore *_core, bool active);
+
+/**
+ * Set default fg/bg colors used by render_cells for palette Background/Foreground.
+ * Also syncs colors to terminal listener for OSC 10/11 query responses.
+ */
+void aterm_core_set_default_colors(struct AtermCore *core,
+                                   uint8_t fg_r,
+                                   uint8_t fg_g,
+                                   uint8_t fg_b,
+                                   uint8_t bg_r,
+                                   uint8_t bg_g,
+                                   uint8_t bg_b);
+
+/**
+ * Return the foreground RGB for a color scheme index.
+ * Always available (no wgpu gate) — used by Swift Metal path.
+ */
+void aterm_core_scheme_fg_color(uint8_t scheme, uint8_t *out_r, uint8_t *out_g, uint8_t *out_b);
+
+/**
+ * Return the background RGB for a color scheme index.
+ * Always available (no wgpu gate) — used by Swift Metal path.
+ * scheme: 0=Dark, 1=Light, 2=SolarizedDark, 3=SolarizedLight,
+ *         4=Monokai, 5=Dracula, 6=Nord, 7=TokyoNight, 8=Default
+ */
+void aterm_core_scheme_bg_color(uint8_t scheme, uint8_t *out_r, uint8_t *out_g, uint8_t *out_b);
 
 /**
  * Set font size in pixels (clamped to 8..32)
@@ -191,9 +360,29 @@ void aterm_core_set_color_scheme(struct AtermCore *core, uint8_t scheme);
 void aterm_core_set_font_size(struct AtermCore *core, float size);
 
 /**
+ * No-op stub when wgpu feature is disabled (font size managed on Swift side).
+ */
+void aterm_core_set_font_size(struct AtermCore *_core, float _size);
+
+/**
  * Set line height in pixels (clamped to 12..64)
  */
 void aterm_core_set_line_height(struct AtermCore *core, float height);
+
+/**
+ * Store line height for no-wgpu path (clamped to 12..64).
+ */
+void aterm_core_set_line_height(struct AtermCore *_core, float height);
+
+/**
+ * Set cell width in pixels (clamped to 6..32)
+ */
+void aterm_core_set_cell_width(struct AtermCore *core, float width);
+
+/**
+ * Store cell width for no-wgpu path (clamped to 6..32).
+ */
+void aterm_core_set_cell_width(struct AtermCore *_core, float width);
 
 /**
  * Deprecated compatibility no-op. Background blending has been removed and
@@ -225,6 +414,18 @@ void aterm_core_selection_clear(struct AtermCore *core);
  * Returns selected text or NULL. Caller must free with aterm_core_free_string.
  */
 char *aterm_core_selection_text(const struct AtermCore *core);
+
+void aterm_core_select_all(struct AtermCore *core);
+
+/**
+ * Export the current selection as per-row ranges for Metal selection overlay.
+ * Multi-line selections are split into one range per visible row.
+ * Returns the number of ranges written via `out_count`.
+ */
+void aterm_core_selection_ranges(const struct AtermCore *core,
+                                 struct SelectionRangeFFI *out_ranges,
+                                 uint32_t max_ranges,
+                                 uint32_t *out_count);
 
 /**
  * Check if the visible terminal screen contains a text pattern. Returns 1 if found, 0 otherwise.
@@ -284,6 +485,33 @@ char *aterm_ipc_socket_path(void);
  * Get the IPC auth token. Caller must free with aterm_core_free_string.
  */
 char *aterm_ipc_token(void);
+
+/**
+ * Explicit single workspace close — deterministic, not ARC-dependent.
+ * Idempotent: double-close is a no-op.
+ */
+void aterm_workspace_close(const char *workspace_id);
+
+/**
+ * Batch close multiple workspaces. More efficient than individual close calls.
+ * After all workspaces are closed, emits a single WorkspaceBatchClosed event
+ * and triggers a debounced save.
+ */
+void aterm_batch_close(const char *const *workspace_ids, uint32_t count);
+
+/**
+ * Hint Rust to save sessions if debounce allows.
+ * Marks the session store as dirty and starts a 500ms debounce timer.
+ * Actual save happens after 500ms of quiet (no new triggers).
+ */
+void aterm_trigger_save(void);
+
+/**
+ * Update the is_system flag for a workspace in the global session registry.
+ * Swift calls this after spawn to mark orchestrator/system workspaces so that
+ * SaveCoordinator writes the correct flag to sessions.json.
+ */
+void aterm_core_set_workspace_system(struct AtermCore *core, const char *workspace_name, bool is_system);
 
 extern int32_t aterm_coretext_rasterize_glyph(uint32_t codepoint,
                                               const char *base_font_name,

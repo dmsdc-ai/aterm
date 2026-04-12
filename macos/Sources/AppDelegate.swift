@@ -11,12 +11,35 @@ private struct IpcWorkspaceConfig: Decodable {
   let rows: UInt16?
 }
 
+/// Invisible 6pt-wide drag handle between sidebar and terminal.
+/// Adapted from ghostty SplitView.Divider (0pt visible + 6pt hitbox).
+private class SidebarDragHandleView: NSView {
+  var onDrag: ((CGFloat) -> Void)?
+
+  override func resetCursorRects() {
+    addCursorRect(bounds, cursor: .resizeLeftRight)
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    guard let sv = superview else { return }
+    let x = sv.convert(event.locationInWindow, from: nil).x
+    onDrag?(x)
+  }
+
+  override var acceptsFirstResponder: Bool { true }
+  override var focusRingType: NSFocusRingType { get { .none } set {} }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
   var window: NSWindow!
   var terminalView: TerminalView?
   var busClient: TeleptyBusClient!
-  var splitView: NSSplitView!
+  var containerView: NSView!
+  private var sidebarWidthConstraint: NSLayoutConstraint!
   var terminalContainerView: NSView!
+  private var orchestratorInputBar: OrchestratorInputBar!
+  private var terminalContainerBottomToWindow: NSLayoutConstraint!
+  private var terminalContainerBottomToInputBar: NSLayoutConstraint!
 
   private let workspaceSidebarModel = WorkspaceSidebarModel()
   private var managedWorkspaces: [UUID: ManagedWorkspace] = [:]
@@ -24,6 +47,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   /// Pending bootstraps waiting for ShellReady event: workspace UUID → (command, fallback timer)
   private var pendingBootstraps: [UUID: (command: String, fallbackTimer: DispatchWorkItem)] = [:]
   private var excludedChildPIDs: Set<Int32> = []
+  /// Attach failure counter per session ID — stops retry after 3 failures (#205).
+  private var attachFailures: [String: Int] = [:]
+  /// Dedup guard: prevents redundant hide-all + show-selected + rebuildSidebar cycle
+  private var currentSelectedWorkspaceId: UUID?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     // Single instance enforcement — skip in sandbox mode (ATERM_DATA_ROOT set)
@@ -41,6 +68,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       NSLog("[aterm] sandbox mode (ATERM_DATA_ROOT set), skipping single-instance check")
     }
 
+    NSApp.setActivationPolicy(.regular)
+
+    // Force dark chrome for all aterm UI (sidebar, Settings, window frame, input bar)
+    // regardless of macOS system appearance. Terminal content colorScheme is separate
+    // and already configurable via Settings. Follow-up: add Appearance picker in Settings.
+    NSApp.appearance = NSAppearance(named: .darkAqua)
+
     ensureTeleptyDaemon()
     startTailscale()
 
@@ -51,6 +85,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       backing: .buffered,
       defer: false
     )
+    window.isReleasedWhenClosed = false
     window.title = "aterm v3"
     window.center()
     window.minSize = NSSize(width: 640, height: 400)
@@ -78,6 +113,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       onCloseWorkspace: { [weak self] workspaceName in
         self?.closeWorkspace(named: workspaceName)
       },
+      onBatchCloseWorkspaces: { [weak self] workspaceNames in
+        guard let self else { return }
+        let uuids = workspaceNames.compactMap { self.workspaceID(named: $0) }
+        self.removeWorkspaces(ids: uuids)
+      },
       onChangeWorkspaceCLI: { [weak self] workspaceName, newCli in
         self?.changeWorkspaceCLI(named: workspaceName, to: newCli)
       },
@@ -93,35 +133,118 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     )
     let sidebarHost = NSHostingView(rootView: sidebarView)
     sidebarHost.frame = NSRect(x: 0, y: 0, width: 240, height: rect.height)
+    sidebarHost.translatesAutoresizingMaskIntoConstraints = false
+
+    DispatchQueue.main.async { [weak sidebarHost] in
+      Self.suppressScrollViewFocusRings(in: sidebarHost)
+    }
 
     // Create terminal container
     let terminalRect = NSRect(x: 0, y: 0, width: rect.width - 240, height: rect.height)
     terminalContainerView = NSView(frame: terminalRect)
-    terminalContainerView.autoresizingMask = [.width, .height]
+    terminalContainerView.translatesAutoresizingMaskIntoConstraints = false
     terminalContainerView.wantsLayer = true
-    terminalContainerView.layer?.backgroundColor = AtermTheme.terminalBackground.cgColor
+    terminalContainerView.layer?.backgroundColor = NSColor.atermHex(0x1A1B26).cgColor
+    terminalContainerView.layer?.isOpaque = true
 
-    // Create split view
-    splitView = NSSplitView()
-    splitView.isVertical = true
-    splitView.dividerStyle = .thin
-    splitView.frame = rect
-    splitView.autoresizingMask = [.width, .height]
+    // -- Container (replaces NSSplitView) --
+    // Pattern: ghostty TerminalViewContainer.swift:55-63
+    containerView = NSView(frame: rect)
+    containerView.autoresizingMask = [.width, .height]
+    containerView.wantsLayer = true
 
-    splitView.addSubview(sidebarHost)
-    splitView.addSubview(terminalContainerView)
+    containerView.addSubview(sidebarHost)
+    containerView.addSubview(terminalContainerView)
 
-    // Set sidebar constraints
-    // Keep the sidebar near its initial width and let the terminal absorb
-    // horizontal growth/shrink so PTY columns track the visible content.
-    splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
-    splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
-    sidebarHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
-    sidebarHost.widthAnchor.constraint(lessThanOrEqualToConstant: 400).isActive = true
-    splitView.setPosition(240, ofDividerAt: 0)
+    // Sidebar: pinned left/top/bottom, width = 240 (min 180, max 400)
+    sidebarWidthConstraint = sidebarHost.widthAnchor.constraint(equalToConstant: 240)
+    sidebarWidthConstraint.priority = .defaultHigh
+    NSLayoutConstraint.activate([
+      sidebarHost.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+      sidebarHost.topAnchor.constraint(equalTo: containerView.topAnchor),
+      sidebarHost.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+      sidebarWidthConstraint,
+      sidebarHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+      sidebarHost.widthAnchor.constraint(lessThanOrEqualToConstant: 400),
+    ])
 
-    window.contentView = splitView
+    // Orchestrator input bar (hidden by default, shown for isSystem workspaces)
+    orchestratorInputBar = OrchestratorInputBar()
+    orchestratorInputBar.translatesAutoresizingMaskIntoConstraints = false
+    orchestratorInputBar.isHidden = true
+    containerView.addSubview(orchestratorInputBar)
+
+    orchestratorInputBar.onSubmit = { [weak self] text in
+      guard let self, let core = self.terminalView?.corePointer else { return }
+      // Strip leading/trailing whitespace; preserve internal newlines for multi-line input
+      let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { return }
+      // Send the raw text + carriage return (matches what user typing in CLI prompt would produce)
+      let payload = trimmed + "\r"
+      payload.withCString { ptr in
+        aterm_core_write_pty(core, ptr, payload.utf8.count)
+      }
+    }
+    orchestratorInputBar.onEscape = { [weak self] in
+      guard let self, let tv = self.terminalView else { return }
+      self.window.makeFirstResponder(tv)
+    }
+    orchestratorInputBar.onCtrlKey = { [weak self] byte in
+      guard let self, let core = self.terminalView?.corePointer else { return }
+      var b = byte
+      withUnsafePointer(to: &b) { ptr in
+        ptr.withMemoryRebound(to: CChar.self, capacity: 1) { cptr in
+          aterm_core_write_pty(core, cptr, 1)
+        }
+      }
+    }
+
+    // Input bar manages its own height (58–200pt) — no fixed height constraint here
+    NSLayoutConstraint.activate([
+      orchestratorInputBar.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
+      orchestratorInputBar.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+      orchestratorInputBar.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+    ])
+
+    // Terminal: flush right of sidebar, fills remaining space
+    terminalContainerBottomToWindow = terminalContainerView.bottomAnchor.constraint(
+      equalTo: containerView.bottomAnchor)
+    terminalContainerBottomToInputBar = terminalContainerView.bottomAnchor.constraint(
+      equalTo: orchestratorInputBar.topAnchor)
+    terminalContainerBottomToInputBar.isActive = false
+
+    NSLayoutConstraint.activate([
+      terminalContainerView.leadingAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
+      terminalContainerView.topAnchor.constraint(equalTo: containerView.topAnchor),
+      terminalContainerBottomToWindow,
+      terminalContainerView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+    ])
+
+    // Invisible drag handle (6pt wide, between sidebar and terminal)
+    // Pattern: ghostty SplitView.Divider (splitterInvisibleSize = 6)
+    let dragHandle = SidebarDragHandleView()
+    dragHandle.translatesAutoresizingMaskIntoConstraints = false
+    containerView.addSubview(dragHandle)
+    NSLayoutConstraint.activate([
+      dragHandle.centerXAnchor.constraint(equalTo: sidebarHost.trailingAnchor),
+      dragHandle.topAnchor.constraint(equalTo: containerView.topAnchor),
+      dragHandle.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+      dragHandle.widthAnchor.constraint(equalToConstant: 6),
+    ])
+    dragHandle.onDrag = { [weak self] x in
+      guard let self else { return }
+      let clamped = min(max(x, 180), 400)
+      self.sidebarWidthConstraint.constant = clamped
+    }
+
+    window.contentView = containerView
     window.makeKeyAndOrderFront(nil)
+
+    // Fix #217: Remove default 1px gray titlebar separator
+    if #available(macOS 12.0, *) {
+        window.titlebarSeparatorStyle = .none
+        window.titlebarAppearsTransparent = true
+    }
 
     setupPreferencesMenu()
     AtermSettings.shared.load()
@@ -138,11 +261,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       showOnboarding()
     }
     registerHostCallbacks()
+    // Force sidebar re-fetch now that host callbacks are registered.
+    // restoreWorkspaces() ran before registerHostCallbacks(), so the initial
+    // IPC ListWorkspaces hit the fallback path (host=None) where is_system=None.
+    rebuildSidebarState()
 
     // Re-register all workspaces with telepty after restore to ensure
-    // none are missing (fire-and-forget registration can silently fail)
+    // none are missing (fire-and-forget registration can silently fail).
+    // Runs off main thread to avoid blocking activation on network timeouts.
     if restoredCount > 0 {
-      aterm_sync_telepty()
+      DispatchQueue.global(qos: .userInitiated).async {
+        aterm_sync_telepty()
+      }
     }
     refreshWorkspaceProcesses()
 
@@ -171,6 +301,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return true
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    if !flag {
+      window?.makeKeyAndOrderFront(nil)
+    }
+    return true
+  }
+
+  func applicationWillResignActive(_ notification: Notification) {
+    NSLog("[DIAG-LIFECYCLE] RESIGN ACTIVE: window isVisible=%d isKey=%d activationPolicy=%ld",
+          window?.isVisible ?? false ? 1 : 0, window?.isKeyWindow ?? false ? 1 : 0,
+          NSApp.activationPolicy().rawValue)
+  }
+
+  func applicationDidResignActive(_ notification: Notification) {
+    NSLog("[DIAG-LIFECYCLE] DID RESIGN: activationPolicy=%ld", NSApp.activationPolicy().rawValue)
+  }
+
+  func applicationDidBecomeActive(_ notification: Notification) {
+    window?.makeKeyAndOrderFront(nil)
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -213,6 +364,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       _ = semaphore.wait(timeout: .now() + 2)
       NSLog("[aterm] deregistered workspace '%@' from telepty", name)
     }
+  }
+
+  /// Deregister a single workspace from telepty. Fire-and-forget.
+  private func deregisterTeleptyWorkspace(name: String) {
+    let port = Int(ProcessInfo.processInfo.environment["ATERM_TELEPTY_PORT"] ?? "") ?? 3848
+    guard !name.isEmpty,
+      let url = URL(string: "http://localhost:\(port)/api/sessions/\(name)")
+    else { return }
+    var req = URLRequest(url: url)
+    req.httpMethod = "DELETE"
+    req.timeoutInterval = 2
+    URLSession.shared.dataTask(with: req).resume()
   }
 
   // MARK: - IPC Host Callbacks
@@ -289,7 +452,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       let delegate = Unmanaged<AppDelegate>.fromOpaque(userdata).takeUnretainedValue()
       let list = delegate.workspaceOrder.compactMap { id -> [String: Any]? in
         guard let ws = delegate.managedWorkspaces[id] else { return nil }
-        guard ws.status != "dead", ws.status != "closing" else { return nil }
+        // #205: Show dead workspaces in sidebar so users can delete them.
+        // Previously filtered out dead/closing — caused invisible ghost workspaces.
         var payload: [String: Any] = [
           "id": ws.name,
           "name": ws.name,
@@ -334,8 +498,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     let command = WorkspaceLaunchCommand(rawValue: config.cli) ?? .zsh
     let cwd = config.cwd.isEmpty ? NSHomeDirectory() : config.cwd
+    // #193: IPC-created workspaces are ephemeral — not persisted to sessions.json.
+    // They exist for the current app session only and won't be auto-restored on next launch.
     createWorkspace(
-      name: config.name, command: command, customCommand: "", cwd: cwd, shouldSelect: true)
+      name: config.name, command: command, customCommand: "", cwd: cwd, shouldSelect: true,
+      skipSave: true)
+    // Mark as ephemeral so future saveWorkspaces() calls also skip it
+    if let wsID = workspaceID(named: config.name) {
+      managedWorkspaces[wsID]?.isEphemeral = true
+    }
   }
 
   /// Wakeup+drain: called on main thread when Rust signals events are available.
@@ -351,14 +522,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       let id = event.id.map { String(cString: $0) } ?? ""
       switch Int(event.event_type) {
       case Int(ATERM_EVENT_CLOSED):
-        removeWorkspace(named: id, allowSystem: true)
+        // #194: Don't remove immediately — mark dead and let cleanupStaleWorkspaces handle it.
+        // Prevents cascade deletion when multiple workspaces die on startup.
+        if let wsID = workspaceID(named: id) {
+          managedWorkspaces[wsID]?.status = "dead"
+          managedWorkspaces[wsID]?.lastActivityAt = Date()
+          rebuildSidebarState()
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
           self?.cleanupStaleWorkspaces()
         }
       case Int(ATERM_EVENT_STATUS_CHANGED):
         let status = event.status.map { String(cString: $0) } ?? ""
         if status == "dead" || status == "closing" {
-          removeWorkspace(named: id, allowSystem: true)
+          // #194: Don't remove immediately — update status and defer cleanup.
+          if let wsID = workspaceID(named: id) {
+            managedWorkspaces[wsID]?.status = status
+            managedWorkspaces[wsID]?.lastActivityAt = Date()
+            rebuildSidebarState()
+          }
           DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             self?.cleanupStaleWorkspaces()
           }
@@ -381,6 +563,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
           }
           NSLog("[aterm] auto-accepted trust prompt for '%@' (event-driven)", workspace.name)
         }
+      case Int(ATERM_EVENT_BATCH_CLOSED):
+        // Rust completed batch close — single sidebar rebuild
+        NSLog("[aterm] batch close event received")
+        rebuildSidebarState()
+      case Int(ATERM_EVENT_CREATION_FAILED):
+        // Rollback workspace that failed to create on Rust side
+        if let wsID = workspaceID(named: id) {
+          NSLog("[aterm] creation failed event for '%@' — rolling back", id)
+          managedWorkspaces[wsID]?.terminalView.removeFromSuperview()
+          managedWorkspaces.removeValue(forKey: wsID)
+          workspaceOrder.removeAll { $0 == wsID }
+          rebuildSidebarState()
+        }
+      case Int(ATERM_EVENT_RESTORED):
+        // Crash recovery restore — rebuild sidebar to show restored workspaces
+        NSLog("[aterm] workspace restored event for '%@'", id)
+        rebuildSidebarState()
       default:
         break
       }
@@ -416,14 +615,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     for id in workspaceOrder {
-      guard let ws = managedWorkspaces[id], let entry = entryDict(for: ws) else { continue }
+      guard let ws = managedWorkspaces[id], !ws.isEphemeral, let entry = entryDict(for: ws) else { continue }
       seenIDs.insert(id)
       entries.append(entry)
     }
 
     // Capture orphaned workspaces not in workspaceOrder (defensive — #177)
     for (id, ws) in managedWorkspaces where !seenIDs.contains(id) {
-      guard let entry = entryDict(for: ws) else { continue }
+      guard !ws.isEphemeral, let entry = entryDict(for: ws) else { continue }
       NSLog("[aterm] saveWorkspaces: orphaned workspace '%@' not in workspaceOrder — including", ws.name)
       entries.append(entry)
     }
@@ -501,15 +700,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         : name
       if effectiveName.isEmpty { continue }
 
+      // Failsafe: force isSystem=true if this entry matches the configured orchestrator name.
+      // Prevents self-reinforcing corruption where sessions.json has isSystem:false for orchestrator.
+      let orchName = AtermSettings.shared.orchestratorName
+      let resolvedIsSystem = entry.is_system
+        || effectiveName == orchName
+        || effectiveName == "orchestrator"
+
       entries.append(
         RestoredEntry(
           name: effectiveName,
           cwd: cwd,
           command: commandStr,
           customCommand: custom,
-          isSystem: entry.is_system
+          isSystem: resolvedIsSystem
         ))
     }
+
+    // Determine which entry to auto-select at launch (P0 fix):
+    //   1. First isSystem entry (orchestrator) — takes priority per direct user
+    //      quote "default가 orchestrator여야 함". Orchestrator is expected to be
+    //      first in workspaceOrder (per insert(at: 0) at createWorkspace:1502)
+    //      but may be any index in the restore entries array.
+    //   2. Fallback: last entry (preserves prior behavior when no orchestrator
+    //      exists, e.g. first-install or user removed orchestrator).
+    let shouldSelectIndex = entries.firstIndex(where: { $0.isSystem })
+      ?? max(0, entries.count - 1)
 
     // Now create workspaces from collected data (skipSave until the end)
     for (i, se) in entries.enumerated() {
@@ -534,7 +750,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         customCommand: se.customCommand,
         cliArgs: restoredCliArgs,
         cwd: effectiveCwd,
-        shouldSelect: i == entries.count - 1,
+        shouldSelect: i == shouldSelectIndex,
         isSystem: se.isSystem,
         skipSave: true
       )
@@ -871,11 +1087,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let settings = AtermSettings.shared
     let schemeIndex = AtermSettings.schemeIndex(settings.colorScheme)
     let fontSize = Float(settings.fontSize)
-    let lineHeightPx = Float(settings.fontSize * settings.lineHeight)
+
+    // Apply font family FIRST — invalidates atlas under lock if changed, so the
+    // subsequent cell-metric calculation uses the new font, and the next render
+    // frame re-rasterizes glyphs from it. Ordering is enforced: setFontFamily →
+    // metric recompute → FFI push → aterm_core_resize → render. Never reversed.
+    GlyphAtlas.shared.setFontFamily(settings.fontFamily)
+    let resolvedFontName = GlyphAtlas.shared.resolvedFontFamily
+
+    // Derive cell dimensions from CTFont metrics (Ghostty formula).
+    // P0 cursor fix: take max(primary, CJK fallback) line height so cells always
+    // accommodate the tallest glyph. Without this, CJK glyphs (whose fallback
+    // font has larger ascent+descent+leading) overflow the cell bounding box,
+    // causing cursors to appear top-aligned.
+    let ctFont = CTFontCreateWithName(resolvedFontName as CFString, CGFloat(settings.fontSize), nil)
+    let primaryAscent = CTFontGetAscent(ctFont)
+    let primaryDescent = CTFontGetDescent(ctFont)   // positive value
+    let primaryLeading = CTFontGetLeading(ctFont)
+    let primaryTotal = primaryAscent + primaryDescent + primaryLeading
+
+    // Measure CJK fallback font metrics — these are typically 1-3pt taller than Latin.
+    // CTFontCreateForString triggers the same font substitution that GlyphAtlas uses
+    // at rasterize time, so we measure the exact fonts that will render CJK glyphs.
+    var cjkMaxTotal = primaryTotal
+    for cjkProbe in ["한", "漢", "\u{23FA}"] as [CFString] {
+        let fallback = CTFontCreateForString(ctFont, cjkProbe, CFRange(location: 0, length: 1))
+        let total = CTFontGetAscent(fallback) + CTFontGetDescent(fallback) + CTFontGetLeading(fallback)
+        if total > cjkMaxTotal { cjkMaxTotal = total }
+    }
+    let cellHeight = Float(ceil(max(primaryTotal, cjkMaxTotal)))
+
+    // Cell width: max advance across printable ASCII glyphs
+    var glyphs = [CGGlyph](repeating: 0, count: 95)
+    let chars: [UniChar] = Array(UniChar(32)...UniChar(126))
+    CTFontGetGlyphsForCharacters(ctFont, chars, &glyphs, 95)
+    var advances = [CGSize](repeating: .zero, count: 95)
+    CTFontGetAdvancesForGlyphs(ctFont, .horizontal, glyphs, &advances, 95)
+    let cellWidth = Float(round(advances.map { CGFloat($0.width) }.max() ?? CGFloat(settings.fontSize) * 0.6))
 
     aterm_core_set_color_scheme(core, schemeIndex)
     aterm_core_set_font_size(core, fontSize)
-    aterm_core_set_line_height(core, lineHeightPx)
+    view.currentFontSize = fontSize
+    view.cursorStyleSetting = settings.cursorStyle
+    aterm_core_set_line_height(core, cellHeight)
+    aterm_core_set_cell_width(core, cellWidth)
+
+    // Sync Rust default fg/bg and MetalRenderer bg from scheme palette
+    var fgR: UInt8 = 0, fgG: UInt8 = 0, fgB: UInt8 = 0
+    var bgR: UInt8 = 0, bgG: UInt8 = 0, bgB: UInt8 = 0
+    aterm_core_scheme_fg_color(schemeIndex, &fgR, &fgG, &fgB)
+    aterm_core_scheme_bg_color(schemeIndex, &bgR, &bgG, &bgB)
+    aterm_core_set_default_colors(core, fgR, fgG, fgB, bgR, bgG, bgB)
+    view.applySchemeBackground(schemeIndex)
 
     // Font size / line height changes affect grid dimensions — trigger resize
     let backingSize = view.convertToBacking(view.bounds).size
@@ -1078,6 +1341,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     return paths
   }
 
+  private static func suppressScrollViewFocusRings(in view: NSView?) {
+    guard let view = view else { return }
+    view.subviews.forEach { sub in
+      (sub as? NSScrollView)?.focusRingType = .none
+      suppressScrollViewFocusRings(in: sub)
+    }
+  }
+
   private func ensureTeleptyDaemon() {
     DispatchQueue.global(qos: .utility).async {
       // Check if telepty daemon is already running
@@ -1154,25 +1425,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let config = readConfig()
     let tailscale = config["tailscale"] as? [String: Any]
     let connectOnLaunch = tailscale?["connect_on_launch"] as? Bool ?? false
-    if !connectOnLaunch {
-      NSLog("[aterm] tailscale disabled in aterm.json (connect_on_launch=false)")
-      return
-    }
+    if !connectOnLaunch { return }
 
-    let result = withOptionalCString(env["ATERM_TAILSCALE_HOSTNAME"]) { hostnamePtr in
-      withOptionalCString(env["ATERM_TAILSCALE_CONTROL_URL"]) { controlURLPtr in
-        withOptionalCString(env["ATERM_TAILSCALE_AUTHKEY"]) { authKeyPtr in
-          aterm_tailscale_connect(hostnamePtr, controlURLPtr, authKeyPtr)
+    // Capture env values before async dispatch (env dict is reference-safe
+    // but capture explicitly for clarity)
+    let hostname = env["ATERM_TAILSCALE_HOSTNAME"]
+    let controlURL = env["ATERM_TAILSCALE_CONTROL_URL"]
+    let authKey = env["ATERM_TAILSCALE_AUTHKEY"]
+
+    // Run tailscale connect off main thread to avoid blocking activation
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let result = withOptionalCString(hostname) { hostnamePtr in
+        withOptionalCString(controlURL) { controlURLPtr in
+          withOptionalCString(authKey) { authKeyPtr in
+            aterm_tailscale_connect(hostnamePtr, controlURLPtr, authKeyPtr)
+          }
         }
       }
-    }
 
-    if result != 0 {
-      NSLog("[aterm] tailscale startup failed (no auth key or network issue) — skipping")
-      return
-    }
+      if result != 0 {
+        NSLog("[aterm] tailscale startup failed (no auth key or network issue) — skipping")
+        return
+      }
 
-    logTailscaleStatus(prefix: "startup")
+      self?.logTailscaleStatus(prefix: "startup")
+    }
   }
 
   private func logTailscaleStatus(prefix: String) {
@@ -1237,6 +1514,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     isSystem: Bool = false,
     skipSave: Bool = false
   ) {
+    // Dedup: skip creation if a workspace with the same name AND cwd already exists.
+    // Prevents duplicate workspaces from IPC CreateWorkspace or external directory scans
+    // re-creating workspaces that are already running.
+    let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if managedWorkspaces.values.contains(where: { ws in
+      ws.name.lowercased() == normalizedName && ws.cwd == cwd
+    }) {
+      NSLog("[aterm] skipped duplicate workspace: '%@' (cwd: %@)", name, cwd)
+      if shouldSelect, let existingID = workspaceID(named: name) {
+        selectWorkspace(existingID)
+      }
+      return
+    }
+
     // Pre-create Claude Code trust directory so the trust prompt is skipped
     if command == .claude {
       ensureClaudeProjectTrust(cwd: cwd)
@@ -1252,10 +1543,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     terminalView.initialWorkingDirectory = cwd
     terminalView.autoresizingMask = [.width, .height]
     terminalView.isHidden = true
-    terminalView.onShellSpawned = { [weak self] result in
+    terminalView.onShellSpawned = { [weak self, isSystem, resolvedName] result in
       guard let self else { return }
       DispatchQueue.main.async {
         self.refreshWorkspaceProcesses()
+      }
+      // Propagate isSystem flag to Rust global session registry after spawn registers the session
+      if isSystem {
+        resolvedName.withCString { namePtr in
+          aterm_core_set_workspace_system(nil, namePtr, true)
+        }
       }
     }
 
@@ -1282,6 +1579,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.scheduleIdleCheck(for: workspaceID)
       }
+    }
+    // Item 6: Rollback workspace if GPU init fails
+    terminalView.onGPUInitFailed = { [weak self, workspaceID] in
+      guard let self else { return }
+      NSLog("[aterm] GPU init failed for workspace — rolling back")
+      self.managedWorkspaces.removeValue(forKey: workspaceID)
+      self.workspaceOrder.removeAll { $0 == workspaceID }
+      self.rebuildSidebarState()
     }
     workspace.lastLaunchTime = Date()
     managedWorkspaces[workspaceID] = workspace
@@ -1339,6 +1644,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       arguments += ["--orchestrator-session", orchName]
     }
     task.arguments = arguments
+
+    // Fix: prepend common npm/homebrew bin paths so devkit is found when
+    // aterm.app is launched from Finder (which has restricted default PATH).
+    // Without this, /usr/bin/env cannot resolve 'aigentry-devkit' → exit 127.
+    var env = ProcessInfo.processInfo.environment
+    let home = NSHomeDirectory()
+    let extraPaths = [
+      "\(home)/.npm-global/bin",
+      "/usr/local/bin",
+      "/opt/homebrew/bin",
+    ]
+    if let existing = env["PATH"] {
+      env["PATH"] = extraPaths.joined(separator: ":") + ":" + existing
+    }
+    task.environment = env
 
     // GAP 2: Capture stdout to parse INJECT: lines (was FileHandle.nullDevice)
     let stdoutPipe = Pipe()
@@ -1505,16 +1825,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func selectWorkspace(_ id: UUID) {
+    guard id != currentSelectedWorkspaceId else { return }
     guard let workspace = managedWorkspaces[id] else { return }
 
     for candidateID in workspaceOrder {
-      managedWorkspaces[candidateID]?.terminalView.isHidden = candidateID != id
+      let hidden = candidateID != id
+      managedWorkspaces[candidateID]?.terminalView.isHidden = hidden
+      // #208: Suspend GPU for inactive workspaces (saves ~76MB swapchain each)
+      if hidden, let core = managedWorkspaces[candidateID]?.terminalView.corePointer {
+        aterm_core_suspend_gpu(core)
+      }
     }
 
     terminalView = workspace.terminalView
     workspaceSidebarModel.selectedWorkspaceName = workspace.name
     busClient.setCore(workspace.terminalView.corePointer)
-    window.makeFirstResponder(workspace.terminalView)
+
+    // #240: Show orchestrator input bar for isSystem workspaces
+    let showInputBar = workspace.isSystem
+    orchestratorInputBar.isHidden = !showInputBar
+    terminalContainerBottomToWindow.isActive = !showInputBar
+    terminalContainerBottomToInputBar.isActive = showInputBar
+
+    // Tell input bar which CLI is active so / dropdown shows the right commands
+    if showInputBar {
+      orchestratorInputBar.setCLI(workspace.launchCommand.rawValue)
+    }
+
+    // ESC toggle: terminal → input bar (only for isSystem workspaces)
+    workspace.terminalView.onEscapeToInputBar = showInputBar ? { [weak self] in
+      self?.orchestratorInputBar.focus()
+    } : nil
+
+    if showInputBar {
+      orchestratorInputBar.focus()
+    } else {
+      window.makeFirstResponder(workspace.terminalView)
+    }
+    currentSelectedWorkspaceId = id
     rebuildSidebarState()
 
     // Retry shell spawn for views that failed when hidden during initial setup.
@@ -1580,6 +1928,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     if workspace.isSystem && !allowSystem { return }
     workspace.idleTimer?.invalidate()
     workspace.idleTimer = nil
+    deregisterTeleptyWorkspace(name: workspace.name)
     managedWorkspaces.removeValue(forKey: id)
 
     workspace.terminalView.removeFromSuperview()
@@ -1598,6 +1947,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       rebuildSidebarState()
     }
 
+    saveWorkspaces()
+  }
+
+  /// Batch-remove multiple workspaces with a single sidebar rebuild + save (cmux pattern).
+  private func removeWorkspaces(ids: [UUID]) {
+    var removedNames: [String] = []
+    let currentSelection = workspaceSidebarModel.selectedWorkspaceName
+
+    for id in ids {
+      guard let workspace = managedWorkspaces[id] else { continue }
+      if workspace.isSystem { continue }
+      // Explicit PTY cleanup via FFI (deterministic, not ARC-dependent)
+      workspace.name.withCString { aterm_workspace_close($0) }
+      workspace.idleTimer?.invalidate()
+      workspace.idleTimer = nil
+      deregisterTeleptyWorkspace(name: workspace.name)
+      workspace.terminalView.removeFromSuperview()
+      removedNames.append(workspace.name)
+      managedWorkspaces.removeValue(forKey: id)
+      workspaceOrder.removeAll { $0 == id }
+    }
+
+    guard !removedNames.isEmpty else { return }
+
+    // Single selection update after ALL removals
+    if let current = currentSelection, removedNames.contains(current) {
+      if let nextId = workspaceOrder.first {
+        selectWorkspace(nextId)
+      } else {
+        terminalView = nil
+        workspaceSidebarModel.selectedWorkspaceName = nil
+        currentSelectedWorkspaceId = nil
+      }
+    }
+    rebuildSidebarState()
     saveWorkspaces()
   }
 
@@ -1664,12 +2048,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func attachExternalSession(_ sessionID: String) {
+    // Fix 2 (#205): Stop retry after 3 failures
+    let failures = attachFailures[sessionID] ?? 0
+    if failures >= 3 {
+      NSLog("[aterm] attach '%@' blocked — %d consecutive failures", sessionID, failures)
+      return
+    }
+
+    // Dedup: if a native workspace with this name already exists, don't create attach
+    if managedWorkspaces.values.contains(where: { $0.name == sessionID && !$0.isEphemeral }) {
+      if let wsID = workspaceID(named: sessionID) {
+        selectWorkspace(wsID)
+      }
+      return
+    }
+
     // Check if already attached — find existing workspace running telepty attach for this session
     for id in workspaceOrder {
       if let ws = managedWorkspaces[id],
         ws.launchCommand == .custom,
         ws.customCommand == "telepty attach \(sessionID)"
       {
+        // Fix 1 (#205): If dead, remove ghost and increment failure counter
+        if ws.status == "dead" {
+          attachFailures[sessionID] = failures + 1
+          removeWorkspace(id: id, allowSystem: true)
+          if (attachFailures[sessionID] ?? 0) >= 3 {
+            NSLog("[aterm] attach '%@' gave up after 3 failures", sessionID)
+            return
+          }
+          break  // removed, fall through to recreate
+        }
         selectWorkspace(id)
         return
       }
@@ -1679,13 +2088,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let session = busClient.sessions.first { $0.id == sessionID }
     let cwd = session?.cwd ?? NSHomeDirectory()
 
+    // Fix 3 (#205): Attach workspaces are ephemeral — not persisted to sessions.json
     createWorkspace(
       name: sessionID,
       command: .custom,
       customCommand: "telepty attach \(sessionID)",
       cwd: cwd,
-      shouldSelect: true
+      shouldSelect: true,
+      skipSave: true
     )
+    if let wsID = workspaceID(named: sessionID) {
+      managedWorkspaces[wsID]?.isEphemeral = true
+    }
   }
 
   private func sendKey(toWorkspaceNamed workspaceName: String, key: String) {
@@ -2061,6 +2475,7 @@ private final class ManagedWorkspace {
   var lastLaunchTime: Date?
   var lastActivityAt: Date
   var cliGaveUp: Bool = false
+  var isEphemeral: Bool = false  // #193: IPC-created workspaces — not persisted to sessions.json
   var idleTimer: Timer?
 
   init(

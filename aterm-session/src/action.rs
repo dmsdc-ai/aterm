@@ -110,6 +110,9 @@ impl ActionResponse {
 pub enum AtermEvent {
     WorkspaceCreated { id: String, cli: String, cwd: String },
     WorkspaceClosed { id: String },
+    WorkspaceBatchClosed { ids: Vec<String> },
+    WorkspaceCreationFailed { id: String, reason: String },
+    WorkspaceRestored { id: String },
     WorkspaceStatusChanged { id: String, status: String },
     ShellReady { id: String },
     InjectDelivered { workspace: String, from: String },

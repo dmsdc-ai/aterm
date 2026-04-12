@@ -1,4 +1,4 @@
-.PHONY: all clean run run-dev rust swift app install dist uninstall
+.PHONY: all clean run run-dev rust swift metal app install dist uninstall
 
 # Paths
 ROOT := $(shell pwd)
@@ -44,8 +44,15 @@ swift: rust
 		-o $(BUILD_DIR)/aterm
 	@echo "[build] Swift binary built: $(BUILD_DIR)/aterm"
 
+# Step 2.5: Compile Metal shaders → default.metallib
+metal:
+	@mkdir -p $(BUILD_DIR)
+	xcrun -sdk macosx metal -std=macos-metal2.0 -c $(MACOS_DIR)/Sources/Shaders.metal -o $(BUILD_DIR)/Shaders.air
+	xcrun -sdk macosx metallib $(BUILD_DIR)/Shaders.air -o $(BUILD_DIR)/default.metallib
+	@echo "[build] Metal shaders compiled: $(BUILD_DIR)/default.metallib"
+
 # Step 3: Create .app bundle
-app: swift
+app: swift metal
 	@mkdir -p $(APP_DIR)/MacOS
 	@mkdir -p $(APP_DIR)/Frameworks
 	cp $(BUILD_DIR)/aterm $(APP_DIR)/MacOS/aterm
@@ -72,11 +79,15 @@ app: swift
 	@echo '    <true/>' >> $(APP_DIR)/Info.plist
 	@echo '    <key>CFBundleInfoDictionaryVersion</key>' >> $(APP_DIR)/Info.plist
 	@echo '    <string>6.0</string>' >> $(APP_DIR)/Info.plist
+	@echo '    <key>CFBundleIconFile</key>' >> $(APP_DIR)/Info.plist
+	@echo '    <string>AppIcon</string>' >> $(APP_DIR)/Info.plist
 	@echo '</dict>' >> $(APP_DIR)/Info.plist
 	@echo '</plist>' >> $(APP_DIR)/Info.plist
 	@mkdir -p $(APP_DIR)/Resources/bin
+	cp $(BUILD_DIR)/default.metallib $(APP_DIR)/Resources/default.metallib
 	cp $(ROOT)/bin/aterm $(APP_DIR)/Resources/bin/aterm
 	chmod +x $(APP_DIR)/Resources/bin/aterm
+	@if [ -f $(ROOT)/macos/Resources/AppIcon.icns ]; then cp $(ROOT)/macos/Resources/AppIcon.icns $(APP_DIR)/Resources/AppIcon.icns; fi
 	codesign --force --deep --sign - $(BUILD_DIR)/aterm.app
 	@echo "[build] App bundle created: $(BUILD_DIR)/aterm.app"
 

@@ -1,6 +1,6 @@
 {
   "name": "@dmsdc-ai/aterm",
-  "version": "0.1.93",
+  "version": "0.2.13",
   "description": "Native aterm launcher package",
   "type": "module",
   "main": "./bin/aterm.js",
@@ -17,7 +17,7 @@
     "package.json"
   ],
   "optionalDependencies": {
-    "@dmsdc-ai/aterm-darwin-arm64": "0.1.93"
+    "@dmsdc-ai/aterm-darwin-arm64": "0.2.13"
   },
   "dependencies": {
     "@dmsdc-ai/aigentry-devkit": ">=0.0.19",

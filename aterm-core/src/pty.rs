@@ -33,6 +33,9 @@ pub struct PtyOutputSignal {
     dirty: Arc<AtomicBool>,
     wake_callback: WakeCallback,
     stopped: Arc<AtomicBool>,
+    /// Shared sync flag: true = VTE parser in synchronized output (?2026h/l).
+    /// Suppresses wake_callback in mark_dirty() to prevent partial frame renders (#201).
+    sync_active: Arc<AtomicBool>,
 }
 
 impl Default for PtyOutputSignal {
@@ -42,6 +45,7 @@ impl Default for PtyOutputSignal {
             dirty: Arc::new(AtomicBool::new(false)),
             wake_callback: Arc::new(std::sync::OnceLock::new()),
             stopped: Arc::new(AtomicBool::new(false)),
+            sync_active: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -57,10 +61,20 @@ impl PtyOutputSignal {
         let _ = self.wake_callback.set(Box::new(cb));
     }
 
+    /// Get the shared sync flag for TerminalState to update after advance().
+    pub fn sync_active_flag(&self) -> Arc<AtomicBool> {
+        self.sync_active.clone()
+    }
+
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
         self.notify.notify_one();
         if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        // Suppress render callback during synchronized output (#201).
+        // Data is still marked dirty — render fires when sync ends.
+        if self.sync_active.load(Ordering::Acquire) {
             return;
         }
         if let Some(f) = self.wake_callback.get() {
@@ -128,7 +142,7 @@ struct Workspace {
     custom_command: Option<String>,
     is_system: bool,
     resume_command: Option<String>,
-    /// Pending OSC 133 marks detected in reader_loop, drained by sync_pty.
+    /// Pending OSC 133 marks detected in reader_loop, drained by AdvanceHandle::advance().
     pending_osc133: crate::terminal::PendingOsc133,
 }
 
@@ -256,6 +270,7 @@ impl PtyManager {
         is_system: bool,
         resume_command: Option<String>,
         pending_osc133_handle: Option<crate::terminal::PendingOsc133>,
+        advance_handle: Option<crate::terminal::AdvanceHandle>,
     ) -> Result<String, String> {
         if self.workspaces.contains_key(&id) {
             return Err(format!("Workspace '{}' already exists", id));
@@ -278,7 +293,7 @@ impl PtyManager {
             spawn_workspace_process(&cwd, &shell, &launch_args, clone_size(&size), Some(&id))?;
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(spawned.writer));
-        let inject_queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+        let inject_queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::with_mailbox(&id)));
         let inject_signal = InjectSignal::new();
         let idle_state: Arc<Mutex<IdleState>> = Arc::new(Mutex::new(IdleState::new()));
         let size = Arc::new(Mutex::new(size));
@@ -339,6 +354,7 @@ impl PtyManager {
                 reader_inject_signal,
                 reader_restart_count,
                 reader_pending_osc133,
+                advance_handle,
             );
         });
 
@@ -382,6 +398,22 @@ impl PtyManager {
             pending_osc133,
         };
 
+        // Register with global session registry for debounced save
+        if !ephemeral {
+            crate::session::register_session(crate::session::SessionEntry {
+                id: workspace.id.clone(),
+                cwd: workspace.cwd.clone(),
+                command: workspace.command.clone(),
+                args: crate::session::strip_claude_continue_arg(
+                    &workspace.command,
+                    &workspace.args,
+                ),
+                custom_command: workspace.custom_command.clone(),
+                is_system: workspace.is_system,
+                resume_command: workspace.resume_command.clone(),
+            });
+        }
+
         self.workspaces.insert(id.clone(), workspace);
         log_stderr!("[PTY] workspace created: {}", id);
         Ok(id)
@@ -412,10 +444,21 @@ impl PtyManager {
             entry.is_system,
             entry.resume_command,
             None, // no terminal yet during restore
+            None, // no advance handle during restore
         )
     }
 
     pub fn close(&mut self, id: &str) -> Result<(), String> {
+        // Idempotent: if already closing/closed/dead, no-op
+        if let Some(ws) = self.workspaces.get(id) {
+            let current_status = ws.status.0.lock()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            if matches!(current_status.as_str(), "closing" | "closed" | "dead") {
+                return Ok(());
+            }
+        }
+
         let ws = self
             .workspaces
             .remove(id)
@@ -436,6 +479,71 @@ impl PtyManager {
             let _ = child.kill();
         }
 
+        // Deregister from global session registry
+        crate::session::deregister_session(id);
+
+        Ok(())
+    }
+
+    /// Explicit workspace close with deterministic cleanup.
+    /// 1. Transition lifecycle to Closing
+    /// 2. Send SIGHUP to child process
+    /// 3. Close master fd (via writer drop)
+    /// 4. Free writer
+    /// 5. Transition to Closed
+    /// 6. Emit event via EventBus
+    /// Idempotent: double-close is a no-op.
+    pub fn close_explicit(&mut self, id: &str) -> Result<(), String> {
+        // Idempotent: if already closing/closed/dead, no-op
+        if let Some(ws) = self.workspaces.get(id) {
+            let current_status = ws.status.0.lock()
+                .map(|s| s.clone())
+                .unwrap_or_default();
+            if matches!(current_status.as_str(), "closing" | "closed" | "dead") {
+                return Ok(());
+            }
+        }
+
+        let ws = self
+            .workspaces
+            .remove(id)
+            .ok_or_else(|| format!("Workspace '{}' not found", id))?;
+
+        // Step 1: Transition to Closing
+        set_workspace_status(&ws.status, "closing");
+        if let Ok(app) = crate::global_app().lock() {
+            app.broadcast_workspace_event(&serde_json::json!({
+                "type": "StatusChanged",
+                "id": id,
+                "status": "closing"
+            }));
+        }
+
+        // Step 2: Kill child process (SIGHUP)
+        if let Ok(mut child) = ws.child.lock() {
+            let _ = child.kill();
+        }
+
+        // Step 3-4: Close writer (drops master fd)
+        close_writer_handle(&ws.writer);
+
+        // Clear inject queue
+        if let Ok(mut queue) = ws.inject_queue.lock() {
+            queue.clear();
+        }
+
+        // Step 5: Transition to Closed
+        set_workspace_status(&ws.status, "closed");
+
+        // Deregister from global session registry
+        crate::session::deregister_session(id);
+
+        // Step 6: Emit event via EventBus + app cleanup
+        if let Ok(mut app) = crate::global_app().lock() {
+            app.handle_workspace_marked_dead(id);
+        }
+
+        log_stderr!("[PTY] workspace explicitly closed: {}", id);
         Ok(())
     }
 
@@ -589,10 +697,11 @@ impl PtyManager {
             .collect()
     }
 
-    pub fn drain_term_bytes(&self, id: &str) -> Result<Vec<u8>, String> {
+    pub fn drain_term_bytes(&self, id: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         let ws = self.workspace(id)?;
         let mut queue = ws.term_bytes.lock().map_err(|e| e.to_string())?;
-        Ok(std::mem::take(&mut *queue))
+        let n = queue.len().min(max_bytes);
+        Ok(queue.drain(..n).collect())
     }
 
 
@@ -668,6 +777,8 @@ fn mark_workspace_dead_handles(
         queue.clear();
     }
     close_writer_handle(writer);
+    // Deregister from global session registry
+    crate::session::deregister_session(id);
     if !already_dead {
         log_stderr!("[PTY] workspace marked dead: {}", id);
     }
@@ -860,6 +971,7 @@ fn spawn_workspace_process(
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    cmd.env("COLORFGBG", "15;0");  // dark theme: white fg on black bg
     cmd.env("TERM_PROGRAM", "aterm");
     cmd.env("TERM_PROGRAM_VERSION", "3.0");
     apply_utf8_locale_fallback(&mut cmd);
@@ -969,6 +1081,7 @@ fn try_restart_workspace(
     signal: &PtyOutputSignal,
     restart_count: &Arc<AtomicU32>,
     pending_osc133: &crate::terminal::PendingOsc133,
+    restart_advance: Option<crate::terminal::AdvanceHandle>,
 ) -> bool {
     log_stderr!("[PTY] auto-restart: attempting respawn for {}", ws_id);
 
@@ -1071,6 +1184,7 @@ fn try_restart_workspace(
             restart_inject_signal,
             restart_restart_count,
             restart_pending_osc133,
+            restart_advance,
         );
     });
 
@@ -1115,7 +1229,9 @@ struct ShellReadyDetector {
 }
 
 const SHELL_READY_MAX_CHUNK: usize = 256;
-const SHELL_READY_FALLBACK: Duration = Duration::from_secs(10);
+// Increased from 10s to 30s — codex resume --last and slow CLI startups
+// frequently hit the 10s fallback before the CLI is actually interactive.
+const SHELL_READY_FALLBACK: Duration = Duration::from_secs(30);
 
 impl ShellReadyDetector {
     fn new() -> Self {
@@ -1258,6 +1374,7 @@ fn reader_loop(
     inject_signal: InjectSignal,
     restart_count: Arc<AtomicU32>,
     pending_osc133: crate::terminal::PendingOsc133,
+    advance_handle: Option<crate::terminal::AdvanceHandle>,
 ) {
     let mut buf = [0u8; 4096];
     let mut leftover: Vec<u8> = Vec::new();
@@ -1269,6 +1386,7 @@ fn reader_loop(
     let mut trust_prompt = TrustPromptDetector::new();
     let mut osc133_detected = false;
     let mut first_output_logged = false;
+    let mut advance = advance_handle;
 
     loop {
         match reader.read(&mut buf) {
@@ -1294,9 +1412,12 @@ fn reader_loop(
                     );
                 }
 
-                // Feed RAW bytes to VTE parser immediately — no UTF-8 filtering.
-                // Prevents escape sequence loss when non-UTF-8 bytes are present.
-                if let Ok(mut tb) = term_bytes.lock() {
+                // Feed RAW bytes to terminal.
+                // Fast path: advance directly on reader thread (no main-thread stall).
+                // Fallback: buffer to term_bytes when advance_handle is unavailable.
+                if let Some(ref mut ah) = advance {
+                    ah.advance(&buf[..n]);
+                } else if let Ok(mut tb) = term_bytes.lock() {
                     tb.extend_from_slice(&buf[..n]);
                 }
                 signal.mark_dirty();
@@ -1466,16 +1587,26 @@ fn reader_loop(
     if !is_closing && auto_restart {
         let attempts = restart_count.fetch_add(1, Ordering::SeqCst);
         if attempts < 3 {
+            // Strip resume/session-continuation flags so the CLI starts fresh.
+            // claude: remove --continue
+            // codex:  remove 'resume' and '--last' (so 'codex resume --last --dangerous...'
+            //         becomes 'codex --dangerous...' which starts a new session)
+            // gemini: remove --continue (same as claude pattern)
             let retry_args: Vec<String> = args
                 .iter()
-                .filter(|a| a.as_str() != "--continue")
+                .filter(|a| {
+                    let s = a.as_str();
+                    s != "--continue" && s != "--last" && s != "resume"
+                })
                 .cloned()
                 .collect();
             log_stderr!(
-                "[PTY] auto-restart: attempt {}/3 for {} (without --continue)",
+                "[PTY] auto-restart: attempt {}/3 for {} (stripped resume flags)",
                 attempts + 1,
                 ws_id
             );
+            // Create a fresh AdvanceHandle (new parser) for the restarted process.
+            let restart_advance = advance.as_ref().map(|ah| ah.fresh_for_restart());
             let restarted = try_restart_workspace(
                 &ws_id,
                 &cwd,
@@ -1494,6 +1625,7 @@ fn reader_loop(
                 &signal,
                 &restart_count,
                 &pending_osc133,
+                restart_advance,
             );
             if restarted {
                 return; // New reader thread is running, don't mark dead
@@ -1909,7 +2041,7 @@ mod tests {
     #[test]
     fn shell_ready_constants() {
         assert_eq!(SHELL_READY_MAX_CHUNK, 256);
-        assert_eq!(SHELL_READY_FALLBACK, Duration::from_secs(10));
+        assert_eq!(SHELL_READY_FALLBACK, Duration::from_secs(30));
     }
 
     // ===== TEST 3: Bootstrap shell_ready callback =====

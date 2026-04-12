@@ -144,6 +144,17 @@ function installNativeBundle() {
   fs.mkdirSync(path.dirname(targetApp), { recursive: true });
   fs.cpSync(sourceApp, targetApp, { recursive: true });
 
+  // Remove Gatekeeper quarantine attributes on the unsigned bundle so
+  // macOS does not refuse to launch it with "damaged app" on first run.
+  // Best-effort — failure is non-fatal and the user can run the same
+  // command manually if needed.
+  try {
+    const { execFileSync } = require('node:child_process');
+    execFileSync('xattr', ['-cr', targetApp], { stdio: 'ignore' });
+  } catch {
+    // xattr absence or permission denial — leave quarantine in place.
+    // User can run `xattr -cr <path>` manually if Gatekeeper blocks launch.
+  }
 }
 
 function runDevkitBootstrap() {

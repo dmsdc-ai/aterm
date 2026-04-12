@@ -139,6 +139,16 @@ final class WorkspaceSidebarModel: ObservableObject {
     @Published var creationDrafts: [WorkspaceDraft] = []
     @Published var isCreateSheetPresented = false
 
+    /// Pre-computed filtered lists — avoid Array() allocation inside SwiftUI view body
+    /// which breaks diffing and causes layout storms. Updated whenever `workspaces` changes.
+    @Published private(set) var orchestratorWorkspaces: [(offset: Int, element: SidebarWorkspace)] = []
+    @Published private(set) var regularWorkspaces: [(offset: Int, element: SidebarWorkspace)] = []
+
+    func recomputeFilteredLists() {
+        orchestratorWorkspaces = workspaces.enumerated().filter { $0.element.isSystem }
+        regularWorkspaces = workspaces.enumerated().filter { !$0.element.isSystem }
+    }
+
     private var eventSubscriberFD: Int32 = -1
     private var eventQueue: DispatchQueue?
     private var fallbackTimer: Timer?
@@ -176,7 +186,12 @@ final class WorkspaceSidebarModel: ObservableObject {
             let refreshed = Self.fetchWorkspacesFromIPC()
             DispatchQueue.main.async {
                 if let refreshed {
-                    self?.workspaces = refreshed
+                    // Phase 3: only update @Published if data actually changed —
+                    // prevents SwiftUI from re-diffing identical view trees.
+                    if self?.workspaces != refreshed {
+                        self?.workspaces = refreshed
+                        self?.recomputeFilteredLists()
+                    }
                 }
                 self?.refreshInFlight = false
             }
@@ -309,7 +324,10 @@ final class WorkspaceSidebarModel: ObservableObject {
         startFallbackPolling()
     }
 
-    /// Leading-edge throttle: first event fires immediately, then coalesce within 25ms.
+    /// Leading-edge throttle: first event fires immediately, then coalesce within 500ms.
+    /// P0 fix: 25ms was too aggressive — 40 refreshes/sec caused layout storms when
+    /// SwiftUI LazyVStack layout cost exceeded the debounce interval, creating a
+    /// cascading queue that blocked the main thread for 577+ seconds.
     private func scheduleCoalescedRefresh() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -318,11 +336,11 @@ final class WorkspaceSidebarModel: ObservableObject {
 
             self.coalesceWorkItem?.cancel()
 
-            if elapsed >= 0.025 {
+            if elapsed >= 0.5 {
                 self.lastRefreshTime = now
                 self.refreshWorkspaces()
             } else {
-                let delay = 0.025 - elapsed
+                let delay = 0.5 - elapsed
                 let item = DispatchWorkItem { [weak self] in
                     guard let self else { return }
                     self.lastRefreshTime = CFAbsoluteTimeGetCurrent()
@@ -697,6 +715,7 @@ struct SessionSidebarView: View {
     let onSelectWorkspace: (String) -> Void
     let onRenameWorkspace: (String, String) -> Void
     let onCloseWorkspace: (String) -> Void
+    let onBatchCloseWorkspaces: ([String]) -> Void
     let onChangeWorkspaceCLI: (String, String) -> Void
     let onRestartWorkspace: (String) -> Void
     let onAttachExternalSession: (String) -> Void
@@ -736,8 +755,10 @@ struct SessionSidebarView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                     } else {
-                        let orchestrators = workspaceModel.workspaces.enumerated().filter { $0.element.isSystem }
-                        let regulars = workspaceModel.workspaces.enumerated().filter { !$0.element.isSystem }
+                        // Use pre-computed filtered lists from model
+                        // (avoids Array() allocation + filter inside SwiftUI body).
+                        let orchestrators = workspaceModel.orchestratorWorkspaces
+                        let regulars = workspaceModel.regularWorkspaces
 
                         // — Orchestrator section (#181)
                         if !orchestrators.isEmpty {
@@ -753,7 +774,7 @@ struct SessionSidebarView: View {
                             .padding(.top, 8)
                             .padding(.bottom, 4)
 
-                            ForEach(Array(orchestrators), id: \.element.id) { item in
+                            ForEach(orchestrators, id: \.element.id) { item in
                                 let index = item.offset
                                 let workspace = item.element
                                 OrchestratorRowView(
@@ -776,7 +797,7 @@ struct SessionSidebarView: View {
                         }
 
                         // — Regular workspaces
-                        ForEach(Array(regulars), id: \.element.id) { item in
+                        ForEach(regulars, id: \.element.id) { item in
                             let index = item.offset
                             let workspace = item.element
                             WorkspaceRowView(
@@ -817,7 +838,8 @@ struct SessionSidebarView: View {
                 workspaceModel.stopAutoRefresh()
             }
 
-            Divider().overlay(Color(nsColor: AtermTheme.border))
+            // v3 Direction E Corrected — removed Divider above Settings button
+            // per user directive "아랫부분 경계들 다 없애줘" (remove all boundaries)
 
             Button(action: onOpenSettings) {
                 HStack(spacing: 6) {
@@ -830,6 +852,7 @@ struct SessionSidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
@@ -1039,8 +1062,10 @@ struct SessionSidebarView: View {
             }
 
             Button(count > 1 ? "Close Workspaces" : "Close Workspace", role: .destructive) {
-                for target in nonSystemTargets {
-                    onCloseWorkspace(target.id)
+                if nonSystemTargets.count > 1 {
+                    onBatchCloseWorkspaces(nonSystemTargets.map(\.id))
+                } else if let single = nonSystemTargets.first {
+                    onCloseWorkspace(single.id)
                 }
                 selectedWorkspaceIds.removeAll()
                 lastSelectionIndex = nil
@@ -1290,6 +1315,8 @@ struct WorkspaceRowView<MenuContent: View>: View {
         .cornerRadius(4)
         .padding(.horizontal, 4)
         .contentShape(RoundedRectangle(cornerRadius: 4))
+        // #205: Dim dead/closing workspaces so they're visually distinct
+        .opacity(workspace.status == "dead" || workspace.status == "closing" ? 0.5 : 1.0)
         .onTapGesture(perform: onSelect)
         .contextMenu { contextMenuContent() }
     }
@@ -1388,7 +1415,7 @@ struct OrchestratorRowView<MenuContent: View>: View {
         }
         .background(
             isActive
-                ? Color(nsColor: AtermTheme.orchestrator).opacity(0.20)
+                ? Color(nsColor: AtermTheme.orchestrator).opacity(0.35)
                 : isInMultiSelection
                     ? Color(nsColor: AtermTheme.orchestrator).opacity(0.25)
                     : Color(nsColor: AtermTheme.orchestratorSubtle)
@@ -1397,11 +1424,11 @@ struct OrchestratorRowView<MenuContent: View>: View {
             RoundedRectangle(cornerRadius: 4)
                 .stroke(
                     isActive
-                        ? Color(nsColor: AtermTheme.orchestrator).opacity(0.45)
+                        ? Color(nsColor: AtermTheme.orchestrator).opacity(0.65)
                         : isInMultiSelection
                             ? Color(nsColor: AtermTheme.orchestrator).opacity(0.35)
                             : Color(nsColor: AtermTheme.orchestratorBorder),
-                    lineWidth: 1
+                    lineWidth: isActive ? 1.5 : 1
                 )
         )
         .cornerRadius(4)

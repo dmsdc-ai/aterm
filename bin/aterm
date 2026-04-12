@@ -379,9 +379,10 @@ if [ -z "$ATERM_IPC_SOCKET" ]; then
             shift
             exec telepty inject "$@" ;;
         list)
-            _has_telepty || _no_telepty_msg
-            shift
-            exec telepty list "$@" ;;
+            # Fall through to main case below — list ALWAYS merges union
+            # (internal via /tmp/aterm-*.sock discovery + telepty). No early
+            # short-circuit to telepty-only.
+            ;;
         status)
             if [ "$#" -le 1 ]; then
                 print_ecosystem_status
@@ -399,21 +400,36 @@ fi
 
 case "${1:-help}" in
     list)
-        if [ "${2:-}" = "--json" ]; then
-            # JSON mode: output merged JSON
-            python3 -c '
-import json, sys, os, subprocess, os.path
+        # Parse flags: --all (default), --internal-only, --telepty-only, --json
+        shift
+        _list_mode="all"
+        _list_json=false
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --all)           _list_mode="all"; shift ;;
+                --internal-only) _list_mode="internal"; shift ;;
+                --telepty-only)  _list_mode="telepty"; shift ;;
+                --json)          _list_json=true; shift ;;
+                *)               shift ;;  # ignore unknown
+            esac
+        done
+        ATERM_LIST_MODE="$_list_mode" ATERM_LIST_JSON_FLAG="$_list_json" python3 -c '
+import json, os, subprocess, glob
+import socket as S
+
+mode = os.environ.get("ATERM_LIST_MODE", "all")
+json_out = os.environ.get("ATERM_LIST_JSON_FLAG", "false") == "true"
+lang = os.environ.get("ATERM_UI_LANG", "en")
 
 sessions = []
 
-# 1. aterm internal sessions
-sock = os.environ.get("ATERM_IPC_SOCKET", "")
-if sock:
-    import socket as S
+def query_aterm_socket(sock_path):
+    """Query a single aterm IPC socket for workspaces. Returns list of dicts or []."""
+    out = []
     try:
         s = S.socket(S.AF_UNIX, S.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect(sock)
+        s.settimeout(2)
+        s.connect(sock_path)
         s.sendall(json.dumps({"action": "ListWorkspaces"}).encode() + b"\n")
         s.shutdown(S.SHUT_WR)
         data = b""
@@ -428,95 +444,72 @@ if sock:
             if ws.get("status") in ("dead", "closing"):
                 continue
             ws["terminal"] = "aterm"
+            ws["source"] = "internal"
             ws.setdefault("name", os.path.basename(ws.get("cwd", "")) or ws.get("id", "?"))
-            sessions.append(ws)
-    except: pass
+            out.append(ws)
+    except Exception:
+        pass
+    return out
 
-# 2. telepty external sessions (only if installed, deduplicated)
-aterm_names = set(s.get("name", "") for s in sessions)
-try:
-    result = subprocess.run(["telepty", "list", "--json"], capture_output=True, text=True, timeout=5)
-    if result.returncode == 0:
-        tdata = json.loads(result.stdout)
-        for ts in (tdata if isinstance(tdata, list) else tdata.get("sessions", [])):
-            ts.setdefault("terminal", ts.get("terminal", "external"))
-            ts.setdefault("name", ts.get("id", "?"))
-            if ts.get("name", "") in aterm_names:
-                continue
-            sessions.append(ts)
-except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError): pass
+# 1. aterm internal sessions — discover socket if needed
+if mode in ("all", "internal"):
+    sock = os.environ.get("ATERM_IPC_SOCKET", "")
+    if sock and os.path.exists(sock):
+        sessions.extend(query_aterm_socket(sock))
+    else:
+        # Socket discovery: glob /tmp/aterm-*.sock, try each until one responds
+        for candidate in glob.glob("/tmp/aterm-*.sock"):
+            got = query_aterm_socket(candidate)
+            if got:
+                sessions.extend(got)
+                break  # first responsive socket wins
 
-print(json.dumps({"sessions": sessions}))
-'
-        else
-            # Table mode: merged display
-            python3 -c '
-import json, sys, os, subprocess, os.path
-
-sessions = []
-lang = os.environ.get("ATERM_UI_LANG", "en")
-
-# 1. aterm internal sessions
-sock = os.environ.get("ATERM_IPC_SOCKET", "")
-if sock:
-    import socket as S
+# 2. telepty external sessions — deduplicated by name (internal precedence)
+if mode in ("all", "telepty"):
+    aterm_names = set(s.get("name", "") for s in sessions)
     try:
-        s = S.socket(S.AF_UNIX, S.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect(sock)
-        s.sendall(json.dumps({"action": "ListWorkspaces"}).encode() + b"\n")
-        s.shutdown(S.SHUT_WR)
-        data = b""
-        while True:
-            chunk = s.recv(4096)
-            if not chunk: break
-            data += chunk
-            if b"\n" in data: break
-        s.close()
-        resp = json.loads(data.decode().strip().split("\n")[0])
-        for ws in resp.get("data", []):
-            if ws.get("status") in ("dead", "closing"):
-                continue
-            name = ws.get("name") or os.path.basename(ws.get("cwd", "")) or ws.get("id", "?")
-            cli = ws.get("cli", "")
-            cwd = ws.get("cwd", "")
-            sessions.append((name, cli, cwd, "aterm"))
-    except: pass
+        result = subprocess.run(
+            ["telepty", "list", "--json"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            tdata = json.loads(result.stdout)
+            entries = tdata if isinstance(tdata, list) else tdata.get("sessions", [])
+            for ts in entries:
+                ts.setdefault("name", ts.get("id", "?"))
+                if ts.get("name", "") in aterm_names:
+                    continue  # internal precedence: drop telepty duplicate
+                ts.setdefault("terminal", ts.get("terminal", "external"))
+                ts["source"] = "telepty"
+                sessions.append(ts)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
 
-# 2. telepty external sessions (only if installed, deduplicated)
-aterm_names = set(r[0] for r in sessions)
-try:
-    result = subprocess.run(["telepty", "list", "--json"], capture_output=True, text=True, timeout=5)
-    if result.returncode == 0:
-        tdata = json.loads(result.stdout)
-        for ts in (tdata if isinstance(tdata, list) else tdata.get("sessions", [])):
-            name = ts.get("name") or ts.get("id", "?")
-            if name in aterm_names:
-                continue
-            cli = ts.get("cli", "")
-            cwd = ts.get("cwd", "")
-            terminal = ts.get("terminal", "external")
-            sessions.append((name, cli, cwd, terminal))
-except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError): pass
-
-if not sessions:
-    print("(도달 가능한 세션 없음)" if lang == "ko" else "(no reachable sessions)")
+if json_out:
+    print(json.dumps({"sessions": sessions}))
 else:
-    cols = ["이름", "CLI", "경로", "터미널"] if lang == "ko" else ["NAME", "CLI", "CWD", "TERMINAL"]
-    widths = [max(len(c), *(len(r[i]) for r in sessions)) for i, c in enumerate(cols)]
-    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(fmt.format(*cols))
-    print("  ".join("\u2500" * w for w in widths))
-    for r in sessions:
-        print(fmt.format(*r))
-    if all(r[3] == "aterm" for r in sessions):
-        print()
-        if lang == "ko":
-            print("💡 현재 도달 가능한 세션은 모두 aterm 내부 세션입니다. 다른 터미널과 연결하려면 telepty를 사용하세요: 이미 포함되어 있습니다.")
-        else:
-            print("💡 All reachable sessions are internal to aterm. Use telepty for cross-terminal access: it is already included.")
-'
-        fi ;;
+    if not sessions:
+        print("(도달 가능한 세션 없음)" if lang == "ko" else "(no reachable sessions)")
+    else:
+        # Build table rows: NAME | CLI | CWD | TERMINAL | SOURCE
+        rows = []
+        for s in sessions:
+            name = s.get("name") or s.get("id") or "?"
+            cli = s.get("cli", "") or s.get("command", "")
+            cwd = s.get("cwd", "")
+            terminal = s.get("terminal", "external")
+            source = s.get("source", "?")
+            rows.append((name, cli, cwd, terminal, source))
+        cols = (["이름", "CLI", "경로", "터미널", "출처"]
+                if lang == "ko"
+                else ["NAME", "CLI", "CWD", "TERMINAL", "SOURCE"])
+        widths = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(cols)]
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*cols))
+        print("  ".join("\u2500" * w for w in widths))
+        for r in rows:
+            print(fmt.format(*r))
+' ;;
     inject)
         shift
         _force_flag=false

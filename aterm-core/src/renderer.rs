@@ -238,7 +238,7 @@ const TOKYO_NIGHT_ANSI: [ThemeRgb; 16] = [
     ThemeRgb::new(0x7a, 0xa2, 0xf7),
     ThemeRgb::new(0xbb, 0x9a, 0xf7),
     ThemeRgb::new(0x7d, 0xcf, 0xff),
-    ThemeRgb::new(0xa9, 0xb1, 0xd6),
+    ThemeRgb::new(0xc0, 0xca, 0xf5),
     ThemeRgb::new(0x41, 0x48, 0x68),
     ThemeRgb::new(0xf7, 0x76, 0x8e),
     ThemeRgb::new(0x9e, 0xce, 0x6a),
@@ -258,7 +258,7 @@ const XTERM_DEFAULT_ANSI: [ThemeRgb; 16] = [
     ThemeRgb::new(0x00, 0x00, 0xCC), // Blue
     ThemeRgb::new(0xCC, 0x00, 0xCC), // Magenta
     ThemeRgb::new(0x00, 0xCC, 0xCC), // Cyan
-    ThemeRgb::new(0xCC, 0xCC, 0xCC), // White
+    ThemeRgb::new(0xC0, 0xCA, 0xF5), // White
     ThemeRgb::new(0x55, 0x55, 0x55), // Bright Black
     ThemeRgb::new(0xFF, 0x00, 0x00), // Bright Red
     ThemeRgb::new(0x00, 0xFF, 0x00), // Bright Green
@@ -268,6 +268,12 @@ const XTERM_DEFAULT_ANSI: [ThemeRgb; 16] = [
     ThemeRgb::new(0x00, 0xFF, 0xFF), // Bright Cyan
     ThemeRgb::new(0xFF, 0xFF, 0xFF), // Bright White
 ];
+
+/// Get fg/bg RGB for a color scheme (for OSC 10/11 response sync).
+pub fn scheme_fg_bg(scheme: ColorScheme) -> ([u8; 3], [u8; 3]) {
+    let p = scheme_palette(scheme);
+    ([p.foreground.r, p.foreground.g, p.foreground.b], [p.background.r, p.background.g, p.background.b])
+}
 
 fn scheme_palette(scheme: ColorScheme) -> ThemePalette {
     match scheme {
@@ -315,16 +321,16 @@ fn scheme_palette(scheme: ColorScheme) -> ThemePalette {
         },
         ColorScheme::TokyoNight => ThemePalette {
             background: ThemeRgb::new(0x1a, 0x1b, 0x26),
-            foreground: ThemeRgb::new(0xa9, 0xb1, 0xd6),
+            foreground: ThemeRgb::new(0xc0, 0xca, 0xf5),
             cursor: ThemeRgb::new(0xc0, 0xca, 0xf5),
             selection_fg: ThemeRgb::new(0xc0, 0xca, 0xf5),
             selection_bg: [0.18, 0.20, 0.36, 0.5],
             ansi: TOKYO_NIGHT_ANSI,
         },
         ColorScheme::Default => ThemePalette {
-            background: ThemeRgb::new(0x00, 0x00, 0x00),
-            foreground: ThemeRgb::new(0xCC, 0xCC, 0xCC),
-            cursor: ThemeRgb::new(0xCC, 0xCC, 0xCC),
+            background: ThemeRgb::new(0x28, 0x2C, 0x34),
+            foreground: ThemeRgb::new(0xC0, 0xCA, 0xF5),
+            cursor: ThemeRgb::new(0xC0, 0xCA, 0xF5),
             selection_fg: ThemeRgb::new(0xFF, 0xFF, 0xFF),
             selection_bg: [0.33, 0.33, 0.33, 0.5],
             ansi: XTERM_DEFAULT_ANSI,
@@ -335,9 +341,9 @@ fn scheme_palette(scheme: ColorScheme) -> ThemePalette {
 fn theme_palette(mode: TerminalThemeMode) -> ThemePalette {
     match mode {
         TerminalThemeMode::Dark => ThemePalette {
-            background: ThemeRgb::new(0x1a, 0x1b, 0x26),
-            foreground: ThemeRgb::new(0xa9, 0xb1, 0xd6),
-            cursor: ThemeRgb::new(0xa9, 0xb1, 0xd6),
+            background: ThemeRgb::new(0x28, 0x2C, 0x34),
+            foreground: ThemeRgb::new(0xc0, 0xca, 0xf5),
+            cursor: ThemeRgb::new(0xc0, 0xca, 0xf5),
             selection_fg: ThemeRgb::new(0xff, 0xff, 0xff),
             selection_bg: [
                 0x33 as f32 / 255.0,
@@ -460,6 +466,10 @@ impl RectRenderer {
             pipeline,
             vertices: Vec::new(),
         }
+    }
+
+    fn len(&self) -> usize {
+        self.vertices.len()
     }
 
     fn clear(&mut self) {
@@ -844,10 +854,22 @@ impl CellRenderer {
 
 // --- Terminal grid renderer ---
 
+/// Shared FontSystem — cosmic-text loads ALL system font metadata (~100-200MB).
+/// Creating one per workspace was the #208 memory leak root cause.
+static SHARED_FONT_SYSTEM: OnceLock<Mutex<FontSystem>> = OnceLock::new();
+
+fn shared_font_system() -> &'static Mutex<FontSystem> {
+    SHARED_FONT_SYSTEM.get_or_init(|| {
+        let mut fs = FontSystem::new();
+        configure_terminal_font_system(&mut fs);
+        Mutex::new(fs)
+    })
+}
+
 pub struct TerminalGridRenderer {
-    font_system: FontSystem,
     font_size: f32,
     line_height: f32,
+    cell_width_px: Option<f32>,
     grid: Vec<GridCell>,
     glyph_cache: GlyphCache,
     rect_renderer: RectRenderer,
@@ -950,6 +972,8 @@ struct DamageTracker {
     damaged_rows: Vec<bool>,
     /// True when the entire terminal needs a full redraw.
     full_damage: bool,
+    /// Track display_offset to force full damage on scroll (#203).
+    last_display_offset: usize,
 }
 
 impl DamageTracker {
@@ -957,6 +981,7 @@ impl DamageTracker {
         Self {
             damaged_rows: Vec::new(),
             full_damage: true,
+            last_display_offset: 0,
         }
     }
 
@@ -990,7 +1015,12 @@ impl DamageTracker {
                 false
             }
         };
-        let full_damage = full_damage || term.selection.is_some();
+        // Force full damage on scroll offset change (#203).
+        // Scrolled-in lines need full re-render for TrueColor bg.
+        let display_offset = term.grid().display_offset();
+        let scroll_changed = display_offset != self.last_display_offset;
+        self.last_display_offset = display_offset;
+        let full_damage = full_damage || term.selection.is_some() || scroll_changed;
         self.apply_damage_rows(rows, full_damage, &damaged_lines);
         term.reset_damage();
     }
@@ -1012,23 +1042,25 @@ impl TerminalGridRenderer {
     ) -> Self {
         let font_size = TERMINAL_FONT_SIZE_PX;
         let line_height = TERMINAL_LINE_HEIGHT_PX;
-        let mut font_system = FontSystem::new();
-        configure_terminal_font_system(&mut font_system);
+        // Use shared FontSystem (#208 memory fix — was ~200MB per workspace)
+        let font_system = shared_font_system();
+        let fs_guard = font_system.lock().unwrap();
 
-        let (font_name, font_bytes) = load_monospace_font_data(&font_system);
+        let (font_name, font_bytes) = load_monospace_font_data(&fs_guard);
         let mut glyph_cache = GlyphCache::from_named_bytes(0, font_name, font_bytes)
             .expect("[aterm] failed to create glyph cache from font data");
-        for (fallback_name, fallback_bytes, face_index) in load_fallback_font_data(&font_system) {
+        for (fallback_name, fallback_bytes, face_index) in load_fallback_font_data(&fs_guard) {
             glyph_cache.add_named_fallback(fallback_name, fallback_bytes, face_index);
         }
+        drop(fs_guard);
 
         let rect_renderer = RectRenderer::new(device, format);
         let cell_renderer = CellRenderer::new(device, format);
 
         Self {
-            font_system,
             font_size,
             line_height,
+            cell_width_px: None,
             grid: Vec::new(),
             glyph_cache,
             rect_renderer,
@@ -1070,6 +1102,11 @@ impl TerminalGridRenderer {
         self.line_height = height;
     }
 
+    pub fn set_cell_width(&mut self, width: f32) {
+        let width = width.clamp(6.0, 32.0);
+        self.cell_width_px = Some(width);
+    }
+
     fn active_palette(&self) -> ThemePalette {
         match self.color_scheme {
             Some(scheme) => scheme_palette(scheme),
@@ -1077,8 +1114,26 @@ impl TerminalGridRenderer {
         }
     }
 
+    /// Current fg/bg from the active palette (for OSC 10/11 response sync).
+    /// Release caches for inactive workspace (#208 memory optimization).
+    /// Glyph cache + atlas freed. Rebuilt on next render (cold start).
+    pub fn clear_caches(&mut self) {
+        self.glyph_cache.clear();
+        self.persistent_instances.clear();
+        self.persistent_block_rects.clear();
+        self.grid.clear();
+    }
+
+    pub fn current_fg_bg(&self) -> ([u8; 3], [u8; 3]) {
+        let p = self.active_palette();
+        (
+            [p.foreground.r, p.foreground.g, p.foreground.b],
+            [p.background.r, p.background.g, p.background.b],
+        )
+    }
+
     pub fn cell_width(&self) -> f32 {
-        self.font_size * 0.6
+        self.cell_width_px.unwrap_or(self.font_size * 0.6)
     }
 
     pub fn cell_height(&self) -> f32 {
@@ -1112,12 +1167,15 @@ impl TerminalGridRenderer {
         surface_view: &wgpu::TextureView,
         width: u32,
         height: u32,
+        preedit_text: &str,
     ) {
         // Skip rendering before layout provides valid surface dimensions.
         if width == 0 || height == 0 {
             return;
         }
         let render_start = std::time::Instant::now();
+        // LRU frame tracking (#208) — advance epoch before glyph lookups
+        self.glyph_cache.begin_frame();
         let palette = self.active_palette();
         let (cols_u16, rows_u16) = self.grid_size(width as f32, height as f32);
         let cols = cols_u16 as usize;
@@ -1158,6 +1216,8 @@ impl TerminalGridRenderer {
         let mut row_index = 0usize;
         let mut cursor_row: Option<usize> = None;
         let mut cursor_width_cells = 1u8;
+        let mut cursor_char: Option<char> = None;
+        let mut cursor_cell_fg: Option<glyphon::Color> = None;
         let mut changed_cells = 0usize;
         let mut active_cells = 0usize;
         let mut last_non_empty_row: Option<usize> = None;
@@ -1195,9 +1255,24 @@ impl TerminalGridRenderer {
                 cursor_row = Some(row_index);
             }
 
-            // Skip heavy cell processing for undamaged lines — their grid state
-            // is preserved from the previous frame. Still track cursor width.
+            // Undamaged rows: only push non-default bg rects (TrueColor cells).
+            // Skips selection computation + glyph processing for perf.
+            // Default bg cells don't need rects — clear_color covers them.
             if !self.damage_tracker.is_line_damaged(row_index) {
+                // Fast path: only push explicit (non-default) bg
+                if !matches!(cell.bg, AnsiColor::Named(NamedColor::Background)) {
+                    if let Some(bg) = cell_background_rgba(cell, false, &palette) {
+                        self.rect_renderer.push_rect(
+                            pad_x + col as f32 * cw,
+                            pad_y + row_index as f32 * lh,
+                            cw,
+                            lh,
+                            w_f,
+                            h_f,
+                            bg,
+                        );
+                    }
+                }
                 if cursor_visible && line == cursor_line && col == cursor_col {
                     cursor_width_cells = if cell.flags.contains(Flags::WIDE_CHAR) && col + 1 < cols
                     {
@@ -1209,6 +1284,7 @@ impl TerminalGridRenderer {
                 continue;
             }
 
+            // Damaged row: full processing (bg + selection + glyphs)
             let point = alacritty_terminal::index::Point::new(
                 alacritty_terminal::index::Line(line),
                 alacritty_terminal::index::Column(col),
@@ -1233,6 +1309,9 @@ impl TerminalGridRenderer {
                 } else {
                     1
                 };
+                // Capture cursor cell character for inverted rendering (#202)
+                cursor_char = Some(cell.c);
+                cursor_cell_fg = Some(cell_foreground(cell, false, &palette));
             }
 
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
@@ -1376,12 +1455,14 @@ impl TerminalGridRenderer {
             }
         }
 
-        // Cursor instance at end of persistent buffer
+        // Cursor rendering (#202): block cursor inverts fg/bg so text stays visible.
+        // alacritty/kitty/ghostty: cursor bg = cursor color, cursor fg = cell bg (inverted).
         let mut instance_count = total_cells;
         if cursor_visible {
             if let Some(crow) = cursor_row {
                 let cc = palette.cursor;
-                let ch = '\u{2588}'; // █
+                // Render actual cell character (not █) with inverted colors
+                let ch = cursor_char.unwrap_or(' ');
                 let glyph_info = self.glyph_cache.get_or_insert(
                     &mut self.cell_renderer.atlas,
                     device,
@@ -1399,16 +1480,23 @@ impl TerminalGridRenderer {
                 if cursor_width_cells == 2 {
                     flags |= 128; // FLAG_WIDE
                 }
+                // Inverted colors: bg = cursor color, fg = palette background (so text is visible)
+                let bg_rgb = palette.background;
                 self.persistent_instances[total_cells] = CellInstance {
                     grid_pos: [cursor_col as f32, crow as f32],
                     atlas_uv_rect: uv_rect,
                     fg_color: [
+                        bg_rgb.r as f32 / 255.0,
+                        bg_rgb.g as f32 / 255.0,
+                        bg_rgb.b as f32 / 255.0,
+                        1.0,
+                    ],
+                    bg_color: [
                         cc.r as f32 / 255.0,
                         cc.g as f32 / 255.0,
                         cc.b as f32 / 255.0,
                         1.0,
                     ],
-                    bg_color: [0.0, 0.0, 0.0, 0.0],
                     flags,
                     _pad: 0,
                 };
@@ -1416,7 +1504,83 @@ impl TerminalGridRenderer {
             }
         }
 
+        // Preedit overlay: render IME composition text at cursor position (#206).
+        // Ghostty pattern: preedit glyphs overlaid at cursor, bg = cursor color.
+        if !preedit_text.is_empty() {
+            if let Some(crow) = cursor_row {
+                let cc = palette.cursor;
+                let bg_rgb = palette.background;
+                let mut preedit_col = cursor_col;
+                for ch in preedit_text.chars() {
+                    if instance_count >= self.persistent_instances.len() - 1 {
+                        break;
+                    }
+                    let char_width: u8 = if is_wide_char(ch) { 2 } else { 1 };
+                    let glyph_info = self.glyph_cache.get_or_insert(
+                        &mut self.cell_renderer.atlas,
+                        device,
+                        queue,
+                        self.font_size,
+                        ch,
+                        cell_w_px,
+                        cell_h_px,
+                    );
+                    let uv_rect = match glyph_info {
+                        Some(info) => info.uv_rect,
+                        None => [0.0; 4],
+                    };
+                    let mut flags = 32u32; // FLAG_PREEDIT
+                    if char_width == 2 {
+                        flags |= 128; // FLAG_WIDE
+                    }
+                    self.persistent_instances[instance_count] = CellInstance {
+                        grid_pos: [preedit_col as f32, crow as f32],
+                        atlas_uv_rect: uv_rect,
+                        fg_color: [
+                            bg_rgb.r as f32 / 255.0,
+                            bg_rgb.g as f32 / 255.0,
+                            bg_rgb.b as f32 / 255.0,
+                            1.0,
+                        ],
+                        bg_color: [
+                            cc.r as f32 / 255.0,
+                            cc.g as f32 / 255.0,
+                            cc.b as f32 / 255.0,
+                            1.0,
+                        ],
+                        flags,
+                        _pad: 0,
+                    };
+                    instance_count += 1;
+                    preedit_col += char_width as usize;
+                }
+            }
+        }
+
         let build_instances_elapsed = build_instances_start.elapsed();
+
+        // Memory diagnostics (#208): 1s interval log of grow-only resources
+        {
+            use std::sync::atomic::{AtomicU64, Ordering as MemOrd};
+            static LAST_MEM_LOG: AtomicU64 = AtomicU64::new(0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let last = LAST_MEM_LOG.load(MemOrd::Relaxed);
+            if last == 0 || now_ms.saturating_sub(last) >= 5000 {
+                LAST_MEM_LOG.store(now_ms, MemOrd::Relaxed);
+                debug_log!(
+                    "[mem] glyphs={} atlas_pages={} instances={}/{} rects={} grid={}",
+                    self.glyph_cache.glyph_count(),
+                    self.cell_renderer.atlas.page_count(),
+                    instance_count,
+                    self.persistent_instances.len(),
+                    self.rect_renderer.len(),
+                    self.grid.len(),
+                );
+            }
+        }
 
         // Upload instances and sync atlas bind group (new glyphs may have been added)
         self.cell_renderer.sync_atlas_bind_group(device);
@@ -1488,6 +1652,9 @@ impl TerminalGridRenderer {
         queue.submit(std::iter::once(encoder.finish()));
         let gpu_elapsed = gpu_start.elapsed();
 
+        // LRU eviction at frame boundary (#208) — safe: rendering complete
+        self.glyph_cache.maybe_evict();
+
         let total_elapsed = render_start.elapsed();
         if total_elapsed.as_millis() > 8 {
             debug_log!(
@@ -1556,6 +1723,24 @@ impl TerminalGridRenderer {
         cell.width_cells = width_cells;
         true
     }
+}
+
+/// Simple CJK/wide character detection for preedit rendering (#206).
+/// Covers CJK Unified Ideographs + Hangul Syllables + common fullwidth ranges.
+fn is_wide_char(ch: char) -> bool {
+    let c = ch as u32;
+    matches!(c,
+        0x1100..=0x115F   // Hangul Jamo
+        | 0x2E80..=0x303E // CJK Radicals + Symbols
+        | 0x3040..=0x33BF // Hiragana, Katakana, CJK Compatibility
+        | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xAC00..=0xD7AF // Hangul Syllables
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE4F // CJK Compatibility Forms
+        | 0xFF01..=0xFF60 // Fullwidth Forms
+        | 0x20000..=0x2FA1F // CJK extensions B-F
+    )
 }
 
 fn cell_text(cell: &Cell) -> String {
@@ -1957,7 +2142,7 @@ fn select_fallback_font_data(font_system: &FontSystem) -> Vec<(String, Vec<u8>, 
                 continue;
             }
             if let Some(bytes) = read_font_source(&face.source) {
-                log_stderr!(
+                debug_log!(
                     "[aterm] fallback font: {} (index={})",
                     family_name,
                     face.index

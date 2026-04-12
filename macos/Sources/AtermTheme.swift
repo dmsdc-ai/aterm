@@ -119,6 +119,62 @@ enum AtermTheme {
         dark: .atermHex(0x818CF8, alpha: 0.30)
     )
 
+    // Orchestrator section enhancement tokens (DESIGN-002)
+    static let orchestratorGlow = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5, alpha: 0.04),
+        dark: .atermHex(0x818CF8, alpha: 0.06)
+    )
+    static let orchestratorHeaderText = NSColor.atermDynamic(
+        light: .atermHex(0x3730A3),
+        dark: .atermHex(0xA5B4FC)
+    )
+    static let orchestratorDivider = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5, alpha: 0.12),
+        dark: .atermHex(0x818CF8, alpha: 0.15)
+    )
+    static let orchestratorDividerGradientEnd = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5, alpha: 0.0),
+        dark: .atermHex(0x818CF8, alpha: 0.0)
+    )
+
+    // Input Bar tokens (DESIGN-002)
+    static let inputBarBackground = NSColor.atermDynamic(
+        light: .atermHex(0xEFEBE4),
+        dark: .atermHex(0x1E1F2B)
+    )
+    static let inputBarBorder = NSColor.atermDynamic(
+        light: .atermHex(0xD0C7B9),
+        dark: .atermHex(0x2A2B3D)
+    )
+    static let inputBarBorderFocus = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5),
+        dark: .atermHex(0x818CF8)
+    )
+    static let inputBarPrompt = NSColor.atermDynamic(
+        light: .atermHex(0x8B949E),
+        dark: .atermHex(0x6E7681)
+    )
+    static let inputBarPromptFocus = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5),
+        dark: .atermHex(0x818CF8)
+    )
+    static let inputBarPlaceholder = NSColor.atermDynamic(
+        light: .atermHex(0xA8A29E),
+        dark: .atermHex(0x4A4E58)
+    )
+    static let inputBarCursor = NSColor.atermDynamic(
+        light: .atermHex(0xB45309),
+        dark: .atermHex(0xD97706)
+    )
+    static let inputBarShadow = NSColor.atermDynamic(
+        light: .atermHex(0x000000, alpha: 0.08),
+        dark: .atermHex(0x000000, alpha: 0.40)
+    )
+    static let inputBarGlow = NSColor.atermDynamic(
+        light: .atermHex(0x4F46E5, alpha: 0.08),
+        dark: .atermHex(0x818CF8, alpha: 0.12)
+    )
+
     static func mode(for appearance: NSAppearance?) -> AtermThemeMode {
         AtermThemeMode.resolve(from: appearance)
     }

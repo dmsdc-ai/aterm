@@ -4,6 +4,78 @@ All notable changes to **aterm** are documented in this file.
 
 ---
 
+## 0.2.13 — 2026-04-12
+
+### Fixes
+- Workspace dedup: prevent duplicate workspace creation when external project scan detects already-existing internal workspace (name+cwd guard)
+- telepty-bus race: 2s connect delay after daemon start prevents premature WebSocket failure
+- shell-ready timeout 10s→30s: accommodates slow codex resume initialization
+- codex prompt patterns: 'Summarize the last session' and 'What would you like to do?' added to shell-ready detection
+- codex default args: removed --last from resume command — first launch starts fresh codex session instead of failing on missing history
+
+---
+
+## 0.2.12 — 2026-04-12
+
+### Fixes
+- Force Dark appearance for aterm UI chrome (sidebar, Settings, window frame) regardless of macOS system appearance setting
+- devkit workspace-init PATH expansion: npm global bin paths prepended for Finder-launched .app (fixes exit 127 for most workspaces, 9→5 remaining)
+- SettingsView onChange deprecation closures migrated to one-arg signature (18/18 closures updated)
+
+---
+
+## 0.2.11 — 2026-04-12
+
+### Fixes
+- **Global cursor CJK alignment**: cell height now accounts for CJK fallback font metrics (cellH 27→29), fixing cursor top-alignment for Korean/Chinese/Japanese text
+- **Auto-restart retry strip**: resume flags (--continue, --last, resume) now stripped on workspace restart, preventing infinite failure loops when no prior session exists
+- **P0 default workspace**: orchestrator workspace auto-selected on launch (previously selected last entry)
+- **OrchestratorInputBar v3.1**: transparent edge-to-edge design with 1px hairline top separator, no border/corner radius/margins
+- **OrchestratorInputBar CJK centering**: dynamic line height measurement for Korean/CJK text vertical centering
+- **Popover focus defense**: 3-layer fix preventing NSPopover from stealing first responder (filter-as-you-type, Tab, Enter all work in command dropdown)
+- **Settings UX**: theme tiles and tab buttons now respond to full-area clicks (contentShape fix)
+- **Settings macOS 14 API**: onChange closure compatibility for pre-macOS 14 deployment targets
+- **Diagnostic logs removed**: all [CURSOR-DIAG] temporary logging removed for clean release
+
+### Features
+- **Active session scope**: aterm list returns union of internal + telepty sessions by default. New flags: --all, --internal-only, --telepty-only, --json. SOURCE column added.
+- **Settings 4 gap**: Font Family picker with Show-all-fonts toggle, Shell picker (zsh/bash/fish/custom), Tailscale on-launch toggle, Orchestrator args visible for all CLIs
+- **Variant badge**: lazy detection warns when selected font lacks Bold/Italic variants
+- **Font plumbing hot-reload**: changing font family applies immediately without restart. 4-tier fallback chain (userFixedPitchFont → Menlo → SFMono → systemFont)
+
+### Breaking
+- aterm list output now includes SOURCE column (appended, existing column order preserved)
+- ATERM_LIST_JSON=1 env var no longer honored (use --json flag)
+
+---
+
+## 0.2.10 — 2026-04-12
+
+### Fixes
+- **P0**: default workspace selection no longer biased to last entry — orchestrator (isSystem) is now auto-selected on launch. Previously users had to manually click the orchestrator row after launch. (AppDelegate.swift:703)
+- **#240**: OrchestratorInputBar cursor vertical centering root fix + popover focus 3-layer defense + /command dropdown Enter/filter/Tab now work correctly
+- **#246**: Default UI language is English. Korean translations preserved for future multi-language support
+- Settings tab click hit area extended to full cell (previously only icon/label was clickable)
+- Theme picker now applies live on click instead of waiting for Save
+- Font plumbing hot-reload: changing font family in Settings applies immediately without restart
+- Variant badge lazy detection shows warning when selected font lacks Bold/Italic variants
+- SettingsView macOS 14+ API usage downgraded via 3-line closure-signature fix for compatibility
+
+### Features
+- `aterm list` now returns union of internal workspaces + telepty external sessions by default
+- New flags: `--all` / `--internal-only` / `--telepty-only` / `--json`
+- New `SOURCE` column identifies each entry origin
+
+### Breaking
+- `ATERM_LIST_JSON=1` env var no longer honored. Use `--json` flag instead.
+
+### Known Issues
+- `claude` CLI may not auto-spawn for orchestrator workspace on first launch (manual `claude` run works as a workaround)
+- Unsigned binary: install via postinstall automatically removes Gatekeeper quarantine (`xattr -cr`)
+- InputBar v3 modern redesign pending (Direction E, future 0.2.11 or 0.3.0)
+
+---
+
 ## [0.1.46] — 2026-04-01
 
 Cumulative release covering v0.1.40 through v0.1.46. Major milestones: IPC Phase 1 complete, session persistence moved to Rust FFI, GPU renderer overhauled, Settings UI, devkit integration, and dozens of stability fixes.

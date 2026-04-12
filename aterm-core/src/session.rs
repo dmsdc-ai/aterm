@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,14 +145,172 @@ impl SessionStore {
         let data = self.load()?;
 
         for entry in data.sessions {
+            let entry_id = entry.id.clone();
             let mut guard = manager.lock().map_err(|error| error.to_string())?;
-            if let Err(error) = guard.restore_session_entry(entry) {
-                log_stderr!("[aterm] restore_sessions skipped entry: {}", error);
+            match guard.restore_session_entry(entry) {
+                Ok(_) => {
+                    // Emit WorkspaceRestored event via global app EventBus
+                    if let Ok(app) = crate::global_app().lock() {
+                        app.event_bus().publish(
+                            aterm_session::action::AtermEvent::WorkspaceRestored {
+                                id: entry_id,
+                            },
+                        );
+                    }
+                }
+                Err(error) => {
+                    log_stderr!("[aterm] restore_sessions skipped entry: {}", error);
+                    // Emit WorkspaceCreationFailed event
+                    if let Ok(app) = crate::global_app().lock() {
+                        app.event_bus().publish(
+                            aterm_session::action::AtermEvent::WorkspaceCreationFailed {
+                                id: entry_id,
+                                reason: error.clone(),
+                            },
+                        );
+                    }
+                }
             }
         }
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Global session registry — tracks active sessions for debounced save
+// ---------------------------------------------------------------------------
+
+static GLOBAL_SESSIONS: OnceLock<Mutex<HashMap<String, SessionEntry>>> = OnceLock::new();
+
+fn global_sessions() -> &'static Mutex<HashMap<String, SessionEntry>> {
+    GLOBAL_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a session entry in the global registry (called on workspace create).
+pub fn register_session(entry: SessionEntry) {
+    if let Ok(mut sessions) = global_sessions().lock() {
+        sessions.insert(entry.id.clone(), entry);
+    }
+}
+
+/// Remove a session from the global registry (called on workspace close).
+pub fn deregister_session(id: &str) {
+    if let Ok(mut sessions) = global_sessions().lock() {
+        sessions.remove(id);
+    }
+}
+
+/// Update the is_system flag for a session in the global registry.
+/// Called by Swift after spawn to mark orchestrator/system workspaces.
+pub fn set_session_system(id: &str, is_system: bool) {
+    if let Ok(mut sessions) = global_sessions().lock() {
+        if let Some(entry) = sessions.get_mut(id) {
+            entry.is_system = is_system;
+        }
+    }
+}
+
+/// Collect all active session entries from the global registry.
+fn collect_global_sessions() -> Vec<SessionEntry> {
+    global_sessions()
+        .lock()
+        .map(|sessions| sessions.values().cloned().collect())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// SaveCoordinator — debounced save + periodic autosave
+// ---------------------------------------------------------------------------
+
+struct SaveCoordinator {
+    dirty: AtomicBool,
+    trigger_condvar: Condvar,
+    trigger_mutex: Mutex<()>,
+    running: AtomicBool,
+}
+
+static SAVE_COORDINATOR: OnceLock<SaveCoordinator> = OnceLock::new();
+
+fn save_coordinator() -> &'static SaveCoordinator {
+    SAVE_COORDINATOR.get_or_init(|| {
+        let coord = SaveCoordinator {
+            dirty: AtomicBool::new(false),
+            trigger_condvar: Condvar::new(),
+            trigger_mutex: Mutex::new(()),
+            running: AtomicBool::new(false),
+        };
+        // Start the autosave background thread
+        if !coord.running.swap(true, Ordering::AcqRel) {
+            std::thread::spawn(|| save_loop());
+        }
+        coord
+    })
+}
+
+const DEBOUNCE_MS: u64 = 500;
+const AUTOSAVE_SECS: u64 = 30;
+
+fn save_loop() {
+    let coord = save_coordinator();
+    loop {
+        // Wait for trigger or autosave timeout
+        {
+            let guard = coord.trigger_mutex.lock().unwrap();
+            let _ = coord
+                .trigger_condvar
+                .wait_timeout(guard, Duration::from_secs(AUTOSAVE_SECS));
+        }
+
+        if !coord.dirty.load(Ordering::Acquire) {
+            continue;
+        }
+
+        // Debounce: wait 500ms of quiet before saving
+        loop {
+            let guard = coord.trigger_mutex.lock().unwrap();
+            let (guard_out, timeout) = coord
+                .trigger_condvar
+                .wait_timeout(guard, Duration::from_millis(DEBOUNCE_MS))
+                .unwrap_or_else(|e| e.into_inner());
+            drop(guard_out);
+            if timeout.timed_out() {
+                break; // 500ms of quiet — proceed to save
+            }
+            // Another trigger arrived — restart debounce
+        }
+
+        // Perform the save
+        coord.dirty.store(false, Ordering::Release);
+        do_global_save();
+    }
+}
+
+fn do_global_save() {
+    let entries = collect_global_sessions();
+    let data = SessionData { sessions: entries };
+    let store = SessionStore::new();
+    if let Some(parent) = store.path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(&data) {
+        Ok(json) => {
+            if let Err(e) = save_atomic(&store.path, json.as_bytes()) {
+                log_stderr!("[session] autosave failed: {}", e);
+            } else {
+                debug_log!("[session] autosave complete ({} sessions)", data.sessions.len());
+            }
+        }
+        Err(e) => log_stderr!("[session] autosave serialize failed: {}", e),
+    }
+}
+
+/// Mark sessions as dirty and trigger a debounced save.
+/// Called internally or via `aterm_trigger_save()` FFI.
+pub fn trigger_save() {
+    let coord = save_coordinator();
+    coord.dirty.store(true, Ordering::Release);
+    coord.trigger_condvar.notify_one();
 }
 
 /// Return the aterm data root directory.

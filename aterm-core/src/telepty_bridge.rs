@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -291,6 +292,56 @@ impl TeleptyBridge {
                 ok,
                 total
             );
+
+            // Cleanup stale aterm sessions not in current workspace set (#129)
+            let known_names: HashSet<&str> =
+                workspaces.iter().map(|(name, _, _, _)| name.as_str()).collect();
+            let sessions_url = format!("{}/api/sessions", daemon_url);
+            if let Ok(output) = Command::new("curl")
+                .args(["-s", "--max-time", "3", &sessions_url])
+                .output()
+            {
+                if output.status.success() {
+                    let body = String::from_utf8_lossy(&output.stdout);
+                    if let Ok(sessions) =
+                        serde_json::from_str::<Vec<serde_json::Value>>(body.trim())
+                    {
+                        let mut cleaned = 0usize;
+                        for session in &sessions {
+                            let id = session
+                                .get("session_id")
+                                .or_else(|| session.get("id"))
+                                .and_then(|v| v.as_str());
+                            let is_aterm = session
+                                .get("term_program")
+                                .and_then(|v| v.as_str())
+                                == Some("aterm")
+                                || session
+                                    .get("delivery_type")
+                                    .and_then(|v| v.as_str())
+                                    == Some("aterm");
+                            if let Some(id) = id {
+                                if is_aterm && !known_names.contains(id) {
+                                    let del_url =
+                                        format!("{}/api/sessions/{}", daemon_url, id);
+                                    let _ = Command::new("curl")
+                                        .args([
+                                            "-s", "-X", "DELETE", &del_url, "--max-time", "2",
+                                        ])
+                                        .output();
+                                    cleaned += 1;
+                                }
+                            }
+                        }
+                        if cleaned > 0 {
+                            log_stderr!(
+                                "[telepty-bridge] cleaned {} stale session(s)",
+                                cleaned
+                            );
+                        }
+                    }
+                }
+            }
         });
     }
 

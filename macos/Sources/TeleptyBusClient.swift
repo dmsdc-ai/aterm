@@ -119,18 +119,24 @@ class TeleptyBusClient: ObservableObject {
     private var corePtr: OpaquePointer?  // AtermCore*
     private let webSocketSession: URLSession
 
-    // Exponential backoff state (bug #134 — cmux-benchmarked params)
+    // Exponential backoff state (#134 fix — 1s/2s/4s/8s/16s/30s cap)
     private var failureCount: Int = 0
     private var didLogHighFailureWarning: Bool = false
-    private static let baseBackoffMs: Double = 10.0     // 10ms base
-    private static let maxBackoffMs: Double = 5000.0     // 5s cap
+    private static let baseBackoffMs: Double = 1000.0    // 1s base
+    private static let maxBackoffMs: Double = 30000.0    // 30s cap
     private static let highFailureThreshold: Int = 50
 
     init(host: String = "127.0.0.1", port: Int = Int(ProcessInfo.processInfo.environment["ATERM_TELEPTY_PORT"] ?? "") ?? 3848) {
         self.busURL = URL(string: "ws://\(host):\(port)/api/bus")!
         self.webSocketSession = URLSession(configuration: .default)
         loadInitialSessions()
-        connect()
+        // Delay initial connect by 2s to give telepty daemon time to start.
+        // ensureTeleptyDaemon() runs async and may take 2-5s to spawn the daemon
+        // process and open the WebSocket port. Without this delay, the first
+        // connect attempt always fails, triggering unnecessary error logs.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.connect()
+        }
     }
 
     /// Set the aterm-core pointer for workspace polling
@@ -304,8 +310,8 @@ class TeleptyBusClient: ObservableObject {
 
     /// Log dedup: first 3 failures log each, then only at powers-of-two (4, 8, 16, 32...)
     private func shouldLogFailure() -> Bool {
-        if failureCount <= 3 { return true }
-        return failureCount > 0 && (failureCount & (failureCount - 1)) == 0
+        // Log first attempt + every 10th thereafter (#134)
+        return failureCount <= 1 || failureCount % 10 == 0
     }
 
     private func scheduleReconnect() {

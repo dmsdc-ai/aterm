@@ -3,6 +3,28 @@ import SwiftUI
 
 // MARK: - Settings Model
 
+/// Availability of Bold / Italic / BoldItalic face variants for a font family.
+/// Detected lazily per picker selection (Q-font-4 C2); memory-only, no persistence.
+struct FontVariantAvailability {
+    let hasBold: Bool
+    let hasItalic: Bool
+    let hasBoldItalic: Bool
+
+    var allPresent: Bool { hasBold && hasItalic && hasBoldItalic }
+
+    /// Missing variant labels in display order.
+    func missing() -> [String] {
+        var out: [String] = []
+        if !hasBold { out.append("Bold") }
+        if !hasItalic { out.append("Italic") }
+        if !hasBoldItalic { out.append("Bold Italic") }
+        return out
+    }
+
+    static let allPresent = FontVariantAvailability(hasBold: true, hasItalic: true, hasBoldItalic: true)
+    static let noneKnown = FontVariantAvailability(hasBold: false, hasItalic: false, hasBoldItalic: false)
+}
+
 /// Persistent settings stored in ~/.aigentry/config/aterm.json
 class AtermSettings: ObservableObject {
     static let shared = AtermSettings()
@@ -11,7 +33,7 @@ class AtermSettings: ObservableObject {
     @Published var colorScheme: String = "Default"
     @Published var fontSize: Double = 18
     @Published var fontFamily: String = "System Default"
-    @Published var lineHeight: Double = 1.4
+    @Published var lineHeight: Double = 1.0
     @Published var backgroundOpacity: Double = 100
     @Published var showStatusEmoji: Bool = false
     @Published var useAsciiIcons: Bool = false
@@ -30,12 +52,18 @@ class AtermSettings: ObservableObject {
     // Sidebar
     @Published var showTaskBoard: Bool = true
 
+    // Shell
+    @Published var shellDefault: String = "zsh"
+
+    // Tailscale
+    @Published var tailscaleConnectOnLaunch: Bool = false
+
     // CLI Defaults (per-CLI arguments)
     @Published var cliDefaults: [String: String] = AtermSettings.defaultCliArgs
 
     static let defaultCliArgs: [String: String] = [
         "claude": "--dangerously-skip-permissions --continue",
-        "codex": "resume --last --dangerously-bypass-approvals-and-sandbox",
+        "codex": "resume --dangerously-bypass-approvals-and-sandbox",
         "gemini": "resume -y",
     ]
 
@@ -67,6 +95,51 @@ class AtermSettings: ObservableObject {
     ]
 
     static let cursorStyles = ["block", "underline", "bar"]
+
+    static let shellPresets = ["zsh", "bash", "fish"]
+
+    /// Monospaced font families (isFixedPitch filter)
+    static var monospacedFontFamilies: [String] {
+        NSFontManager.shared.availableFontFamilies.compactMap { family -> String? in
+            guard let members = NSFontManager.shared.availableMembers(ofFontFamily: family),
+                  let firstMember = members.first,
+                  firstMember.count >= 1,
+                  let postScript = firstMember[0] as? String,
+                  let font = NSFont(name: postScript, size: 12),
+                  font.isFixedPitch
+            else { return nil }
+            return family
+        }.sorted()
+    }
+
+    /// All available font families (unfiltered)
+    static var allFontFamilies: [String] {
+        NSFontManager.shared.availableFontFamilies.sorted()
+    }
+
+    /// Lazily detect which of Bold / Italic / BoldItalic face variants a family ships.
+    /// Called only on user picker selection change; ~3ms per call, no cache.
+    static func detectFontVariants(family: String) -> FontVariantAvailability {
+        if family == "System Default" { return .allPresent }
+        guard let members = NSFontManager.shared.availableMembers(ofFontFamily: family),
+              !members.isEmpty
+        else { return .noneKnown }
+
+        var hasBold = false
+        var hasItalic = false
+        var hasBoldItalic = false
+        for member in members {
+            // member = [postScriptName, faceName, weight (NSNumber), traits (NSNumber)]
+            guard member.count >= 4, let traitsRaw = member[3] as? UInt else { continue }
+            let traits = NSFontTraitMask(rawValue: traitsRaw)
+            let isBold = traits.contains(.boldFontMask)
+            let isItalic = traits.contains(.italicFontMask)
+            if isBold && isItalic { hasBoldItalic = true }
+            else if isBold { hasBold = true }
+            else if isItalic { hasItalic = true }
+        }
+        return FontVariantAvailability(hasBold: hasBold, hasItalic: hasItalic, hasBoldItalic: hasBoldItalic)
+    }
 
     /// Map scheme name → C-FFI u8 value
     static func schemeIndex(_ name: String) -> UInt8 {
@@ -190,7 +263,15 @@ class AtermSettings: ObservableObject {
         let ai = config["ai"] as? [String: Any]
 
         if let s = appearance?["colorScheme"] as? String { colorScheme = s }
-        if let s = appearance?["fontSize"] as? Double { fontSize = s }
+        let rawFS = appearance?["fontSize"]
+        NSLog("[DIAG-LOAD] rawFontSize=%@ type=%@ asDouble=%@ asInt=%@",
+              String(describing: rawFS),
+              String(describing: type(of: rawFS)),
+              String(describing: rawFS as? Double),
+              String(describing: rawFS as? Int))
+        if let s = appearance?["fontSize"] as? Double { fontSize = round(s) }
+        else if let s = appearance?["fontSize"] as? Int { fontSize = Double(s) }
+        NSLog("[DIAG-LOAD] configPath=%@ fontSize=%.1f", configPath, fontSize)
         if let s = appearance?["fontFamily"] as? String { fontFamily = s }
         if let s = appearance?["lineHeight"] as? Double { lineHeight = s }
         if let s = appearance?["backgroundOpacity"] as? Double { backgroundOpacity = s }
@@ -207,6 +288,12 @@ class AtermSettings: ObservableObject {
 
         let sidebar = config["sidebar"] as? [String: Any]
         if let s = sidebar?["showTaskBoard"] as? Bool { showTaskBoard = s }
+
+        let shell = config["shell"] as? [String: Any]
+        if let s = shell?["default"] as? String, !s.isEmpty { shellDefault = s }
+
+        let tailscale = config["tailscale"] as? [String: Any]
+        if let s = tailscale?["connect_on_launch"] as? Bool { tailscaleConnectOnLaunch = s }
 
         if let cd = config["cli_defaults"] as? [String: String] {
             var merged = AtermSettings.defaultCliArgs
@@ -232,7 +319,7 @@ class AtermSettings: ObservableObject {
 
         config["appearance"] = [
             "colorScheme": colorScheme,
-            "fontSize": fontSize,
+            "fontSize": round(fontSize),
             "fontFamily": fontFamily,
             "lineHeight": lineHeight,
             "backgroundOpacity": backgroundOpacity,
@@ -259,6 +346,14 @@ class AtermSettings: ObservableObject {
         config["sidebar"] = [
             "showTaskBoard": showTaskBoard,
         ] as [String: Any]
+
+        var shell = config["shell"] as? [String: Any] ?? [:]
+        shell["default"] = shellDefault
+        config["shell"] = shell
+
+        var tailscale = config["tailscale"] as? [String: Any] ?? [:]
+        tailscale["connect_on_launch"] = tailscaleConnectOnLaunch
+        config["tailscale"] = tailscale
 
         config["cli_defaults"] = cliDefaults
 
@@ -339,6 +434,7 @@ struct SettingsView: View {
                                 ? Color(nsColor: AtermTheme.accent)
                                 : Color(nsColor: AtermTheme.textSecondary)
                         )
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -402,10 +498,12 @@ struct SettingsView: View {
         settings.useAsciiIcons = false
         settings.scrollbackLines = 10000
         settings.cursorStyle = "block"
+        settings.shellDefault = "zsh"
         settings.autoRestoreSessions = true
         settings.autoRestartDead = false
         settings.maxRestartAttempts = 3
         settings.showTaskBoard = true
+        settings.tailscaleConnectOnLaunch = false
         settings.orchestratorCLI = "claude"
         settings.orchestratorArgs = ""
         settings.orchestratorName = "orchestrator"
@@ -421,6 +519,22 @@ struct SettingsView: View {
 struct AppearanceSettingsView: View {
     @ObservedObject var settings: AtermSettings
     let onApply: () -> Void
+    @State private var showAllFonts: Bool = false
+    @State private var variantAvailability: FontVariantAvailability = .allPresent
+
+    private var fontFamilies: [String] {
+        showAllFonts ? AtermSettings.allFontFamilies : AtermSettings.monospacedFontFamilies
+    }
+
+    private var variantBadgeMessage: String {
+        let missing = variantAvailability.missing()
+        if missing.isEmpty { return "" }
+        let joined = missing.joined(separator: ", ")
+        return AtermLocalization.text(
+            ko: "없음: \(joined)",
+            en: "Missing: \(joined)"
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -449,13 +563,60 @@ struct AppearanceSettingsView: View {
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             HStack {
+                Text(AtermLocalization.text(ko: "서체", en: "Family"))
+                    .frame(width: 80, alignment: .leading)
+                    .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+                Picker("", selection: $settings.fontFamily) {
+                    Text(AtermLocalization.text(ko: "시스템 기본", en: "System Default"))
+                        .tag("System Default")
+                    Divider()
+                    ForEach(fontFamilies, id: \.self) { family in
+                        Text(family).tag(family)
+                    }
+                }
+                .labelsHidden()
+                .onChange(of: settings.fontFamily) { _ in
+                    settings.save()
+                    onApply()
+                    variantAvailability = AtermSettings.detectFontVariants(family: settings.fontFamily)
+                }
+            }
+
+            // Lazy variant badge (Q-font-4 C2): rendered only when selected family
+            // is missing one or more of Bold / Italic / Bold Italic.
+            if !variantAvailability.allPresent && settings.fontFamily != "System Default" {
+                HStack(alignment: .center, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: AtermTheme.statusWarning))
+                    Text(variantBadgeMessage)
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+                .padding(.leading, 80)
+            }
+
+            HStack {
+                Spacer()
+                Toggle(
+                    AtermLocalization.text(ko: "모든 글꼴 표시", en: "Show all fonts"),
+                    isOn: $showAllFonts
+                )
+                .toggleStyle(.checkbox)
+                .font(.system(size: 10))
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
+            }
+
+            HStack {
                 Text(AtermLocalization.text(ko: "크기", en: "Size"))
                     .frame(width: 80, alignment: .leading)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 Slider(value: $settings.fontSize, in: 12...24, step: 1) {
                     EmptyView()
                 }
-                .onChange(of: settings.fontSize) {
+                .onChange(of: settings.fontSize) { _ in
                     settings.save()
                     onApply()
                 }
@@ -472,7 +633,7 @@ struct AppearanceSettingsView: View {
                 Slider(value: $settings.lineHeight, in: 1.0...2.0, step: 0.1) {
                     EmptyView()
                 }
-                .onChange(of: settings.lineHeight) {
+                .onChange(of: settings.lineHeight) { _ in
                     settings.save()
                     onApply()
                 }
@@ -491,7 +652,7 @@ struct AppearanceSettingsView: View {
                 Slider(value: $settings.backgroundOpacity, in: 50...100, step: 5) {
                     EmptyView()
                 }
-                .onChange(of: settings.backgroundOpacity) {
+                .onChange(of: settings.backgroundOpacity) { _ in
                     settings.save()
                     onApply()
                 }
@@ -505,15 +666,18 @@ struct AppearanceSettingsView: View {
 
             Toggle(AtermLocalization.text(ko: "상태 이모지 표시", en: "Show Status Emojis"), isOn: $settings.showStatusEmoji)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
-                .onChange(of: settings.showStatusEmoji) { settings.save() }
+                .onChange(of: settings.showStatusEmoji) { _ in settings.save() }
             
             Toggle(AtermLocalization.text(ko: "ASCII 아이콘 사용", en: "Use ASCII Icons"), isOn: $settings.useAsciiIcons)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 .disabled(!settings.showStatusEmoji)
                 .opacity(settings.showStatusEmoji ? 1.0 : 0.5)
-                .onChange(of: settings.useAsciiIcons) { settings.save() }
+                .onChange(of: settings.useAsciiIcons) { _ in settings.save() }
         }
         .padding(20)
+        .onAppear {
+            variantAvailability = AtermSettings.detectFontVariants(family: settings.fontFamily)
+        }
     }
 }
 
@@ -566,6 +730,8 @@ struct SchemeButton: View {
                     )
                     .lineLimit(1)
             }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -575,6 +741,7 @@ struct SchemeButton: View {
 
 struct TerminalSettingsView: View {
     @ObservedObject var settings: AtermSettings
+    @State private var shellMode: String = "zsh"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -589,7 +756,7 @@ struct TerminalSettingsView: View {
                 Text(AtermLocalization.text(ko: "셸", en: "Shell")).tag("none")
             }
             .pickerStyle(.segmented)
-            .onChange(of: settings.defaultCLI) { settings.save() }
+            .onChange(of: settings.defaultCLI) { _ in settings.save() }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
@@ -619,7 +786,7 @@ struct TerminalSettingsView: View {
                     )
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
-                    .onChange(of: settings.cliDefaults[cli]) { settings.save() }
+                    .onChange(of: settings.cliDefaults[cli]) { _ in settings.save() }
                 }
             }
 
@@ -657,7 +824,7 @@ struct TerminalSettingsView: View {
                 TextField("", value: $settings.scrollbackLines, format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 100)
-                    .onChange(of: settings.scrollbackLines) { settings.save() }
+                    .onChange(of: settings.scrollbackLines) { _ in settings.save() }
             }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
@@ -672,7 +839,50 @@ struct TerminalSettingsView: View {
                 Text(AtermLocalization.text(ko: "막대", en: "Bar")).tag("bar")
             }
             .pickerStyle(.segmented)
-            .onChange(of: settings.cursorStyle) { settings.save() }
+            .onChange(of: settings.cursorStyle) { _ in settings.save() }
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            Text(AtermLocalization.text(ko: "셸", en: "Shell"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            Picker("", selection: $shellMode) {
+                Text("zsh").tag("zsh")
+                Text("bash").tag("bash")
+                Text("fish").tag("fish")
+                Text(AtermLocalization.text(ko: "기타...", en: "Other...")).tag("other")
+            }
+            .pickerStyle(.segmented)
+            .onAppear {
+                shellMode = AtermSettings.shellPresets.contains(settings.shellDefault)
+                    ? settings.shellDefault
+                    : "other"
+            }
+            .onChange(of: shellMode) { _ in
+                if shellMode == "other" {
+                    if AtermSettings.shellPresets.contains(settings.shellDefault) {
+                        settings.shellDefault = ""
+                        settings.save()
+                    }
+                } else {
+                    settings.shellDefault = shellMode
+                    settings.save()
+                }
+            }
+
+            if shellMode == "other" {
+                TextField(
+                    AtermLocalization.text(
+                        ko: "셸 경로 또는 명령 (예: /bin/nu)",
+                        en: "Custom shell path (e.g. /bin/nu)"
+                    ),
+                    text: $settings.shellDefault
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                .onChange(of: settings.shellDefault) { _ in settings.save() }
+            }
         }
         .padding(20)
     }
@@ -691,11 +901,11 @@ struct SessionSettingsView: View {
 
             Toggle(AtermLocalization.text(ko: "실행 시 세션 자동 복원", en: "Auto-restore sessions on launch"), isOn: $settings.autoRestoreSessions)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
-                .onChange(of: settings.autoRestoreSessions) { settings.save() }
+                .onChange(of: settings.autoRestoreSessions) { _ in settings.save() }
 
             Toggle(AtermLocalization.text(ko: "죽은 세션 자동 재시작", en: "Auto-restart dead sessions"), isOn: $settings.autoRestartDead)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
-                .onChange(of: settings.autoRestartDead) { settings.save() }
+                .onChange(of: settings.autoRestartDead) { _ in settings.save() }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
@@ -706,7 +916,7 @@ struct SessionSettingsView: View {
                 TextField("", value: $settings.maxRestartAttempts, format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 60)
-                    .onChange(of: settings.maxRestartAttempts) { settings.save() }
+                    .onChange(of: settings.maxRestartAttempts) { _ in settings.save() }
             }
             .opacity(settings.autoRestartDead ? 1.0 : 0.4)
             .disabled(!settings.autoRestartDead)
@@ -719,7 +929,30 @@ struct SessionSettingsView: View {
 
             Toggle(AtermLocalization.text(ko: "태스크 보드 표시", en: "Show Task Board"), isOn: $settings.showTaskBoard)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
-                .onChange(of: settings.showTaskBoard) { settings.save() }
+                .onChange(of: settings.showTaskBoard) { _ in settings.save() }
+
+            Divider().overlay(Color(nsColor: AtermTheme.border))
+
+            Text(AtermLocalization.text(ko: "통합", en: "Integrations"))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+
+            Toggle(
+                AtermLocalization.text(
+                    ko: "실행 시 Tailscale 자동 연결",
+                    en: "Connect Tailscale on launch"
+                ),
+                isOn: $settings.tailscaleConnectOnLaunch
+            )
+            .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
+            .onChange(of: settings.tailscaleConnectOnLaunch) { _ in settings.save() }
+
+            Text(AtermLocalization.text(
+                ko: "다음 앱 실행부터 적용됩니다",
+                en: "Takes effect on next app launch"
+            ))
+                .font(.system(size: 10))
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
         }
         .padding(20)
     }
@@ -737,6 +970,15 @@ struct OrchestratorSettingsView: View {
         let encoded = cwd.replacingOccurrences(of: "/", with: "-")
         let trustDir = NSHomeDirectory() + "/.claude/projects/" + encoded
         return FileManager.default.fileExists(atPath: trustDir)
+    }
+
+    private var orchestratorArgsPlaceholder: String {
+        if settings.orchestratorCLI == "custom" {
+            return AtermLocalization.text(ko: "예: my-cli --flag", en: "e.g. my-cli --flag")
+        }
+        return settings.cliDefaults[settings.orchestratorCLI]
+            ?? AtermSettings.defaultCliArgs[settings.orchestratorCLI]
+            ?? ""
     }
 
     var body: some View {
@@ -889,20 +1131,30 @@ struct OrchestratorSettingsView: View {
                 .font(.system(size: 10))
                 .foregroundColor(Color(nsColor: AtermTheme.textMuted))
 
-            // Args (visible for custom CLI)
-            if settings.orchestratorCLI == "custom" {
-                Divider().overlay(Color(nsColor: AtermTheme.border))
+            // Args (visible for all CLIs — override mode)
+            Divider().overlay(Color(nsColor: AtermTheme.border))
 
-                Text(AtermLocalization.text(ko: "커스텀 명령어", en: "Custom Command"))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
+            Text(AtermLocalization.text(
+                ko: "CLI 인수 (선택적 재정의)",
+                en: "Args (optional override)"
+            ))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
-                TextField(
-                    AtermLocalization.text(ko: "예: my-cli --flag", en: "e.g. my-cli --flag"),
-                    text: $settings.orchestratorArgs
-                )
-                .textFieldStyle(.roundedBorder)
-            }
+            TextField(
+                orchestratorArgsPlaceholder,
+                text: $settings.orchestratorArgs
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11, design: .monospaced))
+            .onChange(of: settings.orchestratorArgs) { _ in settings.save() }
+
+            Text(AtermLocalization.text(
+                ko: "비어 있으면 위 기본값이 사용됩니다. 값을 입력하면 완전히 재정의합니다.",
+                en: "Leave empty to use the default above. Any value fully overrides it."
+            ))
+                .font(.system(size: 10))
+                .foregroundColor(Color(nsColor: AtermTheme.textMuted))
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 

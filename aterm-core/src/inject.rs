@@ -4,6 +4,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::mailbox::message::Message as MailboxMessage;
+use crate::mailbox::FileMailbox;
 use crate::pty::WorkspaceStatus;
 
 pub const IDLE_THRESHOLD: Duration = Duration::from_secs(2);
@@ -18,6 +20,9 @@ const PROMPT_PATTERNS: &[&str] = &[
     "\u{2192} ",
     "\u{276f}\u{276f} ",
     "\u{2726} ",
+    // codex prompt patterns — codex CLI uses these when ready for input
+    "Summarize the last session",
+    "What would you like to do?",
 ];
 const BARE_PROMPTS: &[&str] = &[
     "\u{276f}",
@@ -30,8 +35,11 @@ const BARE_PROMPTS: &[&str] = &[
     "\u{276f}\u{276f}",
     "\u{2726}",
 ];
-const FORCE_INJECT_TIMEOUT: Duration = Duration::from_secs(30);
-const INJECT_QUEUE_CAPACITY: usize = 256;
+const FORCE_INJECT_TIMEOUT: Duration = Duration::from_secs(5);
+const INJECT_QUEUE_CAPACITY: usize = 20;
+const MAX_PER_SENDER: usize = 10;
+const BATCH_DRAIN_MAX: usize = 5;
+const BATCH_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How the prompt was detected — determines inject timing.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -239,23 +247,90 @@ pub struct InjectMessageInfo {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Default)]
 pub struct InjectQueue {
     messages: VecDeque<InjectMessage>,
+    /// Persistent mailbox backing (None = in-memory only, for tests).
+    mailbox: Option<FileMailbox>,
+    session_id: String,
+    /// msg_id of last dequeued message (for ack/nack).
+    last_dequeued_msg_id: Option<String>,
+}
+
+impl Default for InjectQueue {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InjectQueue {
+    /// In-memory only (tests, backward compat).
     pub fn new() -> Self {
         Self {
             messages: VecDeque::new(),
+            mailbox: None,
+            session_id: String::new(),
+            last_dequeued_msg_id: None,
+        }
+    }
+
+    /// With persistent mailbox backing.
+    pub fn with_mailbox(session_id: &str) -> Self {
+        let mailbox = FileMailbox::with_defaults();
+        Self {
+            messages: VecDeque::new(),
+            mailbox: Some(mailbox),
+            session_id: session_id.to_string(),
+            last_dequeued_msg_id: None,
         }
     }
 
     pub fn push(&mut self, mut message: InjectMessage) -> Result<usize, String> {
         if self.messages.len() >= INJECT_QUEUE_CAPACITY {
+            debug_log!(
+                "[inject] queue full ({} pending), rejecting message from '{}'",
+                self.messages.len(),
+                message.from
+            );
             return Err("inject queue full".to_string());
         }
+        // Per-sender throttle (#199): reject if sender has too many pending
+        let sender_count = self
+            .messages
+            .iter()
+            .filter(|m| m.from == message.from)
+            .count();
+        if sender_count >= MAX_PER_SENDER {
+            debug_log!(
+                "[inject] sender '{}' throttled ({} pending)",
+                message.from,
+                sender_count
+            );
+            return Err(format!(
+                "sender '{}' throttled ({} pending)",
+                message.from, sender_count
+            ));
+        }
         message.enqueued_at = Instant::now();
+
+        // Persist to mailbox if configured
+        if let Some(ref mailbox) = self.mailbox {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let msg = MailboxMessage {
+                msg_id: format!("{}:{}", message.from, nanos),
+                from: message.from.clone(),
+                to: self.session_id.clone(),
+                payload: message.text.clone(),
+                created_at: message.timestamp,
+                attempt: 0,
+            };
+            if let Err(e) = mailbox.enqueue(msg) {
+                log_stderr!("[mailbox] enqueue failed (degraded): {}", e);
+            }
+        }
+
         self.messages.push_back(message);
         Ok(self.messages.len())
     }
@@ -265,7 +340,56 @@ impl InjectQueue {
     }
 
     pub fn pop(&mut self) -> Option<InjectMessage> {
-        self.messages.pop_front()
+        let msg = self.messages.pop_front()?;
+
+        // Dequeue from mailbox (transition pending → in_flight)
+        if let Some(ref mailbox) = self.mailbox {
+            match mailbox.dequeue(&self.session_id) {
+                Ok(Some(mailbox_msg)) => {
+                    self.last_dequeued_msg_id = Some(mailbox_msg.msg_id);
+                }
+                Ok(None) => {
+                    self.last_dequeued_msg_id = None;
+                }
+                Err(e) => {
+                    log_stderr!("[mailbox] dequeue failed (degraded): {}", e);
+                    self.last_dequeued_msg_id = None;
+                }
+            }
+        }
+
+        Some(msg)
+    }
+
+    /// msg_id of last dequeued message (for ack/nack after PTY delivery).
+    pub fn last_dequeued_msg_id(&self) -> Option<&str> {
+        self.last_dequeued_msg_id.as_deref()
+    }
+
+    /// ACK: message was successfully delivered to PTY.
+    pub fn ack_last(&self) -> Result<(), String> {
+        let Some(ref mailbox) = self.mailbox else {
+            return Ok(());
+        };
+        let Some(ref msg_id) = self.last_dequeued_msg_id else {
+            return Ok(());
+        };
+        mailbox
+            .ack(&self.session_id, msg_id)
+            .map_err(|e| e.to_string())
+    }
+
+    /// NACK: PTY delivery failed. Mailbox handles retry/dead-letter.
+    pub fn nack_last(&self, reason: &str) -> Result<(), String> {
+        let Some(ref mailbox) = self.mailbox else {
+            return Ok(());
+        };
+        let Some(ref msg_id) = self.last_dequeued_msg_id else {
+            return Ok(());
+        };
+        mailbox
+            .nack(&self.session_id, msg_id, reason)
+            .map_err(|e| e.to_string())
     }
 
     pub fn len(&self) -> usize {
@@ -475,36 +599,77 @@ pub fn run_injector_loop(
             );
         }
 
-        let message = inject_queue.lock().ok().and_then(|mut queue| queue.pop());
-        let Some(message) = message else {
-            continue;
-        };
+        // Batch drain (#199): deliver up to BATCH_DRAIN_MAX messages per idle-gate pass.
+        // Prevents 118-message × 30s = 60min blocking scenario.
+        let mut batch_count = 0usize;
+        let mut write_failed = false;
 
-        let write_result = if let Ok(mut handle) = writer.lock() {
-            let text = message
-                .text
-                .trim_end_matches(|ch: char| ch == '\r' || ch == '\n');
-            let result = handle
-                .write_all(text.as_bytes())
-                .and_then(|_| handle.flush());
-            if result.is_ok() {
-                // Brief pause so TUI frameworks (Codex/ink, Gemini/bubbletea)
-                // process the text characters before receiving Enter.
-                drop(handle);
-                thread::sleep(Duration::from_millis(50));
-                if let Ok(mut handle) = writer.lock() {
-                    handle.write_all(b"\r").and_then(|_| handle.flush())
+        while batch_count < BATCH_DRAIN_MAX {
+            let message = inject_queue.lock().ok().and_then(|mut queue| queue.pop());
+            let Some(message) = message else {
+                break;
+            };
+
+            let write_result = if let Ok(mut handle) = writer.lock() {
+                let text = message
+                    .text
+                    .trim_end_matches(|ch: char| ch == '\r' || ch == '\n');
+                let result = handle
+                    .write_all(text.as_bytes())
+                    .and_then(|_| handle.flush());
+                if result.is_ok() {
+                    // Brief pause so TUI frameworks (Codex/ink, Gemini/bubbletea)
+                    // process the text characters before receiving Enter.
+                    drop(handle);
+                    thread::sleep(Duration::from_millis(50));
+                    if let Ok(mut handle) = writer.lock() {
+                        handle.write_all(b"\r").and_then(|_| handle.flush())
+                    } else {
+                        Err(io::Error::other("inject writer lock failed"))
+                    }
                 } else {
-                    Err(io::Error::other("inject writer lock failed"))
+                    result
                 }
             } else {
-                result
-            }
-        } else {
-            Err(io::Error::other("inject writer lock failed"))
-        };
+                Err(io::Error::other("inject writer lock failed"))
+            };
 
-        if write_result.is_err() {
+            if write_result.is_err() {
+                // NACK: PTY write failed — mailbox handles retry/dead-letter (#190)
+                if let Ok(queue) = inject_queue.lock() {
+                    if let Err(e) = queue.nack_last("pty_write_failed") {
+                        log_stderr!("[inject] mailbox nack failed: {}", e);
+                    }
+                }
+                write_failed = true;
+                break;
+            }
+
+            // ACK: message successfully delivered to PTY (#190)
+            if let Ok(queue) = inject_queue.lock() {
+                if let Err(e) = queue.ack_last() {
+                    log_stderr!("[inject] mailbox ack failed: {}", e);
+                }
+            }
+
+            batch_count += 1;
+
+            // Inter-message delay within batch
+            if batch_count < BATCH_DRAIN_MAX {
+                let has_more = inject_queue
+                    .lock()
+                    .ok()
+                    .map(|q| !q.is_empty())
+                    .unwrap_or(false);
+                if has_more {
+                    thread::sleep(BATCH_DRAIN_INTERVAL);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if write_failed {
             if let Ok(mut queue) = inject_queue.lock() {
                 queue.clear();
             }
@@ -514,6 +679,10 @@ pub fn run_injector_loop(
             }
             status.1.notify_all();
             break;
+        }
+
+        if batch_count > 1 {
+            log_stderr!("[inject] batch drained {} messages", batch_count);
         }
 
         if let Ok(mut idle) = idle_state.lock() {
@@ -665,7 +834,7 @@ mod tests {
 
     #[test]
     fn force_inject_timeout_constant_is_30s() {
-        assert_eq!(FORCE_INJECT_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(FORCE_INJECT_TIMEOUT, Duration::from_secs(5));
     }
 
     #[test]
