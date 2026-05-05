@@ -176,13 +176,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     orchestratorInputBar.onSubmit = { [weak self] text in
       guard let self, let core = self.terminalView?.corePointer else { return }
-      // Strip leading/trailing whitespace; preserve internal newlines for multi-line input
       let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmed.isEmpty else { return }
-      // Send the raw text + carriage return (matches what user typing in CLI prompt would produce)
-      let payload = trimmed + "\r"
-      payload.withCString { ptr in
-        aterm_core_write_pty(core, ptr, payload.utf8.count)
+      // Write text first, then CR after a short delay.
+      // TUI CLIs (Codex, Gemini) use multi-line editors where text + \r in a single
+      // write causes the \r to be processed as a newline inside the editor.
+      // Splitting the write gives the TUI time to process the text, then the
+      // subsequent \r is interpreted as "submit" rather than "newline in editor".
+      trimmed.withCString { ptr in
+        aterm_core_write_pty(core, ptr, trimmed.utf8.count)
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        guard let core = self.terminalView?.corePointer else { return }
+        "\r".withCString { ptr in
+          aterm_core_write_pty(core, ptr, 1)
+        }
       }
     }
     orchestratorInputBar.onEscape = { [weak self] in

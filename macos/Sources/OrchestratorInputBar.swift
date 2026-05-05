@@ -555,6 +555,12 @@ final class OrchestratorTextView: NSTextView {
 
         switch event.keyCode {
         case 36, 76:  // Return / numpad Enter
+            if hasMarkedText() {
+                // Korean IME composing — let the system finalize composition first.
+                // After finalization, insertNewline: fires and handles submit.
+                super.keyDown(with: event)
+                return
+            }
             if flags.contains(.shift) {
                 onShiftEnter?()
             } else {
@@ -584,6 +590,14 @@ final class OrchestratorTextView: NSTextView {
         }
 
         super.keyDown(with: event)
+    }
+
+    /// Catch Enter routed through key binding system (after IME composition finalization).
+    /// When Korean IME has marked text, keyDown delegates to super which triggers
+    /// interpretKeyEvents → insertText (finalize) → insertNewline. Without this override,
+    /// NSTextView's default insertNewline inserts a literal newline character.
+    override func insertNewline(_ sender: Any?) {
+        onEnter?()
     }
 
     // Placeholder drawing. Aligned to current `textContainerInset` so the
