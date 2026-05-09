@@ -8,7 +8,6 @@ cargo test -p aterm-ipc           # IPC crate tests
 cargo test -p aterm-session       # Session crate tests
 cargo test -p aterm-core -- inject::tests   # Inject module only
 cargo test -p aterm-core -- pty::tests      # PTY module only
-cargo test -p aterm-core -- renderer::tests # Renderer module only
 cargo test -p aterm-core -- ffi_tests::     # FFI crash-safety tests
 ```
 
@@ -94,25 +93,6 @@ cargo test -p aterm-core -- ffi_tests::     # FFI crash-safety tests
 | wait_until_status_change_notifies_all_waiters | integration | Status change wakes all waiting threads |
 | wait_until_timeout_returns_after_specified_duration | integration | wait_until respects timeout parameter |
 
-## aterm-core — renderer::tests
-
-| Test Name | Suite | Purpose |
-|-----------|-------|---------|
-| aterm_core_render_does_not_panic_on_empty_grid | renderer | Render-path batching handles empty grid without panicking |
-| aterm_core_render_does_not_panic_on_mismatched_grid_dimensions | renderer | Render-path batching tolerates grid/dimension mismatch without panicking |
-| glyph_bitmap_padding_matches_cell_dimensions | renderer | Rasterized glyph uploads are padded to exactly one cell's pixel dimensions |
-| atlas_clear_triggers_glyph_cache_clear_no_stale_glyphs | renderer | Atlas clear path also drops cached glyph metadata so stale entries cannot survive |
-| font_size_change_resets_both_atlas_and_glyph_cache | renderer | Font-size changes clear both atlas pages and cached glyph lookups before re-rasterizing |
-| ascii_preload_uses_cell_dimensions | renderer | ASCII preload populates atlas entries using the current cell width and height |
-| cjk_wide_char_padding_matches_two_cell_width | renderer | Wide CJK glyph uploads expand to two cell widths while keeping one cell height |
-| damage_tracker_full_damage_processes_all_lines | renderer | Full damage marks every visual row dirty |
-| damage_tracker_is_line_damaged_returns_false_for_unchanged_lines | renderer | Unchanged rows remain skipped in partial damage mode |
-| damage_tracker_partial_damage_skips_unchanged_lines | renderer | Partial damage marks only changed rows dirty |
-| run_based_batching_handles_empty_line | renderer | Empty lines produce no text runs |
-| run_based_batching_handles_line_with_all_different_attributes | renderer | Different per-cell attributes split runs at each cell |
-| run_based_batching_handles_single_character_line | renderer | Single-character lines produce exactly one run |
-| run_based_batching_produces_fewer_text_areas_than_per_cell | renderer | Consecutive same-color cells batch into fewer text areas than per-cell rendering |
-
 ## aterm-core — ffi_tests
 
 | Test Name | Suite | Purpose |
@@ -123,5 +103,5 @@ cargo test -p aterm-core -- ffi_tests::     # FFI crash-safety tests
 
 ---
 
-*Total: 84 tests (25 inject + 24 pty + 18 integration + 14 renderer + 3 ffi)*
-*Generated: 2026-04-03*
+*Total: 70 tests (25 inject + 24 pty + 18 integration + 3 ffi)*
+*Generated: 2026-04-03; updated 2026-05-09 (Phase 1 cleanup retired renderer family — wgpu renderer + 14 renderer::tests deleted in 61d63c1)*
