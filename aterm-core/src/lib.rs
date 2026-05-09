@@ -53,12 +53,6 @@ pub mod cli_presets;
 pub mod inject;
 pub mod mailbox;
 pub mod pty;
-#[cfg(feature = "wgpu")]
-pub mod renderer;
-#[cfg(feature = "wgpu")]
-pub mod renderer_atlas;
-#[cfg(feature = "wgpu")]
-pub mod renderer_glyph;
 pub mod session;
 pub mod sync;
 pub mod tailscale;
@@ -72,8 +66,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::pty::{PtyManager, PtyOutputSignal};
-#[cfg(feature = "wgpu")]
-use crate::renderer::{ColorScheme, TerminalGridRenderer, TerminalThemeMode};
 use crate::terminal::{AdvanceHandle, TerminalState};
 
 // -- Named key codes --
@@ -155,14 +147,6 @@ fn global_event_queue() -> &'static Mutex<Vec<aterm_session::types::WorkspaceEve
     EVENT_QUEUE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-#[cfg(feature = "wgpu")]
-struct GpuState {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-}
-
 /// Callback type for dirty notifications
 type DirtyCallback = unsafe extern "C" fn(*mut c_void);
 
@@ -174,10 +158,6 @@ struct CliDetectionStatus {
 }
 
 pub struct AtermCore {
-    #[cfg(feature = "wgpu")]
-    gpu: Option<GpuState>,
-    #[cfg(feature = "wgpu")]
-    renderer: Option<TerminalGridRenderer>,
     terminal: Option<TerminalState>,
     /// Pending AdvanceHandle — created with TerminalState, consumed by spawn_shell.
     advance_handle: Option<AdvanceHandle>,
@@ -187,23 +167,11 @@ pub struct AtermCore {
     dirty: Arc<AtomicBool>,
     dirty_callback: Option<DirtyCallback>,
     dirty_userdata: *mut c_void,
-    #[cfg(feature = "wgpu")]
-    theme_mode: TerminalThemeMode,
     /// Theme mode for no-wgpu builds: 0 = dark, 1 = light.
     #[cfg(not(feature = "wgpu"))]
     theme_mode_raw: u8,
     /// IME preedit text for inline rendering (#206). Empty = no preedit.
     preedit_text: String,
-    /// Set when surface.configure() panics — next render retries.
-    #[cfg(feature = "wgpu")]
-    needs_reconfigure: AtomicBool,
-    /// Deferred surface reconfigure (Fix 3/5): pending pixel dimensions.
-    /// Actual configure happens lazily at render time, coalescing multiple
-    /// resize events per frame into a single GPU reconfigure.
-    #[cfg(feature = "wgpu")]
-    pending_surface_width: AtomicU32,
-    #[cfg(feature = "wgpu")]
-    pending_surface_height: AtomicU32,
     /// PTY SIGWINCH coalescing (Fix 6): last grid cols/rows sent to PTY.
     /// Skips redundant ioctl(TIOCSWINSZ) when pixel size changes but
     /// grid dimensions stay the same.
@@ -214,11 +182,6 @@ pub struct AtermCore {
     /// Geometry revision counter (Fix 7): cheap monotonic counter for
     /// stale-frame detection without expensive dimension comparison.
     geometry_revision: AtomicU64,
-    /// Render lock (Fix #153): prevents concurrent render() calls from
-    /// CVDisplayLink thread and PTY dirty-callback thread. try_render()
-    /// skips if locked; direct render() spins briefly then skips.
-    #[cfg(feature = "wgpu")]
-    render_lock: AtomicBool,
 }
 
 // SAFETY: The raw pointer dirty_userdata is only used from the main thread callback
@@ -278,10 +241,6 @@ impl AtermCore {
         let pty_manager = PtyManager::new();
         let pty_signal = pty_manager.output_signal();
         Self {
-            #[cfg(feature = "wgpu")]
-            gpu: None,
-            #[cfg(feature = "wgpu")]
-            renderer: None,
             terminal: None,
             advance_handle: None,
             pty_manager,
@@ -290,128 +249,14 @@ impl AtermCore {
             dirty: Arc::new(AtomicBool::new(false)),
             dirty_callback: None,
             dirty_userdata: std::ptr::null_mut(),
-            #[cfg(feature = "wgpu")]
-            theme_mode: TerminalThemeMode::Dark,
             #[cfg(not(feature = "wgpu"))]
             theme_mode_raw: 0, // 0 = dark
             preedit_text: String::new(),
-            #[cfg(feature = "wgpu")]
-            needs_reconfigure: AtomicBool::new(false),
-            #[cfg(feature = "wgpu")]
-            pending_surface_width: AtomicU32::new(0),
-            #[cfg(feature = "wgpu")]
-            pending_surface_height: AtomicU32::new(0),
             last_pty_cols: 0,
             last_pty_rows: 0,
             last_display_offset: 0,
             geometry_revision: AtomicU64::new(0),
-            #[cfg(feature = "wgpu")]
-            render_lock: AtomicBool::new(false),
         }
-    }
-
-    #[cfg(feature = "wgpu")]
-    fn init_gpu(&mut self, ns_view: *mut c_void, width: u32, height: u32, scale: f32) -> i32 {
-        if ns_view.is_null() {
-            return -1;
-        }
-
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
-            ..Default::default()
-        });
-
-        // Create surface from raw NSView pointer — per-workspace (bound to CAMetalLayer)
-        let surface = unsafe {
-            use raw_window_handle::{
-                AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle,
-            };
-            let window_handle = AppKitWindowHandle::new(std::ptr::NonNull::new(ns_view).unwrap());
-            let display_handle = AppKitDisplayHandle::new();
-            let raw_window = RawWindowHandle::AppKit(window_handle);
-            let raw_display = RawDisplayHandle::AppKit(display_handle);
-            let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: raw_display,
-                raw_window_handle: raw_window,
-            };
-            match instance.create_surface_unsafe(target) {
-                Ok(s) => s,
-                Err(e) => {
-                    log_stderr!("[aterm-core] surface creation failed: {e}");
-                    return -2;
-                }
-            }
-        };
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }));
-        let adapter = match adapter {
-            Some(a) => a,
-            None => {
-                log_stderr!("[aterm-core] no suitable GPU adapter");
-                return -3;
-            }
-        };
-
-        let (device, queue) = match pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("aterm-core"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-            },
-            None,
-        )) {
-            Ok(dq) => dq,
-            Err(e) => {
-                log_stderr!("[aterm-core] device creation failed: {e}");
-                return -4;
-            }
-        };
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| !f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: width.max(1),
-            height: height.max(1),
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
-        let renderer =
-            TerminalGridRenderer::new(&device, &queue, format, self.theme_mode, scale.max(1.0));
-        let (cols, rows) = renderer.grid_size(width as f32, height as f32);
-        let (terminal, advance_handle) = TerminalState::new(cols as usize, rows as usize, Some(self.pty_signal.sync_active_flag()));
-
-        self.renderer = Some(renderer);
-        self.terminal = Some(terminal);
-        self.advance_handle = Some(advance_handle);
-        self.gpu = Some(GpuState {
-            surface,
-            device,
-            queue,
-            config,
-        });
-
-        // Sync pending dimensions so resize() dedup works from the start
-        self.pending_surface_width.store(width.max(1), Ordering::Relaxed);
-        self.pending_surface_height.store(height.max(1), Ordering::Relaxed);
-
-        0 // success
     }
 
     fn spawn_shell(
@@ -547,155 +392,6 @@ impl AtermCore {
         }
     }
 
-    #[cfg(feature = "wgpu")]
-    fn render(&mut self) {
-        use std::sync::atomic::AtomicU64;
-        static RENDER_COUNT: AtomicU64 = AtomicU64::new(0);
-        static LAST_LOG_TIME: AtomicU64 = AtomicU64::new(0);
-        let count = RENDER_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let last = LAST_LOG_TIME.load(Ordering::Relaxed);
-        if last == 0 || now_ms.saturating_sub(last) >= 1000 {
-            LAST_LOG_TIME.store(now_ms, Ordering::Relaxed);
-            debug_log!("[render] frame #{} (1s interval log)", count);
-        }
-
-        // PTY advance now happens on the reader thread — no drain needed here.
-
-        // Deferred surface reconfigure (Fix 3/5): apply pending size change.
-        // Coalesces multiple resize() calls between frames into a single
-        // GPU surface reconfigure, matching Ghostty/cmux patterns.
-        let pending_w = self.pending_surface_width.load(Ordering::Acquire);
-        let pending_h = self.pending_surface_height.load(Ordering::Acquire);
-        if pending_w > 0 && pending_h > 0 {
-            if let Some(ref mut gpu) = self.gpu {
-                if gpu.config.width != pending_w || gpu.config.height != pending_h {
-                    gpu.config.width = pending_w;
-                    gpu.config.height = pending_h;
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        gpu.surface.configure(&gpu.device, &gpu.config);
-                    }));
-                    if result.is_err() {
-                        log_stderr!("[aterm-core] surface.configure panicked during deferred resize — will retry");
-                        self.needs_reconfigure.store(true, Ordering::SeqCst);
-                    }
-                }
-            }
-        }
-
-        // Retry configure if a previous attempt panicked (recovery path)
-        if self.needs_reconfigure.load(Ordering::SeqCst) {
-            if let Some(ref gpu) = self.gpu {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    gpu.surface.configure(&gpu.device, &gpu.config);
-                }));
-                if result.is_err() {
-                    // Still broken — skip frame, retry next frame (no infinite loop)
-                    return;
-                }
-                self.needs_reconfigure.store(false, Ordering::SeqCst);
-                log_stderr!("[aterm-core] surface reconfigured successfully after panic");
-            }
-        }
-
-        let (gpu, renderer, terminal) = match (&self.gpu, &mut self.renderer, &self.terminal) {
-            (Some(g), Some(r), Some(t)) => (g, r, t),
-            _ => return,
-        };
-
-        let output = match gpu.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                // Wrap reconfigure in catch_unwind — may race with resize
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    gpu.surface.configure(&gpu.device, &gpu.config);
-                }));
-                if result.is_err() {
-                    self.needs_reconfigure.store(true, Ordering::SeqCst);
-                }
-                return;
-            }
-            Err(e) => {
-                log_stderr!("[aterm-core] surface error: {e}");
-                return;
-            }
-        };
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let shared = terminal.terminal();
-        if let Ok(mut term) = shared.lock() {
-            renderer.render(
-                &mut term,
-                &gpu.device,
-                &gpu.queue,
-                &view,
-                gpu.config.width,
-                gpu.config.height,
-                &self.preedit_text,
-            );
-        }
-
-        output.present();
-    }
-
-    #[cfg(feature = "wgpu")]
-    fn set_theme_mode(&mut self, theme_mode: TerminalThemeMode) {
-        self.theme_mode = theme_mode;
-        if let Some(ref mut renderer) = self.renderer {
-            renderer.set_theme_mode(theme_mode);
-        }
-        self.sync_osc_colors();
-    }
-
-    #[cfg(feature = "wgpu")]
-    fn set_color_scheme(&mut self, scheme: ColorScheme) {
-        if let Some(ref mut renderer) = self.renderer {
-            renderer.set_color_scheme(scheme);
-        }
-        self.sync_osc_colors();
-    }
-
-    /// Sync renderer's active palette fg/bg to terminal listener for OSC 10/11 responses.
-    /// Direct reference through renderer — always reflects current theme/scheme.
-    #[cfg(feature = "wgpu")]
-    fn sync_osc_colors(&self) {
-        if let (Some(ref renderer), Some(ref terminal)) = (&self.renderer, &self.terminal) {
-            let (fg, bg) = renderer.current_fg_bg();
-            debug_log!(
-                "[osc-color] sync_osc_colors: fg=({},{},{}) bg=({},{},{})",
-                fg[0], fg[1], fg[2], bg[0], bg[1], bg[2]
-            );
-            terminal.set_listener_colors(fg, bg);
-        }
-    }
-
-    #[cfg(feature = "wgpu")]
-    fn set_font_size(&mut self, size: f32) {
-        if let Some(ref mut renderer) = self.renderer {
-            renderer.set_font_size(size);
-        }
-    }
-
-    #[cfg(feature = "wgpu")]
-    fn set_line_height(&mut self, height: f32) {
-        if let Some(ref mut renderer) = self.renderer {
-            renderer.set_line_height(height);
-        }
-    }
-
-    #[cfg(feature = "wgpu")]
-    fn set_cell_width(&mut self, width: f32) {
-        if let Some(ref mut renderer) = self.renderer {
-            renderer.set_cell_width(width);
-        }
-    }
-
     #[cfg(not(feature = "wgpu"))]
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
@@ -715,49 +411,6 @@ impl AtermCore {
                 let _ = self.pty_manager.resize(id, cols, rows);
             }
         }
-        self.dirty.store(true, Ordering::Relaxed);
-    }
-
-    #[cfg(feature = "wgpu")]
-    fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-
-        // Pixel-level dedup against pending dimensions
-        let prev_w = self.pending_surface_width.load(Ordering::Relaxed);
-        let prev_h = self.pending_surface_height.load(Ordering::Relaxed);
-        if prev_w == width && prev_h == height {
-            return;
-        }
-
-        // Store pending dimensions — surface.configure() is deferred to render()
-        // (Fix 3/5). This coalesces multiple resize events per frame into a single
-        // GPU reconfigure, eliminating the main bottleneck during live window drag.
-        self.pending_surface_width.store(width, Ordering::Release);
-        self.pending_surface_height.store(height, Ordering::Release);
-
-        // Geometry revision counter (Fix 7)
-        self.geometry_revision.fetch_add(1, Ordering::Relaxed);
-
-        if let Some(ref renderer) = self.renderer {
-            let (cols, rows) = renderer.grid_size(width as f32, height as f32);
-            if let Some(ref mut terminal) = self.terminal {
-                terminal.resize(cols as usize, rows as usize);
-            }
-            // PTY SIGWINCH coalescing (Fix 6): only send ioctl(TIOCSWINSZ)
-            // when grid dimensions actually change. During a drag, many pixel-
-            // level resizes map to the same cols/rows — no need to flood the
-            // child process with redundant SIGWINCH.
-            if cols != self.last_pty_cols || rows != self.last_pty_rows {
-                self.last_pty_cols = cols;
-                self.last_pty_rows = rows;
-                if let Some(ref id) = self.workspace_id {
-                    let _ = self.pty_manager.resize(id, cols, rows);
-                }
-            }
-        }
-        // Mark dirty so CVDisplayLink renders with new dimensions
         self.dirty.store(true, Ordering::Relaxed);
     }
 
@@ -870,25 +523,6 @@ pub unsafe extern "C" fn aterm_core_free(core: *mut AtermCore) {
 
 /// Suspend GPU resources for inactive workspace (#208 memory optimization).
 /// Drops Surface + renderer caches. Terminal state preserved. Call resume to reactivate.
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_suspend_gpu(core: *mut AtermCore) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!({
-        let c = &mut *core;
-        // Drop Surface (swapchain textures ~76MB each)
-        c.gpu = None;
-        // Clear renderer caches (glyph cache + atlas)
-        if let Some(ref mut renderer) = c.renderer {
-            renderer.clear_caches();
-        }
-        c.renderer = None;
-        log_stderr!("[aterm-core] GPU suspended (surface + renderer released)");
-    });
-}
-
 /// No-op stub when wgpu feature is disabled (Metal renderer handles GPU lifecycle).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
@@ -902,21 +536,6 @@ pub unsafe extern "C" fn aterm_core_stop(core: *mut AtermCore) {
         return;
     }
     ffi_catch!((*core).pty_signal.stop());
-}
-
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_init_gpu(
-    core: *mut AtermCore,
-    ns_view: *mut c_void,
-    width: u32,
-    height: u32,
-    scale: f32,
-) -> i32 {
-    if core.is_null() {
-        return -1;
-    }
-    ffi_catch!(-1, (*core).init_gpu(ns_view, width, height, scale))
 }
 
 /// No-wgpu init: skip GPU setup but create Terminal state (alacritty_terminal is GPU-independent).
@@ -1025,32 +644,6 @@ pub unsafe extern "C" fn aterm_core_named_key(core: *mut AtermCore, key_code: u3
 
 /// Render — acquires render_lock with brief spin (max 8ms) for direct UI calls
 /// (mouseDown, scroll, theme change). Skips if lock cannot be acquired in time.
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_render(core: *mut AtermCore) {
-    if core.is_null() {
-        return;
-    }
-    // Acquire render lock — spin briefly for direct UI calls that need immediate feedback.
-    // If another thread (CVDisplayLink or PTY callback) is rendering, wait up to 8ms.
-    let start = std::time::Instant::now();
-    loop {
-        if (*core)
-            .render_lock
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            break;
-        }
-        if start.elapsed() > std::time::Duration::from_millis(8) {
-            return; // Skip — another thread is rendering, CVDisplayLink will catch up
-        }
-        std::hint::spin_loop();
-    }
-    ffi_catch!((*core).render());
-    (*core).render_lock.store(false, Ordering::Release);
-}
-
 /// No-op stub when wgpu feature is disabled (Metal renderer on Swift side).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
@@ -1059,43 +652,6 @@ pub unsafe extern "C" fn aterm_core_render(_core: *mut AtermCore) {}
 /// Try to render if dirty. Returns 1 if rendered, 0 if skipped.
 /// Thread-safe — used by CVDisplayLink and PTY dirty callback for immediate
 /// render without CVDisplayLink latency (Ghostty/Alacritty pattern, Fix #153).
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_try_render(core: *mut AtermCore) -> i32 {
-    if core.is_null() {
-        return 0;
-    }
-    // Try to acquire render lock — skip immediately if another thread is rendering
-    if (*core)
-        .render_lock
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        return 0;
-    }
-    let rendered = if (*core).pty_signal.take_dirty() {
-        // Synchronized output (#201): skip PTY-triggered render during ?2026h/l.
-        // Direct UI renders (aterm_core_render) bypass this — scroll, selection,
-        // theme changes must always render (#204).
-        let sync_skip = (*core)
-            .terminal
-            .as_mut()
-            .map(|t| t.should_skip_render())
-            .unwrap_or(false);
-        if sync_skip {
-            // Parser advances on reader thread — nothing to drain here.
-            0
-        } else {
-            ffi_catch!((*core).render());
-            1
-        }
-    } else {
-        0
-    };
-    (*core).render_lock.store(false, Ordering::Release);
-    rendered
-}
-
 /// No-op stub when wgpu feature is disabled.
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
@@ -1109,31 +665,6 @@ pub unsafe extern "C" fn aterm_core_resize(core: *mut AtermCore, width: u32, hei
         return;
     }
     ffi_catch!((*core).resize(width, height));
-}
-
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_grid_size(
-    core: *const AtermCore,
-    width: f32,
-    height: f32,
-    out_cols: *mut u16,
-    out_rows: *mut u16,
-) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!({
-        if let Some(ref renderer) = (*core).renderer {
-            let (cols, rows) = renderer.grid_size(width, height);
-            if !out_cols.is_null() {
-                *out_cols = cols;
-            }
-            if !out_rows.is_null() {
-                *out_rows = rows;
-            }
-        }
-    });
 }
 
 /// Compute grid size from pixel dimensions (no-wgpu: uses hardcoded cell metrics).
@@ -1173,40 +704,6 @@ pub unsafe extern "C" fn aterm_core_set_preedit(
 }
 
 /// Get cursor position in backing pixels (for IME popup placement, #206).
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_cursor_position(
-    core: *const AtermCore,
-    width: f32,
-    height: f32,
-    out_x: *mut f32,
-    out_y: *mut f32,
-) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!({
-        if let (Some(ref renderer), Some(ref terminal)) = (&(*core).renderer, &(*core).terminal) {
-            let (pad_x, pad_y) = renderer.grid_padding(width, height);
-            let cw = renderer.cell_width();
-            let lh = renderer.cell_height();
-            {
-                let term = terminal.terminal().lock();
-                let cursor = term.grid().cursor.point;
-                let display_offset = term.grid().display_offset() as f32;
-                let col = cursor.column.0 as f32;
-                let row = cursor.line.0 as f32 + display_offset;
-                if !out_x.is_null() {
-                    *out_x = pad_x + col * cw;
-                }
-                if !out_y.is_null() {
-                    *out_y = pad_y + row * lh;
-                }
-            }
-        }
-    });
-}
-
 /// Compute cursor position from terminal grid (no-wgpu: uses hardcoded cell metrics).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
@@ -1236,28 +733,6 @@ pub unsafe extern "C" fn aterm_core_cursor_position(
     if !out_y.is_null() { *out_y = 0.0; }
 }
 
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_cell_size(
-    core: *const AtermCore,
-    out_width: *mut f32,
-    out_height: *mut f32,
-) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!({
-        if let Some(ref renderer) = (*core).renderer {
-            if !out_width.is_null() {
-                *out_width = renderer.cell_width();
-            }
-            if !out_height.is_null() {
-                *out_height = renderer.cell_height();
-            }
-        }
-    });
-}
-
 /// Return cell dimensions (no-wgpu: uses runtime value from set_line_height, or default).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
@@ -1268,31 +743,6 @@ pub unsafe extern "C" fn aterm_core_cell_size(
 ) {
     if !out_width.is_null() { *out_width = no_wgpu_cell_width(); }
     if !out_height.is_null() { *out_height = no_wgpu_cell_height(); }
-}
-
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_grid_padding(
-    core: *const AtermCore,
-    width: f32,
-    height: f32,
-    out_pad_x: *mut f32,
-    out_pad_y: *mut f32,
-) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!({
-        if let Some(ref renderer) = (*core).renderer {
-            let (pad_x, pad_y) = renderer.grid_padding(width, height);
-            if !out_pad_x.is_null() {
-                *out_pad_x = pad_x;
-            }
-            if !out_pad_y.is_null() {
-                *out_pad_y = pad_y;
-            }
-        }
-    });
 }
 
 /// Compute centered grid padding (no-wgpu: uses hardcoded cell metrics).
@@ -1456,8 +906,6 @@ pub unsafe extern "C" fn aterm_core_get_render_data(
         // Theme-aware defaults — read from atomics (set by aterm_core_set_default_colors),
         // fallback to hardcoded values if not set.
         let is_light = {
-            #[cfg(feature = "wgpu")]
-            { matches!(c.theme_mode, TerminalThemeMode::Light) }
             #[cfg(not(feature = "wgpu"))]
             { c.theme_mode_raw == 1 }
         };
@@ -1746,20 +1194,6 @@ pub unsafe extern "C" fn aterm_free_events(batch: AtermEventBatch) {
     });
 }
 
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_set_theme_mode(core: *mut AtermCore, mode: u8) {
-    if core.is_null() {
-        return;
-    }
-    let theme_mode = if mode == 1 {
-        TerminalThemeMode::Light
-    } else {
-        TerminalThemeMode::Dark
-    };
-    ffi_catch!((*core).set_theme_mode(theme_mode));
-}
-
 /// Store theme mode when wgpu feature is disabled (used by get_render_data).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
@@ -1772,27 +1206,6 @@ pub unsafe extern "C" fn aterm_core_set_theme_mode(core: *mut AtermCore, mode: u
 
 /// Set color scheme: 0=Dark, 1=Light, 2=SolarizedDark, 3=SolarizedLight,
 /// 4=Monokai, 5=Dracula, 6=Nord, 7=TokyoNight
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_set_color_scheme(core: *mut AtermCore, scheme: u8) {
-    if core.is_null() {
-        return;
-    }
-    let s = match scheme {
-        0 => ColorScheme::Dark,
-        1 => ColorScheme::Light,
-        2 => ColorScheme::SolarizedDark,
-        3 => ColorScheme::SolarizedLight,
-        4 => ColorScheme::Monokai,
-        5 => ColorScheme::Dracula,
-        6 => ColorScheme::Nord,
-        7 => ColorScheme::TokyoNight,
-        8 => ColorScheme::Default,
-        _ => return,
-    };
-    ffi_catch!((*core).set_color_scheme(s));
-}
-
 /// Store color scheme for no-wgpu path.
 #[cfg(not(feature = "wgpu"))]
 static NO_WGPU_COLOR_SCHEME: AtomicU8 = AtomicU8::new(8); // 8 = Default
@@ -1962,30 +1375,12 @@ pub unsafe extern "C" fn aterm_core_scheme_bg_color(
 }
 
 /// Set font size in pixels (clamped to 8..32)
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_set_font_size(core: *mut AtermCore, size: f32) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!((*core).set_font_size(size));
-}
-
 /// No-op stub when wgpu feature is disabled (font size managed on Swift side).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_set_font_size(_core: *mut AtermCore, _size: f32) {}
 
 /// Set line height in pixels (clamped to 12..64)
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_set_line_height(core: *mut AtermCore, height: f32) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!((*core).set_line_height(height));
-}
-
 /// Store line height for no-wgpu path (clamped to 12..64).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
@@ -1995,15 +1390,6 @@ pub unsafe extern "C" fn aterm_core_set_line_height(_core: *mut AtermCore, heigh
 }
 
 /// Set cell width in pixels (clamped to 6..32)
-#[cfg(feature = "wgpu")]
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_set_cell_width(core: *mut AtermCore, width: f32) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!((*core).set_cell_width(width));
-}
-
 /// Store cell width for no-wgpu path (clamped to 6..32).
 #[cfg(not(feature = "wgpu"))]
 #[no_mangle]
