@@ -1,2 +1,5 @@
 [workspace]
 members = ["aterm-core", "aterm-session", "aterm-ipc"]
+
+[workspace.package]
+license = "MIT"
