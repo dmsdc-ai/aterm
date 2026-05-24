@@ -1,11 +1,15 @@
 [workspace]
 members = [".", "aterm-core", "aterm-session", "aterm-ipc"]
 
+[workspace.package]
+license = "MIT"
+
 [package]
 name = "aterm-v3"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license.workspace = true
 
 [[bin]]
 name = "aterm-v3"

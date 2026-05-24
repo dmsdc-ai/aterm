@@ -9,5 +9,5 @@
   "cpu": [
     "arm64"
   ],
-  "license": "UNLICENSED"
+  "license": "MIT"
 }

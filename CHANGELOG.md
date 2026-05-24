@@ -4,6 +4,16 @@ All notable changes to **aterm** are documented in this file.
 
 ---
 
+## Unreleased
+
+### Changed — License clarified to MIT (task #456)
+- npm packages now explicitly declare `"license": "MIT"` instead of `"UNLICENSED"` metadata.
+- Cargo workspace and all crates now declare MIT license metadata.
+- Added the root `LICENSE` file.
+- Source: orchestrator task #456, follow-up to herdr.dev comparison finding #4.
+
+---
+
 ## 0.2.13 — 2026-04-12
 
 ### Fixes
