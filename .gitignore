@@ -17,3 +17,6 @@ build/
 
 # npm pack artifacts
 *.tgz
+
+# Windows-reserved device name — tracking a file named CON breaks clones on Windows
+CON
