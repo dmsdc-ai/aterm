@@ -47,21 +47,24 @@ ensure_lessons_file() {
 }
 
 print_ecosystem_status() {
-    if [ "$ATERM_UI_LANG" = "ko" ]; then
-        cat <<'STATUS'
-brain: ✅ 설치됨
-telepty: ✅ 설치됨
-deliberation: ✅ 설치됨
-devkit: ✅ 설치됨
-STATUS
-    else
-        cat <<'STATUS'
-brain: ✅ installed
-telepty: ✅ installed
-deliberation: ✅ installed
-devkit: ✅ installed
-STATUS
-    fi
+    local ko="no"
+    [ "$ATERM_UI_LANG" = "ko" ] && ko="yes"
+    _probe_component() {
+        # $1 = probe command on PATH, $2 = display label
+        local mark msg
+        if command -v "$1" >/dev/null 2>&1; then
+            mark="✅"
+            if [ "$ko" = "yes" ]; then msg="설치됨"; else msg="installed"; fi
+        else
+            mark="❌"
+            if [ "$ko" = "yes" ]; then msg="미설치"; else msg="not installed"; fi
+        fi
+        printf '%s: %s %s\n' "$2" "$mark" "$msg"
+    }
+    _probe_component aigentry-brain        brain
+    _probe_component telepty               telepty
+    _probe_component aigentry-deliberation deliberation
+    _probe_component aigentry-devkit       devkit
 }
 
 show_help() {
