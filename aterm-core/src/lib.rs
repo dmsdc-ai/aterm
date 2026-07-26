@@ -49,14 +49,11 @@ macro_rules! ffi_catch {
 }
 
 pub mod app;
-pub mod cli_presets;
 pub mod inject;
 pub mod mailbox;
 pub mod pty;
 pub mod session;
-pub mod sync;
 pub mod tailscale;
-pub mod telepty;
 pub mod telepty_bridge;
 pub mod terminal;
 
@@ -168,7 +165,6 @@ pub struct AtermCore {
     dirty_callback: Option<DirtyCallback>,
     dirty_userdata: *mut c_void,
     /// Theme mode for no-wgpu builds: 0 = dark, 1 = light.
-    #[cfg(not(feature = "wgpu"))]
     theme_mode_raw: u8,
     /// IME preedit text for inline rendering (#206). Empty = no preedit.
     preedit_text: String,
@@ -189,35 +185,26 @@ unsafe impl Send for AtermCore {}
 
 // --- No-wgpu metric helpers (match renderer.rs defaults) ---
 
-#[cfg(not(feature = "wgpu"))]
 const NO_WGPU_FONT_SIZE: f32 = 18.0;
-#[cfg(not(feature = "wgpu"))]
 const NO_WGPU_LINE_HEIGHT: f32 = 21.0;
-#[cfg(not(feature = "wgpu"))]
 const NO_WGPU_CELL_WIDTH: f32 = 10.8; // font_size * 0.6
-#[cfg(not(feature = "wgpu"))]
 const NO_WGPU_CELL_HEIGHT: f32 = 21.0; // ~Ghostty default: ascent + descent for 18px font
 
 // Runtime-adjustable cell dimensions (set via aterm_core_set_line_height / set_cell_width).
 // Stored as f32 bits in AtomicU32; 0 means "use default const".
-#[cfg(not(feature = "wgpu"))]
 static NO_WGPU_CELL_HEIGHT_ATOMIC: AtomicU32 = AtomicU32::new(0);
-#[cfg(not(feature = "wgpu"))]
 static NO_WGPU_CELL_WIDTH_ATOMIC: AtomicU32 = AtomicU32::new(0);
 
-#[cfg(not(feature = "wgpu"))]
 fn no_wgpu_cell_height() -> f32 {
     let bits = NO_WGPU_CELL_HEIGHT_ATOMIC.load(Ordering::Relaxed);
     if bits == 0 { NO_WGPU_CELL_HEIGHT } else { f32::from_bits(bits) }
 }
 
-#[cfg(not(feature = "wgpu"))]
 fn no_wgpu_cell_width() -> f32 {
     let bits = NO_WGPU_CELL_WIDTH_ATOMIC.load(Ordering::Relaxed);
     if bits == 0 { NO_WGPU_CELL_WIDTH } else { f32::from_bits(bits) }
 }
 
-#[cfg(not(feature = "wgpu"))]
 fn no_wgpu_grid_size(width: f32, height: f32) -> (u16, u16) {
     let usable_w = (width - 4.0f32).max(0.0);
     let usable_h = (height - 4.0f32).max(0.0);
@@ -226,7 +213,6 @@ fn no_wgpu_grid_size(width: f32, height: f32) -> (u16, u16) {
     (cols, rows)
 }
 
-#[cfg(not(feature = "wgpu"))]
 fn no_wgpu_grid_padding(width: f32, height: f32) -> (f32, f32) {
     let (cols, rows) = no_wgpu_grid_size(width, height);
     let grid_w = cols as f32 * no_wgpu_cell_width();
@@ -249,7 +235,6 @@ impl AtermCore {
             dirty: Arc::new(AtomicBool::new(false)),
             dirty_callback: None,
             dirty_userdata: std::ptr::null_mut(),
-            #[cfg(not(feature = "wgpu"))]
             theme_mode_raw: 0, // 0 = dark
             preedit_text: String::new(),
             last_pty_cols: 0,
@@ -392,7 +377,6 @@ impl AtermCore {
         }
     }
 
-    #[cfg(not(feature = "wgpu"))]
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -524,7 +508,6 @@ pub unsafe extern "C" fn aterm_core_free(core: *mut AtermCore) {
 /// Suspend GPU resources for inactive workspace (#208 memory optimization).
 /// Drops Surface + renderer caches. Terminal state preserved. Call resume to reactivate.
 /// No-op stub when wgpu feature is disabled (Metal renderer handles GPU lifecycle).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_suspend_gpu(_core: *mut AtermCore) {}
 
@@ -540,7 +523,6 @@ pub unsafe extern "C" fn aterm_core_stop(core: *mut AtermCore) {
 
 /// No-wgpu init: skip GPU setup but create Terminal state (alacritty_terminal is GPU-independent).
 /// Without this, c.terminal stays None and get_render_data returns empty.
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_init_gpu(
     core: *mut AtermCore,
@@ -645,7 +627,6 @@ pub unsafe extern "C" fn aterm_core_named_key(core: *mut AtermCore, key_code: u3
 /// Render — acquires render_lock with brief spin (max 8ms) for direct UI calls
 /// (mouseDown, scroll, theme change). Skips if lock cannot be acquired in time.
 /// No-op stub when wgpu feature is disabled (Metal renderer on Swift side).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_render(_core: *mut AtermCore) {}
 
@@ -653,7 +634,6 @@ pub unsafe extern "C" fn aterm_core_render(_core: *mut AtermCore) {}
 /// Thread-safe — used by CVDisplayLink and PTY dirty callback for immediate
 /// render without CVDisplayLink latency (Ghostty/Alacritty pattern, Fix #153).
 /// No-op stub when wgpu feature is disabled.
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_try_render(_core: *mut AtermCore) -> i32 {
     0
@@ -668,7 +648,6 @@ pub unsafe extern "C" fn aterm_core_resize(core: *mut AtermCore, width: u32, hei
 }
 
 /// Compute grid size from pixel dimensions (no-wgpu: uses hardcoded cell metrics).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_grid_size(
     _core: *const AtermCore,
@@ -705,7 +684,6 @@ pub unsafe extern "C" fn aterm_core_set_preedit(
 
 /// Get cursor position in backing pixels (for IME popup placement, #206).
 /// Compute cursor position from terminal grid (no-wgpu: uses hardcoded cell metrics).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_cursor_position(
     core: *const AtermCore,
@@ -734,7 +712,6 @@ pub unsafe extern "C" fn aterm_core_cursor_position(
 }
 
 /// Return cell dimensions (no-wgpu: uses runtime value from set_line_height, or default).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_cell_size(
     _core: *const AtermCore,
@@ -746,7 +723,6 @@ pub unsafe extern "C" fn aterm_core_cell_size(
 }
 
 /// Compute centered grid padding (no-wgpu: uses hardcoded cell metrics).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_grid_padding(
     _core: *const AtermCore,
@@ -824,18 +800,18 @@ pub unsafe extern "C" fn aterm_core_get_render_data(
             std::mem::size_of::<CellDataFFI>(),
             std::mem::align_of::<CellDataFFI>());
         eprintln!("[FFI-DIAG] offsets: col={} row={} fg_r={} fg_g={} fg_b={} fg_a={} bg_r={} bg_g={} bg_b={} bg_a={} character={} flags={}",
-            memoffset::offset_of!(CellDataFFI, col),
-            memoffset::offset_of!(CellDataFFI, row),
-            memoffset::offset_of!(CellDataFFI, fg_r),
-            memoffset::offset_of!(CellDataFFI, fg_g),
-            memoffset::offset_of!(CellDataFFI, fg_b),
-            memoffset::offset_of!(CellDataFFI, fg_a),
-            memoffset::offset_of!(CellDataFFI, bg_r),
-            memoffset::offset_of!(CellDataFFI, bg_g),
-            memoffset::offset_of!(CellDataFFI, bg_b),
-            memoffset::offset_of!(CellDataFFI, bg_a),
-            memoffset::offset_of!(CellDataFFI, character),
-            memoffset::offset_of!(CellDataFFI, flags),
+            std::mem::offset_of!(CellDataFFI, col),
+            std::mem::offset_of!(CellDataFFI, row),
+            std::mem::offset_of!(CellDataFFI, fg_r),
+            std::mem::offset_of!(CellDataFFI, fg_g),
+            std::mem::offset_of!(CellDataFFI, fg_b),
+            std::mem::offset_of!(CellDataFFI, fg_a),
+            std::mem::offset_of!(CellDataFFI, bg_r),
+            std::mem::offset_of!(CellDataFFI, bg_g),
+            std::mem::offset_of!(CellDataFFI, bg_b),
+            std::mem::offset_of!(CellDataFFI, bg_a),
+            std::mem::offset_of!(CellDataFFI, character),
+            std::mem::offset_of!(CellDataFFI, flags),
         );
     });
 
@@ -906,7 +882,6 @@ pub unsafe extern "C" fn aterm_core_get_render_data(
         // Theme-aware defaults — read from atomics (set by aterm_core_set_default_colors),
         // fallback to hardcoded values if not set.
         let is_light = {
-            #[cfg(not(feature = "wgpu"))]
             { c.theme_mode_raw == 1 }
         };
         let hardcoded_fg = if is_light { (0x24u8, 0x29u8, 0x2fu8) } else { (0xc0u8, 0xcau8, 0xf5u8) };
@@ -1195,7 +1170,6 @@ pub unsafe extern "C" fn aterm_free_events(batch: AtermEventBatch) {
 }
 
 /// Store theme mode when wgpu feature is disabled (used by get_render_data).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_set_theme_mode(core: *mut AtermCore, mode: u8) {
     if core.is_null() { return; }
@@ -1207,11 +1181,9 @@ pub unsafe extern "C" fn aterm_core_set_theme_mode(core: *mut AtermCore, mode: u
 /// Set color scheme: 0=Dark, 1=Light, 2=SolarizedDark, 3=SolarizedLight,
 /// 4=Monokai, 5=Dracula, 6=Nord, 7=TokyoNight
 /// Store color scheme for no-wgpu path.
-#[cfg(not(feature = "wgpu"))]
 static NO_WGPU_COLOR_SCHEME: AtomicU8 = AtomicU8::new(8); // 8 = Default
 static PREEDIT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_set_color_scheme(_core: *mut AtermCore, scheme: u8) {
     if scheme <= 8 {
@@ -1376,13 +1348,11 @@ pub unsafe extern "C" fn aterm_core_scheme_bg_color(
 
 /// Set font size in pixels (clamped to 8..32)
 /// No-op stub when wgpu feature is disabled (font size managed on Swift side).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_set_font_size(_core: *mut AtermCore, _size: f32) {}
 
 /// Set line height in pixels (clamped to 12..64)
 /// Store line height for no-wgpu path (clamped to 12..64).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_set_line_height(_core: *mut AtermCore, height: f32) {
     let clamped = height.clamp(12.0, 64.0);
@@ -1391,7 +1361,6 @@ pub unsafe extern "C" fn aterm_core_set_line_height(_core: *mut AtermCore, heigh
 
 /// Set cell width in pixels (clamped to 6..32)
 /// Store cell width for no-wgpu path (clamped to 6..32).
-#[cfg(not(feature = "wgpu"))]
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_set_cell_width(_core: *mut AtermCore, width: f32) {
     let clamped = width.clamp(6.0, 32.0);
@@ -1777,7 +1746,7 @@ fn command_available(command: &str) -> bool {
 }
 
 fn config_dir_exists(config_dir_name: &str) -> bool {
-    dirs::home_dir()
+    std::env::home_dir()
         .map(|home| home.join(config_dir_name).is_dir())
         .unwrap_or(false)
 }

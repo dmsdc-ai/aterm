@@ -202,9 +202,7 @@ final class OrchestratorInputBar: NSView, NSTextViewDelegate {
 
         // Placeholder: regular (non-italic), α=0.55 muted (v3 Direction E tone match).
         // Text unchanged from v2 — #246 English default preserved.
-        textView.placeholderText = AtermLocalization.text(
-            ko: "명령어 입력...",
-            en: "Type a command...")
+        textView.placeholderText = "Type a command..."
         textView.placeholderAttributes = [
             .foregroundColor: AtermTheme.inputBarPlaceholder.withAlphaComponent(0.55),
             .font: Self.inputFont,

@@ -385,10 +385,10 @@ enum SettingsTab: CaseIterable {
 
     var title: String {
         switch self {
-        case .appearance: return AtermLocalization.text(ko: "모양", en: "Appearance")
-        case .terminal: return AtermLocalization.text(ko: "터미널", en: "Terminal")
-        case .session: return AtermLocalization.text(ko: "세션", en: "Session")
-        case .orchestrator: return AtermLocalization.text(ko: "오케스트레이터", en: "Orchestrator")
+        case .appearance: return "Appearance"
+        case .terminal: return "Terminal"
+        case .session: return "Session"
+        case .orchestrator: return "Orchestrator"
         }
     }
 
@@ -470,12 +470,12 @@ struct SettingsView: View {
 
             // Bottom bar
             HStack {
-                Button(AtermLocalization.text(ko: "기본값으로 재설정", en: "Reset to Defaults")) {
+                Button("Reset to Defaults") {
                     resetDefaults()
                 }
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 Spacer()
-                Button(AtermLocalization.text(ko: "완료", en: "Done")) {
+                Button("Done") {
                     settings.save()
                     onApply()
                     dismiss()
@@ -530,15 +530,12 @@ struct AppearanceSettingsView: View {
         let missing = variantAvailability.missing()
         if missing.isEmpty { return "" }
         let joined = missing.joined(separator: ", ")
-        return AtermLocalization.text(
-            ko: "없음: \(joined)",
-            en: "Missing: \(joined)"
-        )
+        return "Missing: \(joined)"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(AtermLocalization.text(ko: "색상 테마", en: "Color Scheme"))
+            Text("Color Scheme")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
@@ -558,16 +555,16 @@ struct AppearanceSettingsView: View {
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(ko: "글꼴", en: "Font"))
+            Text("Font")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             HStack {
-                Text(AtermLocalization.text(ko: "서체", en: "Family"))
+                Text("Family")
                     .frame(width: 80, alignment: .leading)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 Picker("", selection: $settings.fontFamily) {
-                    Text(AtermLocalization.text(ko: "시스템 기본", en: "System Default"))
+                    Text("System Default")
                         .tag("System Default")
                     Divider()
                     ForEach(fontFamilies, id: \.self) { family in
@@ -601,7 +598,7 @@ struct AppearanceSettingsView: View {
             HStack {
                 Spacer()
                 Toggle(
-                    AtermLocalization.text(ko: "모든 글꼴 표시", en: "Show all fonts"),
+                    "Show all fonts",
                     isOn: $showAllFonts
                 )
                 .toggleStyle(.checkbox)
@@ -610,7 +607,7 @@ struct AppearanceSettingsView: View {
             }
 
             HStack {
-                Text(AtermLocalization.text(ko: "크기", en: "Size"))
+                Text("Size")
                     .frame(width: 80, alignment: .leading)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 Slider(value: $settings.fontSize, in: 12...24, step: 1) {
@@ -627,7 +624,7 @@ struct AppearanceSettingsView: View {
             }
 
             HStack {
-                Text(AtermLocalization.text(ko: "줄 높이", en: "Line Height"))
+                Text("Line Height")
                     .frame(width: 80, alignment: .leading)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 Slider(value: $settings.lineHeight, in: 1.0...2.0, step: 0.1) {
@@ -646,7 +643,7 @@ struct AppearanceSettingsView: View {
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
             HStack {
-                Text(AtermLocalization.text(ko: "불투명도", en: "Opacity"))
+                Text("Opacity")
                     .frame(width: 80, alignment: .leading)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 Slider(value: $settings.backgroundOpacity, in: 50...100, step: 5) {
@@ -664,11 +661,11 @@ struct AppearanceSettingsView: View {
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Toggle(AtermLocalization.text(ko: "상태 이모지 표시", en: "Show Status Emojis"), isOn: $settings.showStatusEmoji)
+            Toggle("Show Status Emojis", isOn: $settings.showStatusEmoji)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 .onChange(of: settings.showStatusEmoji) { _ in settings.save() }
             
-            Toggle(AtermLocalization.text(ko: "ASCII 아이콘 사용", en: "Use ASCII Icons"), isOn: $settings.useAsciiIcons)
+            Toggle("Use ASCII Icons", isOn: $settings.useAsciiIcons)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 .disabled(!settings.showStatusEmoji)
                 .opacity(settings.showStatusEmoji ? 1.0 : 0.5)
@@ -745,7 +742,7 @@ struct TerminalSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(AtermLocalization.text(ko: "기본 CLI", en: "Default CLI"))
+            Text("Default CLI")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
@@ -753,21 +750,18 @@ struct TerminalSettingsView: View {
                 Text("Claude").tag("claude")
                 Text("Codex").tag("codex")
                 Text("Gemini").tag("gemini")
-                Text(AtermLocalization.text(ko: "셸", en: "Shell")).tag("none")
+                Text("Shell").tag("none")
             }
             .pickerStyle(.segmented)
             .onChange(of: settings.defaultCLI) { _ in settings.save() }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(ko: "CLI 기본 인수", en: "Default CLI Arguments"))
+            Text("Default CLI Arguments")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
-            Text(AtermLocalization.text(
-                ko: "새 워크스페이스 생성 시 자동 입력되는 CLI 인수",
-                en: "Pre-filled when creating a new workspace"
-            ))
+            Text("Pre-filled when creating a new workspace")
                 .font(.system(size: 10))
                 .foregroundColor(Color(nsColor: AtermTheme.textMuted))
 
@@ -792,18 +786,18 @@ struct TerminalSettingsView: View {
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(ko: "기본 작업 디렉터리", en: "Default Working Directory"))
+            Text("Default Working Directory")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             HStack {
-                Text(settings.defaultCWD.isEmpty ? AtermLocalization.text(ko: "홈 (~)", en: "Home (~)") : settings.defaultCWD)
+                Text(settings.defaultCWD.isEmpty ? "Home (~)" : settings.defaultCWD)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                Button(AtermLocalization.text(ko: "선택...", en: "Choose...")) {
+                Button("Choose...") {
                     let panel = NSOpenPanel()
                     panel.canChooseDirectories = true
                     panel.canChooseFiles = false
@@ -818,7 +812,7 @@ struct TerminalSettingsView: View {
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
             HStack {
-                Text(AtermLocalization.text(ko: "스크롤백 줄 수", en: "Scrollback Lines"))
+                Text("Scrollback Lines")
                     .frame(width: 120, alignment: .leading)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 TextField("", value: $settings.scrollbackLines, format: .number)
@@ -829,21 +823,21 @@ struct TerminalSettingsView: View {
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(ko: "커서 스타일", en: "Cursor Style"))
+            Text("Cursor Style")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             Picker("", selection: $settings.cursorStyle) {
-                Text(AtermLocalization.text(ko: "블록", en: "Block")).tag("block")
-                Text(AtermLocalization.text(ko: "밑줄", en: "Underline")).tag("underline")
-                Text(AtermLocalization.text(ko: "막대", en: "Bar")).tag("bar")
+                Text("Block").tag("block")
+                Text("Underline").tag("underline")
+                Text("Bar").tag("bar")
             }
             .pickerStyle(.segmented)
             .onChange(of: settings.cursorStyle) { _ in settings.save() }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(ko: "셸", en: "Shell"))
+            Text("Shell")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
@@ -851,7 +845,7 @@ struct TerminalSettingsView: View {
                 Text("zsh").tag("zsh")
                 Text("bash").tag("bash")
                 Text("fish").tag("fish")
-                Text(AtermLocalization.text(ko: "기타...", en: "Other...")).tag("other")
+                Text("Other...").tag("other")
             }
             .pickerStyle(.segmented)
             .onAppear {
@@ -873,10 +867,7 @@ struct TerminalSettingsView: View {
 
             if shellMode == "other" {
                 TextField(
-                    AtermLocalization.text(
-                        ko: "셸 경로 또는 명령 (예: /bin/nu)",
-                        en: "Custom shell path (e.g. /bin/nu)"
-                    ),
+                    "Custom shell path (e.g. /bin/nu)",
                     text: $settings.shellDefault
                 )
                 .textFieldStyle(.roundedBorder)
@@ -895,22 +886,22 @@ struct SessionSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(AtermLocalization.text(ko: "세션 관리", en: "Session Management"))
+            Text("Session Management")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
-            Toggle(AtermLocalization.text(ko: "실행 시 세션 자동 복원", en: "Auto-restore sessions on launch"), isOn: $settings.autoRestoreSessions)
+            Toggle("Auto-restore sessions on launch", isOn: $settings.autoRestoreSessions)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 .onChange(of: settings.autoRestoreSessions) { _ in settings.save() }
 
-            Toggle(AtermLocalization.text(ko: "죽은 세션 자동 재시작", en: "Auto-restart dead sessions"), isOn: $settings.autoRestartDead)
+            Toggle("Auto-restart dead sessions", isOn: $settings.autoRestartDead)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 .onChange(of: settings.autoRestartDead) { _ in settings.save() }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
             HStack {
-                Text(AtermLocalization.text(ko: "최대 재시작 횟수", en: "Max Restart Attempts"))
+                Text("Max Restart Attempts")
                     .frame(width: 160, alignment: .leading)
                     .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 TextField("", value: $settings.maxRestartAttempts, format: .number)
@@ -923,34 +914,28 @@ struct SessionSettingsView: View {
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(ko: "사이드바", en: "Sidebar"))
+            Text("Sidebar")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
-            Toggle(AtermLocalization.text(ko: "태스크 보드 표시", en: "Show Task Board"), isOn: $settings.showTaskBoard)
+            Toggle("Show Task Board", isOn: $settings.showTaskBoard)
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
                 .onChange(of: settings.showTaskBoard) { _ in settings.save() }
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(ko: "통합", en: "Integrations"))
+            Text("Integrations")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             Toggle(
-                AtermLocalization.text(
-                    ko: "실행 시 Tailscale 자동 연결",
-                    en: "Connect Tailscale on launch"
-                ),
+                "Connect Tailscale on launch",
                 isOn: $settings.tailscaleConnectOnLaunch
             )
             .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
             .onChange(of: settings.tailscaleConnectOnLaunch) { _ in settings.save() }
 
-            Text(AtermLocalization.text(
-                ko: "다음 앱 실행부터 적용됩니다",
-                en: "Takes effect on next app launch"
-            ))
+            Text("Takes effect on next app launch")
                 .font(.system(size: 10))
                 .foregroundColor(Color(nsColor: AtermTheme.textMuted))
         }
@@ -974,7 +959,7 @@ struct OrchestratorSettingsView: View {
 
     private var orchestratorArgsPlaceholder: String {
         if settings.orchestratorCLI == "custom" {
-            return AtermLocalization.text(ko: "예: my-cli --flag", en: "e.g. my-cli --flag")
+            return "e.g. my-cli --flag"
         }
         return settings.cliDefaults[settings.orchestratorCLI]
             ?? AtermSettings.defaultCliArgs[settings.orchestratorCLI]
@@ -989,8 +974,8 @@ struct OrchestratorSettingsView: View {
                     .fill(isRunning ? Color.green : Color(nsColor: AtermTheme.textMuted))
                     .frame(width: 8, height: 8)
                 Text(isRunning
-                    ? AtermLocalization.text(ko: "실행 중", en: "Running")
-                    : AtermLocalization.text(ko: "중지됨", en: "Stopped"))
+                    ? "Running"
+                    : "Stopped")
                     .font(.system(size: 12))
                     .foregroundColor(isRunning
                         ? Color.green
@@ -1001,8 +986,8 @@ struct OrchestratorSettingsView: View {
                         Image(systemName: isTrusted ? "checkmark.shield.fill" : "shield.slash")
                             .font(.system(size: 11))
                         Text(isTrusted
-                            ? AtermLocalization.text(ko: "신뢰됨", en: "Trusted")
-                            : AtermLocalization.text(ko: "미신뢰", en: "Not Trusted"))
+                            ? "Trusted"
+                            : "Not Trusted")
                             .font(.system(size: 11))
                     }
                     .foregroundColor(isTrusted
@@ -1014,7 +999,7 @@ struct OrchestratorSettingsView: View {
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
             // CLI picker
-            Text(AtermLocalization.text(ko: "CLI", en: "CLI"))
+            Text("CLI")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
@@ -1022,19 +1007,19 @@ struct OrchestratorSettingsView: View {
                 Text("Claude").tag("claude")
                 Text("Codex").tag("codex")
                 Text("Gemini").tag("gemini")
-                Text(AtermLocalization.text(ko: "커스텀", en: "Custom")).tag("custom")
+                Text("Custom").tag("custom")
             }
             .pickerStyle(.segmented)
 
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
             // Name
-            Text(AtermLocalization.text(ko: "워크스페이스 이름", en: "Workspace Name"))
+            Text("Workspace Name")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
             TextField(
-                AtermLocalization.text(ko: "이름", en: "Name"),
+                "Name",
                 text: $settings.orchestratorName
             )
             .textFieldStyle(.roundedBorder)
@@ -1042,7 +1027,7 @@ struct OrchestratorSettingsView: View {
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
             // Working directory
-            Text(AtermLocalization.text(ko: "작업 디렉터리", en: "Working Directory"))
+            Text("Working Directory")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
@@ -1055,7 +1040,7 @@ struct OrchestratorSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 if settings.orchestratorCWD.isEmpty {
-                    Text(AtermLocalization.text(ko: "기본값", en: "Default"))
+                    Text("Default")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(Color(nsColor: AtermTheme.accent))
                         .padding(.horizontal, 6)
@@ -1064,19 +1049,19 @@ struct OrchestratorSettingsView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
 
-                Button(AtermLocalization.text(ko: "선택...", en: "Choose...")) {
+                Button("Choose...") {
                     let panel = NSOpenPanel()
                     panel.canChooseDirectories = true
                     panel.canChooseFiles = false
                     panel.allowsMultipleSelection = false
-                    panel.prompt = AtermLocalization.text(ko: "선택", en: "Select")
+                    panel.prompt = "Select"
                     if panel.runModal() == .OK, let url = panel.url {
                         settings.orchestratorCWD = url.path
                     }
                 }
 
                 if !settings.orchestratorCWD.isEmpty {
-                    Button(AtermLocalization.text(ko: "초기화", en: "Reset")) {
+                    Button("Reset") {
                         settings.orchestratorCWD = ""
                     }
                     .foregroundColor(Color(nsColor: AtermTheme.textMuted))
@@ -1086,7 +1071,7 @@ struct OrchestratorSettingsView: View {
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
             // Data folder
-            Text(AtermLocalization.text(ko: "데이터 폴더", en: "Data Folder"))
+            Text("Data Folder")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
@@ -1099,7 +1084,7 @@ struct OrchestratorSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 if settings.aigentryRoot == NSHomeDirectory() + "/.aigentry" {
-                    Text(AtermLocalization.text(ko: "기본값", en: "Default"))
+                    Text("Default")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(Color(nsColor: AtermTheme.accent))
                         .padding(.horizontal, 6)
@@ -1108,12 +1093,12 @@ struct OrchestratorSettingsView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
 
-                Button(AtermLocalization.text(ko: "변경...", en: "Change...")) {
+                Button("Change...") {
                     let panel = NSOpenPanel()
                     panel.canChooseDirectories = true
                     panel.canChooseFiles = false
                     panel.allowsMultipleSelection = false
-                    panel.prompt = AtermLocalization.text(ko: "선택", en: "Select")
+                    panel.prompt = "Select"
                     if panel.runModal() == .OK, let url = panel.url {
                         let newRoot = url.path + "/.aigentry"
                         if settings.migrateAigentryRoot(to: newRoot) {
@@ -1124,20 +1109,14 @@ struct OrchestratorSettingsView: View {
                 }
             }
 
-            Text(AtermLocalization.text(
-                ko: "오케스트레이터, 설정, 세션 데이터가 저장되는 위치입니다.",
-                en: "Where orchestrator, settings, and session data are stored."
-            ))
+            Text("Where orchestrator, settings, and session data are stored.")
                 .font(.system(size: 10))
                 .foregroundColor(Color(nsColor: AtermTheme.textMuted))
 
             // Args (visible for all CLIs — override mode)
             Divider().overlay(Color(nsColor: AtermTheme.border))
 
-            Text(AtermLocalization.text(
-                ko: "CLI 인수 (선택적 재정의)",
-                en: "Args (optional override)"
-            ))
+            Text("Args (optional override)")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(nsColor: AtermTheme.textPrimary))
 
@@ -1149,10 +1128,7 @@ struct OrchestratorSettingsView: View {
             .font(.system(size: 11, design: .monospaced))
             .onChange(of: settings.orchestratorArgs) { _ in settings.save() }
 
-            Text(AtermLocalization.text(
-                ko: "비어 있으면 위 기본값이 사용됩니다. 값을 입력하면 완전히 재정의합니다.",
-                en: "Leave empty to use the default above. Any value fully overrides it."
-            ))
+            Text("Leave empty to use the default above. Any value fully overrides it.")
                 .font(.system(size: 10))
                 .foregroundColor(Color(nsColor: AtermTheme.textMuted))
 
@@ -1163,17 +1139,14 @@ struct OrchestratorSettingsView: View {
                 Spacer()
                 Button(action: onApply) {
                     Text(isRunning
-                        ? AtermLocalization.text(ko: "적용 및 재시작", en: "Apply & Restart")
-                        : AtermLocalization.text(ko: "적용 및 시작", en: "Apply & Start"))
+                        ? "Apply & Restart"
+                        : "Apply & Start")
                         .frame(minWidth: 120)
                 }
                 .controlSize(.large)
             }
 
-            Text(AtermLocalization.text(
-                ko: "오케스트레이터 워크스페이스를 새 설정으로 (재)시작합니다.",
-                en: "Starts or restarts the orchestrator workspace with the new configuration."
-            ))
+            Text("Starts or restarts the orchestrator workspace with the new configuration.")
                 .font(.system(size: 10))
                 .foregroundColor(Color(nsColor: AtermTheme.textMuted))
         }
