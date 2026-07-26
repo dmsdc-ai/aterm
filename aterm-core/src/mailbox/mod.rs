@@ -2,10 +2,8 @@
 //! See protocol/mailbox.md for the protocol spec.
 
 pub mod config;
-pub mod delivery;
 pub mod error;
 pub mod message;
-pub mod notifier;
 pub mod storage;
 
 use config::MailboxConfig;
@@ -13,7 +11,7 @@ use error::MailboxError;
 use message::{
     DeadLetterEntry, EnqueueAck, Message, MessageState, MessageSummary,
 };
-use storage::{unix_now, FileStorage, Locker, MailboxStorage, PidLocker};
+use storage::{unix_now, FileStorage, PidLocker};
 
 /// File-backed mailbox for aterm (desktop standalone).
 /// Composes FileStorage + PidLocker. Notification is handled externally

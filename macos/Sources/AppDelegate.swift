@@ -1035,7 +1035,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       defer: false
     )
     prefsWindow.contentView = hostingView
-    prefsWindow.title = AtermLocalization.text(ko: "설정", en: "Settings")
+    prefsWindow.title = "Settings"
     prefsWindow.center()
     prefsWindow.makeKeyAndOrderFront(nil)
   }

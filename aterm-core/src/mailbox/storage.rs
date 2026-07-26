@@ -9,49 +9,6 @@ use super::message::{
     CompactStats, DeadLetterEntry, Message, MessageState, StateEntry,
 };
 
-/// Persistence backend trait.
-pub trait MailboxStorage: Send + Sync {
-    fn write_message(&self, session_id: &str, msg: &Message) -> Result<(), MailboxError>;
-    fn read_messages(&self, session_id: &str) -> Result<Vec<Message>, MailboxError>;
-    fn remove_message(&self, session_id: &str, msg_id: &str) -> Result<(), MailboxError>;
-    fn write_state(
-        &self,
-        session_id: &str,
-        msg_id: &str,
-        state: MessageState,
-    ) -> Result<(), MailboxError>;
-    fn read_state(
-        &self,
-        session_id: &str,
-        msg_id: &str,
-    ) -> Result<Option<MessageState>, MailboxError>;
-    fn write_dead_letter(
-        &self,
-        session_id: &str,
-        entry: &DeadLetterEntry,
-    ) -> Result<(), MailboxError>;
-    fn read_dead_letters(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<DeadLetterEntry>, MailboxError>;
-    fn compact(&self, session_id: &str) -> Result<CompactStats, MailboxError>;
-    fn purge_session(&self, session_id: &str) -> Result<(), MailboxError>;
-    fn list_sessions(&self) -> Result<Vec<String>, MailboxError>;
-}
-
-/// RAII lock guard — releases on Drop.
-pub trait LockGuard: Send {}
-
-/// Concurrency lock trait.
-pub trait Locker: Send + Sync {
-    fn acquire(
-        &self,
-        session_id: &str,
-        timeout_ms: u64,
-    ) -> Result<Box<dyn LockGuard>, MailboxError>;
-    fn is_stale(&self, lock_path: &Path) -> bool;
-}
-
 // ─── FileStorage ───
 
 pub struct FileStorage {
@@ -96,20 +53,18 @@ impl FileStorage {
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect())
     }
-}
 
-impl MailboxStorage for FileStorage {
-    fn write_message(&self, session_id: &str, msg: &Message) -> Result<(), MailboxError> {
+    pub fn write_message(&self, session_id: &str, msg: &Message) -> Result<(), MailboxError> {
         let dir = self.ensure_dir(session_id)?;
         Self::append_jsonl(&dir.join("inbox.jsonl"), msg)
     }
 
-    fn read_messages(&self, session_id: &str) -> Result<Vec<Message>, MailboxError> {
+    pub fn read_messages(&self, session_id: &str) -> Result<Vec<Message>, MailboxError> {
         let path = self.session_dir(session_id).join("inbox.jsonl");
         Self::read_jsonl(&path)
     }
 
-    fn remove_message(&self, session_id: &str, msg_id: &str) -> Result<(), MailboxError> {
+    pub fn remove_message(&self, session_id: &str, msg_id: &str) -> Result<(), MailboxError> {
         let dir = self.session_dir(session_id);
         let path = dir.join("inbox.jsonl");
         if !path.exists() {
@@ -134,7 +89,7 @@ impl MailboxStorage for FileStorage {
         Ok(())
     }
 
-    fn write_state(
+    pub fn write_state(
         &self,
         session_id: &str,
         msg_id: &str,
@@ -149,7 +104,7 @@ impl MailboxStorage for FileStorage {
         Self::append_jsonl(&dir.join("state.jsonl"), &entry)
     }
 
-    fn read_state(
+    pub fn read_state(
         &self,
         session_id: &str,
         msg_id: &str,
@@ -163,7 +118,7 @@ impl MailboxStorage for FileStorage {
             .map(|e| e.state))
     }
 
-    fn write_dead_letter(
+    pub fn write_dead_letter(
         &self,
         session_id: &str,
         entry: &DeadLetterEntry,
@@ -172,7 +127,7 @@ impl MailboxStorage for FileStorage {
         Self::append_jsonl(&dir.join("dead-letter.jsonl"), entry)
     }
 
-    fn read_dead_letters(
+    pub fn read_dead_letters(
         &self,
         session_id: &str,
     ) -> Result<Vec<DeadLetterEntry>, MailboxError> {
@@ -180,7 +135,7 @@ impl MailboxStorage for FileStorage {
         Self::read_jsonl(&path)
     }
 
-    fn compact(&self, session_id: &str) -> Result<CompactStats, MailboxError> {
+    pub fn compact(&self, session_id: &str) -> Result<CompactStats, MailboxError> {
         let dir = self.session_dir(session_id);
         let inbox_path = dir.join("inbox.jsonl");
         let state_path = dir.join("state.jsonl");
@@ -251,7 +206,7 @@ impl MailboxStorage for FileStorage {
         })
     }
 
-    fn purge_session(&self, session_id: &str) -> Result<(), MailboxError> {
+    pub fn purge_session(&self, session_id: &str) -> Result<(), MailboxError> {
         let dir = self.session_dir(session_id);
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
@@ -259,7 +214,7 @@ impl MailboxStorage for FileStorage {
         Ok(())
     }
 
-    fn list_sessions(&self) -> Result<Vec<String>, MailboxError> {
+    pub fn list_sessions(&self) -> Result<Vec<String>, MailboxError> {
         if !self.root.exists() {
             return Ok(Vec::new());
         }
@@ -292,17 +247,9 @@ pub struct PidLocker {
     root: PathBuf,
 }
 
-impl PidLocker {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-}
-
-struct PidLockGuard {
+pub struct PidLockGuard {
     path: PathBuf,
 }
-
-impl LockGuard for PidLockGuard {}
 
 impl Drop for PidLockGuard {
     fn drop(&mut self) {
@@ -310,12 +257,16 @@ impl Drop for PidLockGuard {
     }
 }
 
-impl Locker for PidLocker {
-    fn acquire(
+impl PidLocker {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    pub fn acquire(
         &self,
         session_id: &str,
         timeout_ms: u64,
-    ) -> Result<Box<dyn LockGuard>, MailboxError> {
+    ) -> Result<PidLockGuard, MailboxError> {
         let lock_dir = self.root.join(session_id);
         fs::create_dir_all(&lock_dir)?;
         let lock_path = lock_dir.join(".lock");
@@ -330,9 +281,7 @@ impl Locker for PidLocker {
             {
                 Ok(mut f) => {
                     let _ = write!(f, "{}", std::process::id());
-                    return Ok(Box::new(PidLockGuard {
-                        path: lock_path,
-                    }));
+                    return Ok(PidLockGuard { path: lock_path });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if self.is_stale(&lock_path) {
@@ -349,7 +298,7 @@ impl Locker for PidLocker {
         }
     }
 
-    fn is_stale(&self, lock_path: &Path) -> bool {
+    pub fn is_stale(&self, lock_path: &Path) -> bool {
         let Ok(content) = fs::read_to_string(lock_path) else {
             return true;
         };

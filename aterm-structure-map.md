@@ -25,17 +25,14 @@ Rendering is Metal in the Swift shell. Terminal state and PTY behavior live in t
 ## Distribution
 
 - `npm/aterm`: JavaScript launcher package and install helper.
-- `npm/aterm-darwin-arm64`: macOS arm64 native package.
-- `npm/aterm-darwin-x64`: macOS x64 native package.
-- `npm/aterm-linux-arm64`: Linux arm64 package.
+- `npm/aterm-darwin-arm64`: macOS arm64 native package — the only platform package `postinstall.js` can resolve.
 
 There is no root package manifest. Package manifests now live under `npm/`; the launcher manifest is `npm/aterm/package.json`.
 
 ## Phase 2 Entry Points
 
-ADR section 6.2 names the next file scope: `aterm-core/src/app.rs` for `SessionAction::AttachExternal`, `aterm-core/src/telepty_bridge.rs`, and the `bin/aterm.js` inject alias. Those files are cited here only as Phase 2 references and were not changed by this map.
+ADR section 6.2 names the next file scope: `aterm-core/src/app.rs` for `SessionAction::AttachExternal`, `aterm-core/src/telepty_bridge.rs`, and the inject alias in `npm/aterm/bin/aterm.js`. Those files are cited here only as Phase 2 references and were not changed by this map.
 
 ## Known Follow-ups
 
-- 28 `cfg(not(feature = "wgpu"))` gates remain in `aterm-core/src/lib.rs` per R2-5 deferral. An un-gate cleanup is pending.
-- `bin/run-debug.sh` and `scripts/package-aterm-v3-app.sh` reference the removed aterm-v3 ghost per R2-2 Option B / I10 deferral. Cleanup task `#TBD-aterm-v3-shell-script-cleanup` is pending orchestrator backlog registration.
+- `bin/log-monitor.sh` tails the log file that the deleted `bin/run-debug.sh` used to write, so it is now orphaned. It was outside the approved cut list and is a candidate for the next cleanup round.
