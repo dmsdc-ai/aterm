@@ -6,6 +6,16 @@ All notable changes to **aterm** are documented in this file.
 
 ## Unreleased
 
+### Changed — aterm authenticates to the telepty daemon (task #825)
+- All telepty daemon calls now send the daemon's auth token as an `x-telepty-token`
+  header: the Rust bridge's session list, register and deregister calls, the Swift
+  deregister and daemon-probe calls, and the `/api/bus` WebSocket upgrade.
+- The token is read from `authToken` in `~/.telepty/config.json`, resolved per
+  request so a config written after aterm launches is still picked up.
+  `TELEPTY_AUTH_TOKEN` overrides it when set. A missing or malformed config
+  degrades to no header rather than failing the app.
+- `/api/health` is unchanged and remains unauthenticated.
+
 ### Changed — License clarified to MIT (task #456)
 - npm packages now explicitly declare `"license": "MIT"` instead of `"UNLICENSED"` metadata.
 - Cargo workspace and all crates now declare MIT license metadata.

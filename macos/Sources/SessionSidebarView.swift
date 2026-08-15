@@ -674,7 +674,7 @@ struct TaskRowView: View {
 
             if let session = task.session {
                 HStack(spacing: 4) {
-                    Text(AtermLocalization.text(ko: "세션:", en: "Session:"))
+                    Text("Session:")
                         .font(.system(size: 10))
                         .foregroundColor(Color(nsColor: AtermTheme.textMuted))
                     Text(session)
@@ -845,7 +845,7 @@ struct SessionSidebarView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 12))
-                    Text(AtermLocalization.text(ko: "설정", en: "Settings"))
+                    Text("Settings")
                         .font(.system(size: 12))
                 }
                 .foregroundColor(Color(nsColor: AtermTheme.textSecondary))
@@ -899,10 +899,7 @@ struct SessionSidebarView: View {
     private var taskBoardSection: some View {
         Group {
             sectionHeader(
-                AtermLocalization.text(
-                    ko: "태스크 (\(taskLoader.activeCount) 진행 중 / \(taskLoader.totalCount) 전체)",
-                    en: "TASKS (\(taskLoader.activeCount) active / \(taskLoader.totalCount) total)"
-                )
+                "TASKS (\(taskLoader.activeCount) active / \(taskLoader.totalCount) total)"
             )
             ForEach(taskLoader.tasks) { task in
                 TaskRowView(task: task)
