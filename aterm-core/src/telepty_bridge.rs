@@ -7,6 +7,11 @@ use std::time::Duration;
 /// Header the telepty daemon reads the auth token from.
 const AUTH_HEADER: &str = "x-telepty-token";
 
+/// Port of the production telepty daemon — the developer's live daemon on a dev
+/// box. The only place this number is written; `hermetic_guards_still_in_source`
+/// fails if it reappears elsewhere in the production half of this file.
+const PRODUCTION_PORT: u16 = 3848;
+
 /// Optional bridge to telepty daemon.
 /// All methods are fire-and-forget — failures are logged but never block aterm.
 pub struct TeleptyBridge {
@@ -62,13 +67,48 @@ impl TeleptyBridge {
             .map(str::to_string)
     }
 
+    /// True when this process is a `cargo test` binary.
+    ///
+    /// Unit tests get it from `cfg!(test)`. Integration tests link the lib built
+    /// *without* `cfg(test)`, so they get it from `ATERM_HERMETIC`, which
+    /// `.cargo/config.toml` sets for every cargo-spawned process. The shipped
+    /// app is launched by Finder or `bin/aterm` — never by cargo — so it sees
+    /// neither and behaves exactly as before.
+    fn hermetic() -> bool {
+        cfg!(test) || std::env::var_os("ATERM_HERMETIC").is_some_and(|v| !v.is_empty())
+    }
+
+    /// Resolve the daemon port from the `ATERM_TELEPTY_PORT` override.
+    ///
+    /// `None` means "do not connect at all". Under test the production default
+    /// is refused, and so is an explicit 3848: a connected bridge walks straight
+    /// into the version check below, and from there into `restart_daemon()` —
+    /// which restarts a daemon the test suite does not own. Tests that want a
+    /// bridge point `ATERM_TELEPTY_PORT` at a stand-in they spawned.
+    ///
+    /// Pure so the guard test can cover both worlds without racing on the
+    /// process-global environment.
+    fn resolve_port(override_var: Option<&str>, hermetic: bool) -> Option<u16> {
+        match override_var.and_then(|p| p.parse::<u16>().ok()) {
+            Some(PRODUCTION_PORT) if hermetic => None,
+            Some(port) => Some(port),
+            None if hermetic => None,
+            None => Some(PRODUCTION_PORT),
+        }
+    }
+
     /// Try to connect to telepty daemon. Returns None if unavailable.
     /// Retries up to 3 times with 500ms between attempts.
     pub fn try_connect() -> Option<Self> {
-        let port = std::env::var("ATERM_TELEPTY_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(3848);
+        let Some(port) = Self::resolve_port(
+            std::env::var("ATERM_TELEPTY_PORT").ok().as_deref(),
+            Self::hermetic(),
+        ) else {
+            log_stderr!(
+                "[telepty-bridge] hermetic run: not connecting (point ATERM_TELEPTY_PORT at a stand-in daemon to test the bridge)"
+            );
+            return None;
+        };
         let bridge = Self {
             daemon_url: format!("http://127.0.0.1:{}", port),
         };
@@ -188,7 +228,16 @@ impl TeleptyBridge {
     }
 
     /// Restart telepty daemon. Returns true if the command succeeded.
+    ///
+    /// Second guard, not a redundant one: `resolve_port` keeps a test off the
+    /// production port, but a test pointed at a stand-in daemon that reports a
+    /// different version still lands here — and `telepty daemon restart` acts on
+    /// the real daemon regardless of which port the bridge was talking to.
     fn restart_daemon() -> bool {
+        if Self::hermetic() {
+            log_stderr!("[telepty-bridge] hermetic run: refusing to restart the daemon");
+            return false;
+        }
         match Command::new("telepty").args(["daemon", "restart"]).output() {
             Ok(out) => out.status.success(),
             Err(_) => false,
@@ -443,6 +492,67 @@ mod tests {
                 body
             );
         }
+    }
+
+    /// `cargo test` reached the production daemon on :3848 before this guard —
+    /// four pty tests construct the app singleton, which connects. The port must
+    /// stay unresolvable from a test process, including when a test asks for it
+    /// by name.
+    #[test]
+    fn production_port_never_resolves_under_test() {
+        assert_eq!(TeleptyBridge::resolve_port(None, true), None);
+        assert_eq!(TeleptyBridge::resolve_port(Some("3848"), true), None);
+        assert_eq!(TeleptyBridge::resolve_port(Some("junk"), true), None);
+        // A stand-in the test spawned itself is fine.
+        assert_eq!(TeleptyBridge::resolve_port(Some("49152"), true), Some(49152));
+        // Production is untouched: same default, same override.
+        assert_eq!(TeleptyBridge::resolve_port(None, false), Some(3848));
+        assert_eq!(TeleptyBridge::resolve_port(Some("49152"), false), Some(49152));
+    }
+
+    #[test]
+    fn hermetic_is_armed_in_this_binary() {
+        assert!(TeleptyBridge::hermetic());
+    }
+
+    /// Safe to call precisely because the guard is there — that is the assertion.
+    #[test]
+    fn restart_is_disarmed_under_test() {
+        assert!(!TeleptyBridge::restart_daemon());
+    }
+
+    /// Both guards are one deleted line away from gone, and no behavioural test
+    /// can see a guard that is no longer there. Source assertion, same shape as
+    /// `ffi_tests::all_ffi_entry_points_wrapped_in_catch_unwind`.
+    #[test]
+    fn hermetic_guards_still_in_source() {
+        let src = include_str!("telepty_bridge.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+
+        let in_code = production
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//") && l.contains("3848"))
+            .count();
+        assert_eq!(
+            in_code, 1,
+            "3848 must appear in code exactly once, as PRODUCTION_PORT (comments are free to mention it)"
+        );
+
+        let (_, connect) = production
+            .split_once("pub fn try_connect()")
+            .expect("try_connect must exist");
+        assert!(
+            connect[..connect.len().min(400)].contains("Self::resolve_port("),
+            "try_connect no longer resolves its port through the hermetic guard"
+        );
+
+        let (_, restart) = production
+            .split_once("fn restart_daemon()")
+            .expect("restart_daemon must exist");
+        assert!(
+            restart[..restart.len().min(200)].contains("Self::hermetic()"),
+            "restart_daemon lost its hermetic guard"
+        );
     }
 
     /// The check that matters: the header is on the wire, not merely compiled in.
