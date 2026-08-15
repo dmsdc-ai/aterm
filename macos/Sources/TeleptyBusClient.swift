@@ -193,7 +193,12 @@ class TeleptyBusClient: ObservableObject {
         reconnectWorkItem = nil
 
         webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = webSocketSession.webSocketTask(with: busURL)
+        // Credential goes in a header, not `?token=` on the URL: busURL is
+        // logged below, and a query token would land in the log with it.
+        // Resolved here rather than in init — see TeleptyAuth.token().
+        var request = URLRequest(url: busURL)
+        TeleptyAuth.authorize(&request)
+        webSocketTask = webSocketSession.webSocketTask(with: request)
         webSocketTask?.resume()
         // connected = true only on first successful receive (not here)
 
@@ -237,18 +242,11 @@ class TeleptyBusClient: ObservableObject {
                 self?.receiveMessage()
 
             case .failure(let error):
-                // Error classification: auth errors are fatal, everything else retries
-                if let urlError = error as? URLError,
-                   urlError.code == .userAuthenticationRequired ||
-                   urlError.code == .userCancelledAuthentication {
-                    NSLog("[telepty-bus] fatal auth error, stopping retries: %@", error.localizedDescription)
-                    DispatchQueue.main.async {
-                        self?.connected = false
-                    }
-                    return
-                }
-
-                // Retryable error — schedule reconnect with backoff
+                // Auth errors retry like any other: the token is re-read on each
+                // connect, so a rejected upgrade (config not written yet on a
+                // fresh install, or a rotated token) heals on the next attempt.
+                // Treating it as fatal would leave the event stream permanently
+                // dark on exactly the case this credential exists for.
                 if self?.shouldLogFailure() == true {
                     NSLog("[telepty-bus] WebSocket error: %@", error.localizedDescription)
                 }

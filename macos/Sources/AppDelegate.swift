@@ -364,6 +364,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       var request = URLRequest(url: url)
       request.httpMethod = "DELETE"
       request.timeoutInterval = 2
+      TeleptyAuth.authorize(&request)
       // Fire synchronously — we're terminating, must complete before exit
       let semaphore = DispatchSemaphore(value: 0)
       URLSession.shared.dataTask(with: request) { _, _, _ in
@@ -383,6 +384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var req = URLRequest(url: url)
     req.httpMethod = "DELETE"
     req.timeoutInterval = 2
+    TeleptyAuth.authorize(&req)
     URLSession.shared.dataTask(with: req).resume()
   }
 
@@ -1035,7 +1037,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       defer: false
     )
     prefsWindow.contentView = hostingView
-    prefsWindow.title = AtermLocalization.text(ko: "설정", en: "Settings")
+    prefsWindow.title = "Settings"
     prefsWindow.center()
     prefsWindow.makeKeyAndOrderFront(nil)
   }
@@ -1364,12 +1366,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       guard let url = URL(string: "http://127.0.0.1:\(teleptyPort)/api/sessions") else { return }
       var request = URLRequest(url: url)
       request.timeoutInterval = 2.0
+      TeleptyAuth.authorize(&request)
 
       let semaphore = DispatchSemaphore(value: 0)
       var isRunning = false
 
       URLSession.shared.dataTask(with: request) { _, response, _ in
-        if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+        // 401 also proves a daemon is listening — it rejected the probe rather
+        // than refusing the connection. Treating it as "not running" would spawn
+        // a second daemon whenever the token is unresolved.
+        if let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 401
+        {
           isRunning = true
         }
         semaphore.signal()

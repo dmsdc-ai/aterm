@@ -321,14 +321,14 @@ pub fn data_root() -> PathBuf {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            dirs::home_dir()
+            std::env::home_dir()
                 .unwrap_or_else(|| PathBuf::from("/tmp"))
                 .join(".aigentry")
         })
 }
 
 pub fn sessions_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     migrate_dot_aterm(&home);
     data_root().join("data").join("sessions.json")
 }
@@ -439,7 +439,7 @@ pub fn restored_session_args(command: &str, cwd: &str, args: &[String]) -> Vec<S
 }
 
 pub fn check_claude_history(cwd: &str) -> bool {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let key = cwd.replace('/', "-");
     let history_dir = home.join(".claude").join("projects").join(&key);
     if !history_dir.is_dir() {

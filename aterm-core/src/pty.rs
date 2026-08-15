@@ -9,7 +9,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub type WorkspaceStatus = Arc<(Mutex<String>, Condvar)>;
-use tokio::sync::Notify;
 
 use crate::inject::{
     close_writer_handle, detect_osc133, has_prompt_pattern, normalize_terminal_text,
@@ -29,7 +28,6 @@ type WakeCallback = Arc<std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>>;
 
 #[derive(Clone)]
 pub struct PtyOutputSignal {
-    notify: Arc<Notify>,
     dirty: Arc<AtomicBool>,
     wake_callback: WakeCallback,
     stopped: Arc<AtomicBool>,
@@ -41,7 +39,6 @@ pub struct PtyOutputSignal {
 impl Default for PtyOutputSignal {
     fn default() -> Self {
         Self {
-            notify: Arc::new(Notify::new()),
             dirty: Arc::new(AtomicBool::new(false)),
             wake_callback: Arc::new(std::sync::OnceLock::new()),
             stopped: Arc::new(AtomicBool::new(false)),
@@ -68,7 +65,6 @@ impl PtyOutputSignal {
 
     pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
-        self.notify.notify_one();
         if self.stopped.load(Ordering::Acquire) {
             return;
         }
@@ -82,23 +78,12 @@ impl PtyOutputSignal {
         }
     }
 
-    pub fn notified(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let notify = self.notify.clone();
-        async move {
-            notify.notified().await;
-        }
-    }
-
     pub fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
     pub fn has_dirty(&self) -> bool {
         self.dirty.load(Ordering::Acquire)
-    }
-
-    pub fn poke(&self) {
-        self.notify.notify_one();
     }
 
     /// Signal that the host view is being deallocated. After this call,
@@ -1737,7 +1722,7 @@ pub fn command_search_paths() -> Vec<PathBuf> {
         }
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         for relative in ["bin", ".local/bin", ".cargo/bin", ".nvm/bin"] {
             push_unique_path(&mut paths, &mut seen, home.join(relative));
         }

@@ -1,9 +1,9 @@
 schema_version: 1
 inventory:
-  requested_total_from_task: 84
-  enumerated_total_from_state_tests_md: 84
-  verified_total_from_source: 86
-  note: state/tests.md and verification-family intents track 84 regression tests; source also retains 2 local renderer_glyph helper tests outside pack selectors.
+  requested_total_from_task: 70
+  enumerated_total_from_state_tests_md: 70
+  verified_total_from_source: 70
+  note: state/tests.md and verification-family intents track 70 regression tests post Phase 1 cleanup; renderer family retired (wgpu renderer + renderer_glyph deleted in 61d63c1).
 packs:
   smoke:
     description: Fast regression for inject, PTY lifecycle, shell readiness, IPC fanout, and workspace lifecycle.
@@ -31,8 +31,6 @@ packs:
         profile: integration
       - id: VF-ATERM-EVENTBUS
         profile: integration
-      - id: VF-ATERM-RENDER
-        profile: unit
       - id: VF-ATERM-SESSION
         profile: integration
   release:
@@ -48,7 +46,5 @@ packs:
         profile: integration
       - id: VF-ATERM-EVENTBUS
         profile: integration
-      - id: VF-ATERM-RENDER
-        profile: unit
       - id: VF-ATERM-SESSION
         profile: integration

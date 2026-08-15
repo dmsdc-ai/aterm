@@ -23,9 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone winit (path dependency, v0.30.13)
-        run: git clone --depth 1 --branch v0.30.13 https://github.com/rust-windowing/winit.git ../winit
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

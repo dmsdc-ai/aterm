@@ -12,7 +12,7 @@ use std::time::Instant;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::inject::Osc133Mark;
-use crate::sync::FairMutex;
+use alacritty_terminal::sync::FairMutex;
 
 pub type PtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 pub type SharedPtyWriter = Arc<Mutex<Option<PtyWriter>>>;

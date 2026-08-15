@@ -15,5 +15,12 @@ target/
 build/
 .context-snapshot.md
 
-# npm pack artifacts
+# cbindgen-generated (build.rs writes it on every build)
+aterm-core/aterm_core.h
+
+# npm pack artifacts — publish via npm registry / GitHub Releases, never git
 *.tgz
+npm/**/*.zip
+
+# Windows-reserved device name — tracking a file named CON breaks clones on Windows
+CON

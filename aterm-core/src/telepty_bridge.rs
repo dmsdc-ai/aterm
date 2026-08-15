@@ -1,7 +1,11 @@
 use std::collections::HashSet;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Output};
 use std::thread;
 use std::time::Duration;
+
+/// Header the telepty daemon reads the auth token from.
+const AUTH_HEADER: &str = "x-telepty-token";
 
 /// Optional bridge to telepty daemon.
 /// All methods are fire-and-forget — failures are logged but never block aterm.
@@ -10,6 +14,54 @@ pub struct TeleptyBridge {
 }
 
 impl TeleptyBridge {
+    /// curl invocation with the telepty credential attached.
+    /// Every authenticated call site goes through here so the token is resolved
+    /// in exactly one place. Never logged — see `auth_token`.
+    fn curl(args: &[&str]) -> std::io::Result<Output> {
+        let mut cmd = Command::new("curl");
+        cmd.args(args);
+        if let Some(token) = Self::auth_token() {
+            cmd.args(["-H", &format!("{}: {}", AUTH_HEADER, token)]);
+        }
+        cmd.output()
+    }
+
+    /// Resolve the telepty auth token: `TELEPTY_AUTH_TOKEN` override, else
+    /// `authToken` from `~/.telepty/config.json`.
+    ///
+    /// The file is the path that must work unaided — a GUI launched from Finder
+    /// inherits no shell environment, so env alone would pass every terminal
+    /// test and fail every real user.
+    ///
+    /// Read fresh on each call rather than cached: on a fresh install the daemon
+    /// writes that file moments after aterm launches, so a startup read would
+    /// cache a permanent empty. A file read is noise next to the curl process
+    /// spawn it accompanies, and it picks up token rotation for free.
+    ///
+    /// `None` when absent or malformed — the caller then sends no header, gets a
+    /// 401, and takes the "daemon unavailable, running standalone" path it
+    /// already has. Never returned into a log line.
+    fn auth_token() -> Option<String> {
+        if let Ok(token) = std::env::var("TELEPTY_AUTH_TOKEN") {
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+        // $HOME first, passwd entry as fallback — matches the Swift resolver and
+        // telepty's own choice of where it writes this file.
+        let home = std::env::home_dir()?;
+        Self::token_from_config(&home.join(".telepty/config.json"))
+    }
+
+    fn token_from_config(path: &Path) -> Option<String> {
+        let body = std::fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+        json["authToken"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    }
+
     /// Try to connect to telepty daemon. Returns None if unavailable.
     /// Retries up to 3 times with 500ms between attempts.
     pub fn try_connect() -> Option<Self> {
@@ -23,18 +75,16 @@ impl TeleptyBridge {
 
         for attempt in 1..=3 {
             // Quick health check
-            let output = Command::new("curl")
-                .args([
-                    "-s",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "--max-time",
-                    "1",
-                    &format!("{}/api/sessions", bridge.daemon_url),
-                ])
-                .output();
+            let output = Self::curl(&[
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--max-time",
+                "1",
+                &format!("{}/api/sessions", bridge.daemon_url),
+            ]);
 
             match output {
                 Ok(out) if out.status.success() => {
@@ -191,24 +241,22 @@ impl TeleptyBridge {
     /// POST registration to telepty with retry. Returns true on success.
     fn register_with_retry(url: &str, body: &str, label: &str) -> bool {
         for attempt in 1..=3u64 {
-            let output = Command::new("curl")
-                .args([
-                    "-s",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "-X",
-                    "POST",
-                    url,
-                    "-H",
-                    "Content-Type: application/json",
-                    "-d",
-                    body,
-                    "--max-time",
-                    "3",
-                ])
-                .output();
+            let output = Self::curl(&[
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "POST",
+                url,
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                body,
+                "--max-time",
+                "3",
+            ]);
 
             match output {
                 Ok(out) if out.status.success() => {
@@ -297,10 +345,7 @@ impl TeleptyBridge {
             let known_names: HashSet<&str> =
                 workspaces.iter().map(|(name, _, _, _)| name.as_str()).collect();
             let sessions_url = format!("{}/api/sessions", daemon_url);
-            if let Ok(output) = Command::new("curl")
-                .args(["-s", "--max-time", "3", &sessions_url])
-                .output()
-            {
+            if let Ok(output) = Self::curl(&["-s", "--max-time", "3", &sessions_url]) {
                 if output.status.success() {
                     let body = String::from_utf8_lossy(&output.stdout);
                     if let Ok(sessions) =
@@ -324,11 +369,9 @@ impl TeleptyBridge {
                                 if is_aterm && !known_names.contains(id) {
                                     let del_url =
                                         format!("{}/api/sessions/{}", daemon_url, id);
-                                    let _ = Command::new("curl")
-                                        .args([
-                                            "-s", "-X", "DELETE", &del_url, "--max-time", "2",
-                                        ])
-                                        .output();
+                                    let _ = Self::curl(&[
+                                        "-s", "-X", "DELETE", &del_url, "--max-time", "2",
+                                    ]);
                                     cleaned += 1;
                                 }
                             }
@@ -350,9 +393,88 @@ impl TeleptyBridge {
         let url = format!("{}/api/sessions/{}", self.daemon_url, session_id);
 
         std::thread::spawn(move || {
-            let _ = Command::new("curl")
-                .args(["-s", "-X", "DELETE", &url, "--max-time", "2"])
-                .output();
+            let _ = Self::curl(&["-s", "-X", "DELETE", &url, "--max-time", "2"]);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    fn write_config(dir: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn token_read_from_config_file() {
+        let path = write_config(
+            "aterm-telepty-token-ok",
+            r#"{"authToken":"tok-123","createdAt":"2026-03-11T01:17:37.274Z"}"#,
+        );
+        assert_eq!(
+            TeleptyBridge::token_from_config(&path).as_deref(),
+            Some("tok-123")
+        );
+    }
+
+    /// Absent or malformed config must degrade to "no token", never panic —
+    /// this runs inside a GUI process.
+    #[test]
+    fn missing_or_malformed_config_degrades_to_none() {
+        let missing = std::env::temp_dir().join("aterm-telepty-token-absent.json");
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(TeleptyBridge::token_from_config(&missing), None);
+
+        for body in [r#"{ not json"#, "{}", r#"{"authToken":""}"#, r#"{"authToken":42}"#] {
+            let path = write_config("aterm-telepty-token-bad", body);
+            assert_eq!(
+                TeleptyBridge::token_from_config(&path),
+                None,
+                "expected None for config body: {}",
+                body
+            );
+        }
+    }
+
+    /// The check that matters: the header is on the wire, not merely compiled in.
+    #[test]
+    fn auth_header_reaches_the_daemon() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = sock.read(&mut buf).unwrap();
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]");
+            tx.send(String::from_utf8_lossy(&buf[..n]).to_string()).unwrap();
+        });
+
+        std::env::set_var("TELEPTY_AUTH_TOKEN", "tok-on-the-wire");
+        let out = TeleptyBridge::curl(&[
+            "-s",
+            "--max-time",
+            "3",
+            &format!("http://127.0.0.1:{}/api/sessions", port),
+        ]);
+        std::env::remove_var("TELEPTY_AUTH_TOKEN");
+        assert!(out.unwrap().status.success());
+
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            request.contains("x-telepty-token: tok-on-the-wire"),
+            "auth header missing from request:\n{}",
+            request
+        );
     }
 }
