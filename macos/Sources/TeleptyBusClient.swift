@@ -96,27 +96,14 @@ struct SemanticBlock: Codable {
     }
 }
 
-/// Internal workspace from aterm-core PtyManager
-struct AtermWorkspace: Identifiable, Codable {
-    let id: String
-    let cwd: String
-    let command: String
-    let args: [String]
-    let status: String
-    let createdAt: String
-    let bufferLines: Int
-}
-
 /// WebSocket client that connects to telepty bus
 class TeleptyBusClient: ObservableObject {
     @Published var sessions: [TeleptySession] = []
-    @Published var workspaces: [AtermWorkspace] = []
     @Published var connected: Bool = false
 
     private var webSocketTask: URLSessionWebSocketTask?
     private let busURL: URL
     private var reconnectWorkItem: DispatchWorkItem?
-    private var corePtr: OpaquePointer?  // AtermCore*
     private let webSocketSession: URLSession
 
     // Exponential backoff state (#134 fix — 1s/2s/4s/8s/16s/30s cap)
@@ -137,23 +124,6 @@ class TeleptyBusClient: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             self?.connect()
         }
-    }
-
-    /// Set the aterm-core pointer for workspace polling
-    func setCore(_ core: OpaquePointer?) {
-        self.corePtr = core
-    }
-
-    /// Poll internal workspaces from aterm-core FFI
-    func refreshWorkspaces() {
-        guard let core = corePtr else { return }
-        guard let jsonPtr = aterm_core_list_workspaces(core) else { return }
-        let json = String(cString: jsonPtr)
-        aterm_core_free_string(jsonPtr)
-
-        guard let data = json.data(using: .utf8),
-              let list = try? JSONDecoder().decode([AtermWorkspace].self, from: data) else { return }
-        workspaces = list
     }
 
     deinit {

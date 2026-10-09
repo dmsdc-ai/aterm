@@ -640,12 +640,3 @@ final class ThinScroller: NSScroller {
         // Transparent track — draw nothing.
     }
 }
-
-// MARK: - NSFont italic helper
-
-extension NSFont {
-    func withTraits(_ traits: NSFontTraitMask) -> NSFont {
-        let fm = NSFontManager.shared
-        return fm.convert(self, toHaveTrait: traits)
-    }
-}

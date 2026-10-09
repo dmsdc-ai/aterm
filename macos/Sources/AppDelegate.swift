@@ -1815,26 +1815,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     workspace.lastLaunchTime = Date()
   }
 
-  private func restartSystemWorkspace(id: UUID) {
-    guard let workspace = managedWorkspaces[id],
-      workspace.isSystem,
-      workspace.status == "restarting",
-      !workspace.cliGaveUp
-    else { return }
-
-    NSLog(
-      "[aterm] re-sending CLI bootstrap to '%@' (attempt %d)", workspace.name,
-      workspace.restartCount)
-
-    // Shell (zsh) is already running — just send the CLI command to it
-    if let bootstrapCmd = workspace.launchCommand.bootstrapCommand(
-      customCommand: workspace.customCommand, cliArgs: workspace.cliArgs)
-    {
-      bootstrapWorkspace(id: id, command: bootstrapCmd)
-    }
-    workspace.status = "starting"
-  }
-
   private func workspaceID(named name: String) -> UUID? {
     managedWorkspaces.first(where: { $0.value.name == name })?.key
   }
@@ -1854,7 +1834,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     terminalView = workspace.terminalView
     workspaceSidebarModel.selectedWorkspaceName = workspace.name
-    busClient.setCore(workspace.terminalView.corePointer)
 
     // #240: Show orchestrator input bar for isSystem workspaces
     let showInputBar = workspace.isSystem
@@ -2185,26 +2164,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  private func statusIcon(for status: String, useAscii: Bool) -> String {
-    if useAscii {
-      switch status {
-      case "working": return "[*]"
-      case "idle": return "[-]"
-      case "dead": return "[!]"
-      case "starting", "restarting": return "[>]"
-      default: return "[?]"
-      }
-    } else {
-      switch status {
-      case "working": return "🔨"
-      case "idle": return "💤"
-      case "dead": return "🔴"
-      case "starting", "restarting": return "🔄"
-      default: return ""
-      }
-    }
-  }
-
   /// Schedule a 30s idle check for a workspace. Replaces 1Hz polling.
   private func scheduleIdleCheck(for id: UUID) {
     guard let ws = managedWorkspaces[id] else { return }
@@ -2310,35 +2269,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     let folderName = URL(fileURLWithPath: cwd).lastPathComponent
     return folderName.isEmpty ? "workspace" : folderName
-  }
-
-  private func directChildProcessIDs(of parentPID: Int32) -> Set<Int32> {
-    let output = runPS(arguments: ["-axo", "pid=,ppid="])
-    let pairs =
-      output
-      .split(separator: "\n")
-      .compactMap { line -> (Int32, Int32)? in
-        let parts =
-          line
-          .split(whereSeparator: \.isWhitespace)
-          .map(String.init)
-        guard parts.count >= 2,
-          let pid = Int32(parts[0]),
-          let ppid = Int32(parts[1])
-        else {
-          return nil
-        }
-        return (pid, ppid)
-      }
-
-    return Set(pairs.filter { $0.1 == parentPID }.map(\.0))
-  }
-
-  private func processExists(_ pid: Int32) -> Bool {
-    if kill(pid, 0) == 0 {
-      return true
-    }
-    return errno != ESRCH
   }
 
   private func processName(for pid: Int32) -> String? {
