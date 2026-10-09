@@ -361,6 +361,7 @@ impl TeleptyBridge {
             // Cleanup stale aterm sessions not in current workspace set (#129)
             let known_names: HashSet<&str> =
                 workspaces.iter().map(|(name, _, _, _)| name.as_str()).collect();
+            let own_socket = workspaces.first().map(|w| w.3.clone()).unwrap_or_default();
             let sessions_url = format!("{}/api/sessions", daemon_url);
             if let Ok(output) = Self::curl(&["-s", "--max-time", "3", &sessions_url]) {
                 if output.status.success() {
@@ -369,29 +370,18 @@ impl TeleptyBridge {
                         serde_json::from_str::<Vec<serde_json::Value>>(body.trim())
                     {
                         let mut cleaned = 0usize;
-                        for session in &sessions {
-                            let id = session
-                                .get("session_id")
-                                .or_else(|| session.get("id"))
-                                .and_then(|v| v.as_str());
-                            let is_aterm = session
-                                .get("term_program")
-                                .and_then(|v| v.as_str())
-                                == Some("aterm")
-                                || session
-                                    .get("delivery_type")
-                                    .and_then(|v| v.as_str())
-                                    == Some("aterm");
-                            if let Some(id) = id {
-                                if is_aterm && !known_names.contains(id) {
-                                    let del_url =
-                                        format!("{}/api/sessions/{}", daemon_url, id);
-                                    let _ = Self::curl(&[
-                                        "-s", "-X", "DELETE", &del_url, "--max-time", "2",
-                                    ]);
-                                    cleaned += 1;
-                                }
-                            }
+                        let socket_live =
+                            |p: &str| std::os::unix::net::UnixStream::connect(p).is_ok();
+                        for id in stale_aterm_session_ids(
+                            &sessions,
+                            &known_names,
+                            &own_socket,
+                            &socket_live,
+                        ) {
+                            let del_url = format!("{}/api/sessions/{}", daemon_url, id);
+                            let _ =
+                                Self::curl(&["-s", "-X", "DELETE", &del_url, "--max-time", "2"]);
+                            cleaned += 1;
                         }
                         if cleaned > 0 {
                             log_stderr!(
@@ -413,6 +403,44 @@ impl TeleptyBridge {
             let _ = Self::curl(&["-s", "-X", "DELETE", &url, "--max-time", "2"]);
         });
     }
+}
+
+/// Ids of telepty sessions this aterm instance may delete as stale (#129).
+///
+/// An aterm entry whose name is not in `known` is stale only when it is ours
+/// (`delivery.address == own_socket`), its socket no longer accepts connections,
+/// or it predates the address field. Another live aterm instance on the same
+/// daemon (sandbox mode skips the single-instance check) keeps its sessions.
+fn stale_aterm_session_ids(
+    sessions: &[serde_json::Value],
+    known: &HashSet<&str>,
+    own_socket: &str,
+    socket_live: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    sessions
+        .iter()
+        .filter_map(|session| {
+            let id = session
+                .get("session_id")
+                .or_else(|| session.get("id"))
+                .and_then(|v| v.as_str())?;
+            let is_aterm = session.get("term_program").and_then(|v| v.as_str()) == Some("aterm")
+                || session.get("delivery_type").and_then(|v| v.as_str()) == Some("aterm");
+            if !is_aterm || known.contains(id) {
+                return None;
+            }
+            let address = session
+                .get("delivery")
+                .and_then(|d| d.get("address"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if address.is_empty() || address == own_socket || !socket_live(address) {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -540,5 +568,70 @@ mod tests {
             "auth header missing from request:\n{}",
             request
         );
+    }
+
+    const OWN: &str = "/tmp/aterm-own.sock";
+    const OTHER_LIVE: &str = "/tmp/aterm-other-live.sock";
+    const DEAD: &str = "/tmp/aterm-dead.sock";
+
+    fn live(p: &str) -> bool {
+        p == OWN || p == OTHER_LIVE
+    }
+
+    fn stale(sessions: &[serde_json::Value], known: &[&str]) -> Vec<String> {
+        let known: HashSet<&str> = known.iter().copied().collect();
+        stale_aterm_session_ids(sessions, &known, OWN, &live)
+    }
+
+    fn aterm_entry(id: &str, address: &str) -> serde_json::Value {
+        serde_json::from_str(&TeleptyBridge::registration_payload(
+            id, id, "zsh", "/", address,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn stale_ids_keeps_other_live_instance() {
+        let sessions = [aterm_entry("theirs", OTHER_LIVE)];
+        assert!(stale(&sessions, &["mine"]).is_empty());
+    }
+
+    #[test]
+    fn stale_ids_removes_dead_socket() {
+        let sessions = [aterm_entry("gone", DEAD)];
+        assert_eq!(stale(&sessions, &["mine"]), vec!["gone"]);
+    }
+
+    #[test]
+    fn stale_ids_removes_own_unknown_name() {
+        let sessions = [aterm_entry("renamed", OWN), aterm_entry("mine", OWN)];
+        assert_eq!(stale(&sessions, &["mine"]), vec!["renamed"]);
+    }
+
+    #[test]
+    fn stale_ids_keeps_known_name() {
+        // Known names stay whatever their address — they were just re-registered.
+        let sessions = [aterm_entry("mine", OWN), aterm_entry("also", DEAD)];
+        assert!(stale(&sessions, &["mine", "also"]).is_empty());
+    }
+
+    #[test]
+    fn stale_ids_ignores_non_aterm() {
+        let sessions = [
+            serde_json::json!({"session_id": "cli", "term_program": "ghostty",
+                "delivery": {"address": DEAD}}),
+            serde_json::json!({"id": "bare"}),
+        ];
+        assert!(stale(&sessions, &["mine"]).is_empty());
+    }
+
+    #[test]
+    fn stale_ids_removes_legacy_without_address() {
+        let sessions = [
+            serde_json::json!({"session_id": "old", "term_program": "aterm"}),
+            serde_json::json!({"id": "older", "delivery_type": "aterm",
+                "delivery": {"address": ""}}),
+        ];
+        assert_eq!(stale(&sessions, &["mine"]), vec!["old", "older"]);
     }
 }
