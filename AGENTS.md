@@ -194,10 +194,10 @@ aterm dispatch --plan '<description>' # Free-text task → same dispatch flow
    - `architect`, `debug`, `analyze`, `design` → `claude`
    - `research`, `document`, `search`, `summarize` → `gemini`
    - Default → `claude`
-5. **Execute**: For each subtask: `aterm create` → wait 2s → `aterm inject`
-6. **Poll**: 10s intervals, max 300s. Looks for `idle` state in workspace status
+5. **Execute**: For each subtask: `CreateWorkspace` `dispatch-<task>-<run id>-sub<i>` (the run id is the dispatch PID; the call returns once the shell is ready) → `Inject` the task plus an `aterm done` contract
+6. **Wait**: one `WaitUntil state=complete` per sub-session under a shared 300s deadline; the sub-session signals with `aterm done '<result>'`
 7. **Collect**: Gathers status reports from all sub-sessions
-8. **Cleanup**: `aterm kill` for each created session
+8. **Cleanup**: `CloseWorkspace` for `complete` and `inject_failed` sub-sessions; timed-out ones are reported `left_running` and kept
 
 ### Output
 
@@ -205,7 +205,7 @@ aterm dispatch --plan '<description>' # Free-text task → same dispatch flow
 {
   "task_id": 34,
   "subtasks": 3,
-  "sessions_created": ["dispatch-34-sub0", "dispatch-34-sub1", "dispatch-34-sub2"],
+  "sessions_created": ["dispatch-34-4242-sub0", "dispatch-34-4242-sub1", "dispatch-34-4242-sub2"],
   "status": "all_complete",
   "reports": [{"name": "...", "status": "complete", "cli": "..."}, ...]
 }

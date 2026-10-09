@@ -2,7 +2,7 @@ schema_version: 1
 id: VF-ATERM-SESSION
 feature: workspace create guard and CLI dispatch lifecycle
 intent: >
-  Verify CreateWorkspace name handling and the bin/aterm dispatch, done and tasks flows (create, inject, wait, close) against a fake IPC socket.
+  Verify CreateWorkspace name handling and the bin/aterm dispatch, done, tasks and lessons flows (create, inject, wait, close), Unsupported replies and help text against a fake IPC socket.
 profile: integration
 package: aterm-core
 target: cli_dispatch
@@ -15,13 +15,24 @@ selectors:
   - "dispatch_"
   - "done_"
   - "tasks_"
+  - "unsupported_"
+  - "lessons_"
+  - "help_"
 tests:
   - create_workspace_rejects_existing_name
   - create_workspace_unknown_name_without_host_is_unsupported
+  - dispatch_closes_inject_failed_subs
   - dispatch_create_unsupported_skips_inject
+  - dispatch_names_carry_run_id
   - dispatch_timeout_leaves_session_running
   - dispatch_wait_error_reports_dead_not_left_running
   - dispatch_waits_for_complete_and_closes_completed
   - done_sends_mark_complete_with_workspace_and_report
+  - export_unsupported_writes_no_file
+  - help_has_no_hardcoded_installed_block
+  - lessons_add_is_atomic
+  - subscribe_help_lists_emitted_types
   - tasks_add_ids_unique_and_atomic
+  - tasks_add_replaces_inode
   - tasks_workspace_flag_uses_list_tasks
+  - unsupported_reply_is_an_error

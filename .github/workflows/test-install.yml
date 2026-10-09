@@ -7,6 +7,12 @@ on:
       - 'npm/**'
       - 'macos/**'
       - 'aterm-core/**'
+      - 'aterm-ipc/**'
+      - 'aterm-session/**'
+      - 'bin/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
       - 'Makefile'
   pull_request:
     paths:
@@ -14,6 +20,12 @@ on:
       - 'npm/**'
       - 'macos/**'
       - 'aterm-core/**'
+      - 'aterm-ipc/**'
+      - 'aterm-session/**'
+      - 'bin/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
       - 'Makefile'
   workflow_dispatch:
 
@@ -35,6 +47,9 @@ jobs:
 
       - name: Cargo test
         run: ATERM_TELEPTY_PORT=9 cargo test --workspace --locked
+
+      - name: Launcher test
+        run: node --test npm/aterm/test/launcher.test.mjs
 
       - name: Pack npm packages
         run: |

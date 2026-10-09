@@ -1,9 +1,9 @@
 schema_version: 1
 inventory:
-  requested_total_from_task: 89
-  enumerated_total_from_state_tests_md: 89
-  verified_total_from_source: 89
-  note: state/tests.md is generated from `ATERM_TELEPTY_PORT=9 cargo test --offline --workspace -- --list` (89 tests across aterm-core, aterm-ipc and the aterm-core integration tests); the standalone Condvar re-implementation tests were deleted in task 1209 B7 (R1).
+  requested_total_from_task: 97
+  enumerated_total_from_state_tests_md: 97
+  verified_total_from_source: 97
+  note: state/tests.md is generated from `ATERM_TELEPTY_PORT=9 cargo test --offline --workspace -- --list` (97 tests across aterm-core, aterm-ipc and the aterm-core integration tests); the standalone Condvar re-implementation tests were deleted in task 1209 B7 (R1), and B2 added 8 cli_dispatch tests.
 packs:
   smoke:
     description: Fast regression for inject, PTY lifecycle, shell readiness, IPC fanout, and workspace lifecycle.

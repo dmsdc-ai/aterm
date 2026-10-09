@@ -28,6 +28,7 @@ All notable changes to **aterm** are documented in this file.
 - I11: IPC peer auth fails closed on platforms without a peer-credential check.
 - I12: `AGENTS.md`, `aterm-structure-map.md` and the test inventory (`state/tests.md`, verification families) match the code. The app bundle version now comes from `npm/aterm/package.json`.
 - I13: the workspace declares `resolver = "2"`, so the resolver warning is gone.
+- B2 (`bin/aterm`): an `Unsupported` IPC reply is now an error (stderr JSON, exit 2) instead of a false `ok`; this includes `aterm log`/`export` until `ReadScreenText` is implemented. `dispatch` sub-session names carry a run id (`dispatch-<task>-<pid>-sub<i>`) and inject-failed sub-sessions are closed. `tasks add`/`tasks done`/`lessons add` write through a temp file + rename (the board files become mode 0600). The help drops the hard-coded ecosystem block and lists the emitted subscribe event types.
 
 ### Changed — aterm authenticates to the telepty daemon (task #825)
 - All telepty daemon calls now send the daemon's auth token as an `x-telepty-token`

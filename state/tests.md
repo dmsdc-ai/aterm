@@ -23,11 +23,11 @@ ATERM_TELEPTY_PORT=9 cargo test -p aterm-core --lib -- inject::tests   # Inject 
 | `aterm-core/src/inject.rs` | 27 |
 | `aterm-core/src/pty.rs` | 24 |
 | `aterm-core/src/telepty_bridge.rs` | 12 |
-| `aterm-core/tests/cli_dispatch.rs` | 7 |
+| `aterm-core/tests/cli_dispatch.rs` | 15 |
 | `aterm-core/tests/hermetic_guard.rs` | 1 |
 | `aterm-core/tests/telepty_no_restart.rs` | 1 |
 | `aterm-ipc/src/server.rs` | 3 |
-| **Total** | **89** |
+| **Total** | **97** |
 
 ## aterm-core/src/app.rs
 
@@ -135,13 +135,21 @@ ATERM_TELEPTY_PORT=9 cargo test -p aterm-core --lib -- inject::tests   # Inject 
 
 | Test Name | Purpose |
 |-----------|---------|
+| dispatch_closes_inject_failed_subs | dispatch: a sub whose Inject gets no reply is reported inject_failed and closed, with no WaitUntil (B2 F6) |
 | dispatch_create_unsupported_skips_inject | dispatch: Unsupported create reports create_failed with no Inject/WaitUntil/Close |
+| dispatch_names_carry_run_id | dispatch: sub-session names are `dispatch-<task>-<run id>-sub<i>` (B2 I2b) |
 | dispatch_timeout_leaves_session_running | dispatch: a timed-out sub-session is left running |
 | dispatch_wait_error_reports_dead_not_left_running | dispatch: a WaitUntil error reports dead, not left_running |
 | dispatch_waits_for_complete_and_closes_completed | dispatch: waits for complete and closes completed sub-sessions |
 | done_sends_mark_complete_with_workspace_and_report | aterm done sends MarkComplete with the workspace and report |
+| export_unsupported_writes_no_file | export: an Unsupported ReadScreenText reply exits 2 and writes no file (B2 I3) |
+| help_has_no_hardcoded_installed_block | help (en, ko) has no hard-coded "already installed" ecosystem block (B2 R14) |
+| lessons_add_is_atomic | lessons add replaces the file via temp + rename: new inode, no .tmp- left (B2 F5) |
+| subscribe_help_lists_emitted_types | help (en, ko) subscribe row lists the five emitted event types, no TitleChanged (B2) |
 | tasks_add_ids_unique_and_atomic | tasks add assigns unique ids and writes the board atomically (no .tmp left) |
+| tasks_add_replaces_inode | tasks add replaces the board via temp + rename: new inode, no .tmp- left (B2 F5) |
 | tasks_workspace_flag_uses_list_tasks | tasks --workspace sends ListTasks and leaves the local board untouched |
+| unsupported_reply_is_an_error | An Unsupported IPC reply exits 2 with an error on stderr, never "ok" (B2 I3) |
 
 ## aterm-core/tests/hermetic_guard.rs
 
@@ -165,5 +173,5 @@ ATERM_TELEPTY_PORT=9 cargo test -p aterm-core --lib -- inject::tests   # Inject 
 
 ---
 
-*Total: 89 tests (10 app.rs + 4 lib.rs + 27 inject.rs + 24 pty.rs + 12 telepty_bridge.rs + 7 cli_dispatch.rs + 1 hermetic_guard.rs + 1 telepty_no_restart.rs + 3 server.rs)*
-*Regenerated 2026-10-09 from `cargo test -- --list` (task 1209 B7); the 18 standalone Condvar tests that never imported aterm_core were deleted (R1).*
+*Total: 97 tests (10 app.rs + 4 lib.rs + 27 inject.rs + 24 pty.rs + 12 telepty_bridge.rs + 15 cli_dispatch.rs + 1 hermetic_guard.rs + 1 telepty_no_restart.rs + 3 server.rs)*
+*Regenerated 2026-10-09 from `cargo test -- --list` (task 1209 B7); the 18 standalone Condvar tests that never imported aterm_core were deleted (R1). The 8 B2 `cli_dispatch` rows were added from the source `#[test]` count; re-confirm with `cargo test -- --list`.*
