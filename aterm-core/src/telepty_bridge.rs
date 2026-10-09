@@ -81,9 +81,8 @@ impl TeleptyBridge {
     /// Resolve the daemon port from the `ATERM_TELEPTY_PORT` override.
     ///
     /// `None` means "do not connect at all". Under test the production default
-    /// is refused, and so is an explicit 3848: a connected bridge walks straight
-    /// into the version check below, and from there into `restart_daemon()` —
-    /// which restarts a daemon the test suite does not own. Tests that want a
+    /// is refused, and so is an explicit 3848: a connected bridge talks to a
+    /// daemon the test suite does not own. Tests that want a
     /// bridge point `ATERM_TELEPTY_PORT` at a stand-in they spawned.
     ///
     /// Pure so the guard test can cover both worlds without racing on the
@@ -131,30 +130,16 @@ impl TeleptyBridge {
                     let code = String::from_utf8_lossy(&out.stdout);
                     if code.starts_with('2') {
                         let installed = Self::detect_version();
-                        let mut daemon_ver = Self::detect_daemon_version(&bridge.daemon_url);
+                        let daemon_ver = Self::detect_daemon_version(&bridge.daemon_url);
 
-                        // Auto-restart if installed CLI is newer than running daemon
+                        // Version skew is logged, never acted on: aterm does not own the
+                        // daemon, and restarting it stops every session on it (#895).
                         if let (Some(ref inst), Some(ref dmn)) = (&installed, &daemon_ver) {
                             if inst != dmn {
                                 log_stderr!(
-                                    "[telepty-bridge] daemon v{} outdated (installed v{}), restarting...",
+                                    "[telepty-bridge] daemon v{} differs from installed CLI v{}; not restarting — aterm does not own the daemon (#895)",
                                     dmn, inst
                                 );
-                                if Self::restart_daemon() {
-                                    // Wait for daemon to come back up after restart.
-                                    // One-time cost at app launch, not in a hot path.
-                                    thread::sleep(Duration::from_secs(2));
-                                    daemon_ver = Self::detect_daemon_version(&bridge.daemon_url);
-                                    log_stderr!(
-                                        "[telepty-bridge] daemon restarted → v{}",
-                                        daemon_ver.as_deref().unwrap_or("unknown")
-                                    );
-                                } else {
-                                    log_stderr!(
-                                        "[telepty-bridge] daemon restart failed, continuing with v{}",
-                                        dmn
-                                    );
-                                }
                             }
                         }
 
@@ -225,23 +210,6 @@ impl TeleptyBridge {
         let body = String::from_utf8_lossy(&output.stdout);
         let json: serde_json::Value = serde_json::from_str(&body).ok()?;
         json["version"].as_str().map(|s| s.to_string())
-    }
-
-    /// Restart telepty daemon. Returns true if the command succeeded.
-    ///
-    /// Second guard, not a redundant one: `resolve_port` keeps a test off the
-    /// production port, but a test pointed at a stand-in daemon that reports a
-    /// different version still lands here — and `telepty daemon restart` acts on
-    /// the real daemon regardless of which port the bridge was talking to.
-    fn restart_daemon() -> bool {
-        if Self::hermetic() {
-            log_stderr!("[telepty-bridge] hermetic run: refusing to restart the daemon");
-            return false;
-        }
-        match Command::new("telepty").args(["daemon", "restart"]).output() {
-            Ok(out) => out.status.success(),
-            Err(_) => false,
-        }
     }
 
     /// Register an aterm workspace with telepty.
@@ -515,13 +483,7 @@ mod tests {
         assert!(TeleptyBridge::hermetic());
     }
 
-    /// Safe to call precisely because the guard is there — that is the assertion.
-    #[test]
-    fn restart_is_disarmed_under_test() {
-        assert!(!TeleptyBridge::restart_daemon());
-    }
-
-    /// Both guards are one deleted line away from gone, and no behavioural test
+    /// The port guard is one deleted line away from gone, and no behavioural test
     /// can see a guard that is no longer there. Source assertion, same shape as
     /// `ffi_tests::all_ffi_entry_points_wrapped_in_catch_unwind`.
     #[test]
@@ -544,14 +506,6 @@ mod tests {
         assert!(
             connect[..connect.len().min(400)].contains("Self::resolve_port("),
             "try_connect no longer resolves its port through the hermetic guard"
-        );
-
-        let (_, restart) = production
-            .split_once("fn restart_daemon()")
-            .expect("restart_daemon must exist");
-        assert!(
-            restart[..restart.len().min(200)].contains("Self::hermetic()"),
-            "restart_daemon lost its hermetic guard"
         );
     }
 
