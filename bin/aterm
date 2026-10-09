@@ -95,6 +95,7 @@ show_help() {
 | `aterm lessons add '<lesson>' --type failed` | 실패 패턴 추가 |
 | `aterm dispatch <task-id>` | 태스크 분해 → 서브세션 생성 → 실행 → 수집 → 정리 |
 | `aterm dispatch --plan '<desc>'` | 자유 텍스트 태스크 → 동일한 dispatch 흐름 |
+| `aterm done '<result>'` | 현재 워크스페이스 작업 완료 신호 (dispatch 서브세션이 호출, 결과 보고 포함) |
 | `aterm log <workspace> [--lines N]` | 워크스페이스 화면 텍스트 읽기 (기본 100줄) |
 | `aterm export <workspace> [--format md\|txt]` | 세션 출력을 파일로 저장 |
 | `aterm settings get <key>` | 설정 값 읽기 (~/.aigentry/config/aterm.json) |
@@ -184,6 +185,7 @@ HELP
 | `aterm lessons add '<lesson>' --type failed` | Add a failed pattern |
 | `aterm dispatch <task-id>` | Break down task -> create sub-sessions -> execute -> collect -> cleanup |
 | `aterm dispatch --plan '<desc>'` | Free-text task -> same dispatch flow |
+| `aterm done '<result>'` | Signal this workspace's task is complete (called by dispatch sub-sessions; optional result report) |
 | `aterm log <workspace> [--lines N]` | Read workspace screen text (default 100 lines) |
 | `aterm export <workspace> [--format md\|txt]` | Save session output to file |
 | `aterm settings get <key>` | Read setting from ~/.aigentry/config/aterm.json |
@@ -281,6 +283,9 @@ payloads = {
     "attach-external": lambda: {"action": "AttachExternal", "session_id": args[0]},
     "send-key":        lambda: {"action": "SendKey", "workspace": args[0], "key": args[1]},
     "change-cli":      lambda: {"action": "ChangeWorkspaceCLI", "workspace": args[0], "cli": args[1]},
+    "done":            lambda: {"action": "MarkComplete", "workspace": os.environ["ATERM_WORKSPACE_NAME"],
+                                "report": " ".join(args) or None},
+    "list-tasks":      lambda: {"action": "ListTasks", "workspace": args[0]},
 }
 
 payload = json.dumps(payloads[action]()) + "\n"
@@ -336,6 +341,15 @@ try:
                     print(fmt.format(*r))
     elif action == "status":
         print(json.dumps(resp.get("data", {})))
+    elif action == "list-tasks":
+        board = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        pending = board.get("tasks") or []
+        if not pending:
+            print("No pending tasks.")
+        for i, t in enumerate(pending):
+            tid = t.get("id", i) if isinstance(t, dict) else i
+            desc = t.get("description", t) if isinstance(t, dict) else t
+            print(f"  [{tid}] {desc}")
     elif action == "read-screen":
         text = resp.get("data", {}).get("text", "") if isinstance(resp.get("data"), dict) else ""
         if text:
@@ -692,6 +706,13 @@ else:
         [ -z "$ATERM_IPC_SOCKET" ] && { echo '{"error":"restart-all requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
         aterm_ipc restart-all ;;
     tasks)
+        if [ "${2:-}" = "--workspace" ]; then
+            # Read-only view of another workspace's board (IPC ListTasks)
+            [ -z "$ATERM_IPC_SOCKET" ] && { echo '{"error":"tasks --workspace requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
+            { [ "$#" -lt 3 ] || [ "${4:-list}" != "list" ]; } && { echo '{"error":"usage: aterm tasks --workspace <name> [list]"}' >&2; exit 1; }
+            aterm_ipc list-tasks "$3"
+            exit 0
+        fi
         ensure_tasks_file
         case "${2:-list}" in
             list)
@@ -709,18 +730,22 @@ for i, t in enumerate(data["tasks"]):
             add)
                 [ "$#" -lt 3 ] && { echo '{"error":"usage: aterm tasks add <description>"}' >&2; exit 1; }
                 python3 -c '
-import json, sys, time
+import json, sys, os
 f = sys.argv[1]; desc = " ".join(sys.argv[2:])
 with open(f) as fh: data = json.load(fh)
-tid = int(time.time() * 1000) % 100000
+ids = [t["id"] for t in data.get("tasks", []) + data.get("completed", [])
+       if isinstance(t, dict) and type(t.get("id")) is int]
+tid = max(ids, default=0) + 1
 data["tasks"].append({"id": tid, "description": desc})
-with open(f, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+tmp = f + ".tmp"
+with open(tmp, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+os.replace(tmp, f)
 print(json.dumps({"status":"ok","id": tid}))
 ' "$(tasks_file)" "${@:3}" ;;
             done)
                 [ "$#" -lt 3 ] && { echo '{"error":"usage: aterm tasks done <id>"}' >&2; exit 1; }
                 python3 -c '
-import json, sys
+import json, sys, os
 f = sys.argv[1]; target = int(sys.argv[2])
 with open(f) as fh: data = json.load(fh)
 found = None
@@ -732,7 +757,9 @@ for i, t in enumerate(data["tasks"]):
 if not found:
     print(json.dumps({"error": f"task {target} not found"}), file=sys.stderr); sys.exit(1)
 data.setdefault("completed", []).append(found)
-with open(f, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+tmp = f + ".tmp"
+with open(tmp, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+os.replace(tmp, f)
 print(json.dumps({"status":"ok","id": target}))
 ' "$(tasks_file)" "$3" ;;
             *) echo '{"error":"usage: aterm tasks [list|add|done]"}' >&2; exit 1 ;;
@@ -773,6 +800,10 @@ print(json.dumps({"status":"ok","type": ltype}))
 ' "$(lessons_file)" "${@:3}" ;;
             *) echo '{"error":"usage: aterm lessons [list|add]"}' >&2; exit 1 ;;
         esac ;;
+    done)
+        [ -z "${ATERM_WORKSPACE_NAME:-}" ] && { echo '{"error":"done requires an aterm workspace (ATERM_WORKSPACE_NAME not set)"}' >&2; exit 1; }
+        shift
+        aterm_ipc done "$@" ;;
     dispatch)
         [ -z "$ATERM_IPC_SOCKET" ] && { echo '{"error":"dispatch requires aterm (ATERM_IPC_SOCKET not set)"}' >&2; exit 1; }
         python3 -c '
@@ -865,7 +896,7 @@ def select_cli(description):
 
 # ── Wait for state (event-driven IPC) ──────────────────────
 
-def ipc_wait_until(sock_path, workspace, state="idle", timeout_ms=300000):
+def ipc_wait_until(sock_path, workspace, state="complete", timeout_ms=300000):
     """Send WaitUntil IPC — blocks server-side until state reached or timeout."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -891,6 +922,8 @@ def ipc_wait_until(sock_path, workspace, state="idle", timeout_ms=300000):
         resp_data = resp.get("data", resp)
         if resp_data.get("reached", False):
             return "complete"
+        if resp_data.get("terminal", False):
+            return "dead"
         return "timeout"
     except Exception:
         return "error"
@@ -975,22 +1008,29 @@ def main():
 
         # Create session
         try:
-            ipc_create(sock_path, name, cli, cwd)
-            sessions_created.append(name)
+            resp = ipc_create(sock_path, name, cli, cwd)
         except Exception as e:
             reports.append({"name": name, "status": "create_failed", "cli": cli, "error": str(e)})
             continue
+        resp_data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        if resp.get("status") in ("Error", "Unsupported") or resp_data.get("ready") is False:
+            reports.append({"name": name, "status": "create_failed", "cli": cli,
+                            "error": resp.get("message") or json.dumps(resp)})
+            continue
+        sessions_created.append(name)
 
         # CreateWorkspace IPC waits for shell ready internally — no sleep needed
 
-        # Inject task description
+        # Inject task description + completion contract (sub-session calls `aterm done`)
         try:
-            ipc_inject(sock_path, name, desc)
+            ipc_inject(sock_path, name, desc + "\n\nWhen this task is finished, run: aterm done \x27<one-line result>\x27")
         except Exception as e:
             reports.append({"name": name, "status": "inject_failed", "cli": cli, "error": str(e)})
             continue
 
-    # Poll all sessions for completion
+    # Wait for all sessions to complete under one shared deadline
+    timeout_ms = 300000
+    deadline = time.monotonic() + timeout_ms / 1000
     for name in sessions_created:
         # Skip sessions that already failed
         if any(r["name"] == name for r in reports):
@@ -1001,13 +1041,24 @@ def main():
                 desc = st.get("description", st) if isinstance(st, dict) else str(st)
                 cli = select_cli(desc)
                 break
-        status = ipc_wait_until(sock_path, name, "idle", 300000)
-        reports.append({"name": name, "status": status, "cli": cli})
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        status = ipc_wait_until(sock_path, name, "complete", remaining_ms)
+        entry = {"name": name, "status": status, "cli": cli}
+        if status == "complete":
+            try:
+                entry["report"] = (ipc_status(sock_path, name).get("data") or {}).get("report")
+            except Exception:
+                entry["report"] = None
+        elif status == "timeout":
+            entry["status"] = "left_running"  # unfinished work is kept, not killed
+        reports.append(entry)
 
-    # Kill all sub-sessions
-    for name in sessions_created:
+    # Close only completed sub-sessions; timed-out ones stay running
+    for r in reports:
+        if r["status"] != "complete":
+            continue
         try:
-            ipc_kill(sock_path, name)
+            ipc_kill(sock_path, r["name"])
         except Exception:
             pass
 
@@ -1015,7 +1066,7 @@ def main():
     statuses = [r["status"] for r in reports]
     if all(s == "complete" for s in statuses):
         overall = "all_complete"
-    elif all(s == "timeout" for s in statuses):
+    elif all(s in ("timeout", "left_running") for s in statuses):
         overall = "all_timeout"
     elif any(s == "complete" for s in statuses):
         overall = "partial_complete"

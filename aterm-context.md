@@ -38,6 +38,7 @@ aterm 전용 문서. 위임 시 해당 프로젝트 교훈을 **반드시** inje
 | 태스크 완료 | `aterm tasks done <id>` |
 | 레슨 보여줘 | `aterm lessons` |
 | 레슨 추가 | `aterm lessons add '<내용>'` |
+| 작업 완료 신호 (dispatch 서브세션) | `aterm done '<결과>'` |
 | 사용법 | `aterm help` |
 
 ### 외부 세션 (다른 터미널/머신)
@@ -56,7 +57,7 @@ aterm 전용 문서. 위임 시 해당 프로젝트 교훈을 **반드시** inje
 | 태스크 자동 분배 | `aterm dispatch <task-id>` |
 | 자유 텍스트로 분배 | `aterm dispatch --plan '설명'` |
 
-**dispatch 흐름**: 태스크 분해 → CLI 자동 선택 (implement→codex, architect→claude, research→gemini) → 서브세션 생성 → inject → 완료 대기 → 결과 수집 → 정리
+**dispatch 흐름**: 태스크 분해 → CLI 자동 선택 (implement→codex, architect→claude, research→gemini) → 서브세션 생성 → inject → 완료 대기 → 결과 수집 → 정리. 완료 감지 = 서브세션이 `aterm done '<결과>'` 호출 (타임아웃 시 세션 유지)
 
 복잡한 태스크(3+ 파일, 멀티 컴포넌트)는 `aterm dispatch`. 단일 파일 태스크는 subagent 추천.
 
