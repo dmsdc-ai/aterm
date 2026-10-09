@@ -6,6 +6,30 @@ All notable changes to **aterm** are documented in this file.
 
 ## Unreleased
 
+### Removed — dead code and build cruft (task #1209 audit, wave 1)
+- R1: `aterm-core/tests/polling_event_tests.rs` (18 tests that never imported `aterm_core`).
+- R2/R3: the undrained in-process `EventBus` and its six never-broadcast `AtermEvent` variants.
+- R4/R10: 11 FFI exports with no Swift caller, their `aterm-bridge.h` lines, and write-only `AtermCore` fields.
+- R5/R6: uncalled `PtyManager`/`SessionStore`/`InjectQueue` methods and the per-workspace `OutputBuffer`.
+- R8/R9: IPC actions with no client (`ListLessons`, `DetachWorkspace`, `RequestSnapshot`, `WaitUntil.since_seq`) and the never-checked IPC token.
+- R11: the cbindgen build step (`aterm-core/build.rs`, `cbindgen.toml`); the header was never read. `Cargo.lock` drops cbindgen and the 29 crates only it pulled. The unused `libc` dependency of `aterm-core` is gone too. `lib.rs` `ffi_tests::bridge_header_matches_exports` now guards header drift.
+- R12: the root `build.rs`. Its `ATERM_GIT_HASH`/build-number env vars had no reader.
+- R13: dead Swift helpers (`TeleptyBusClient` workspace cache, `restartSystemWorkspace`, `statusIcon`, `directChildProcessIDs`, `processExists`, `schemeName`, `withTraits`).
+- R15: `prototype/`, `public/`, `bin/log-monitor.sh`, and the Tauri/build-number/cbindgen `.gitignore` entries.
+- R16: three superseded design docs (wgpu/iced phase-1 plan, iced-removal spec, P0 messenger IPC spec).
+
+### Fixed — (task #1209 audit, wave 1)
+- I1: `aterm <subcommand>` from the npm launcher runs the bundled CLI instead of opening the app.
+- I2: `CreateWorkspace` rejects a name that already exists.
+- I4: IPC subscribers are no longer dropped after 30 s of quiet; closed peers are still evicted after 3 failed writes.
+- I6: the unbounded `EventBus.pending_events` growth (removed with R2).
+- I7: telepty stale cleanup no longer deletes another live aterm instance's sessions.
+- I9: three baseline-red tests are fixed, and CI now runs `ATERM_TELEPTY_PORT=9 cargo test --workspace --locked`.
+- I11: IPC peer auth fails closed on platforms without a peer-credential check.
+- I12: `AGENTS.md`, `aterm-structure-map.md` and the test inventory (`state/tests.md`, verification families) match the code. The app bundle version now comes from `npm/aterm/package.json`.
+- I13: the workspace declares `resolver = "2"`, so the resolver warning is gone.
+- B2 (`bin/aterm`): an `Unsupported` IPC reply is now an error (stderr JSON, exit 2) instead of a false `ok`; this includes `aterm log`/`export` until `ReadScreenText` is implemented. `dispatch` sub-session names carry a run id (`dispatch-<task>-<pid>-sub<i>`) and inject-failed sub-sessions are closed. `tasks add`/`tasks done`/`lessons add` write through a temp file + rename (the board files become mode 0600). The help drops the hard-coded ecosystem block and lists the emitted subscribe event types.
+
 ### Changed — aterm authenticates to the telepty daemon (task #825)
 - All telepty daemon calls now send the daemon's auth token as an `x-telepty-token`
   header: the Rust bridge's session list, register and deregister calls, the Swift

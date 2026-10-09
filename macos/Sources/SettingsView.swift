@@ -157,21 +157,6 @@ class AtermSettings: ObservableObject {
         }
     }
 
-    static func schemeName(_ index: UInt8) -> String {
-        switch index {
-        case 0: return "Dark"
-        case 1: return "Light"
-        case 2: return "Solarized Dark"
-        case 3: return "Solarized Light"
-        case 4: return "Monokai"
-        case 5: return "Dracula"
-        case 6: return "Nord"
-        case 7: return "Tokyo Night"
-        case 8: return "Default"
-        default: return "Default"
-        }
-    }
-
     private static var bootstrapPath: String { dataRoot + "/config/aterm.json" }
 
     private var configPath: String {

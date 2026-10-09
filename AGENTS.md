@@ -5,25 +5,44 @@ aigentry 에코시스템의 전용 터미널. 5-platform native.
 ## Architecture
 
 ```
-aterm-core (Rust cdylib + C-FFI)
-  ├── wgpu (GPU rendering — Metal/Vulkan/DX12)
-  │     └── glyphon (text shaping/rasterizing)
-  ├── portable-pty (PTY process management)
+aterm-core (Rust cdylib + lib, C-FFI)
   ├── alacritty_terminal (VTE parser + Term state)
-  └── cbindgen → aterm_core.h
+  ├── portable-pty (PTY process management)
+  ├── unicode-normalization (PTY reader NFC)
+  ├── aterm-session + aterm-ipc (IPC contract + server)
+  ├── tsnet (embedded Tailscale node; Go 1.20.14 at build time)
+  └── C header: hand-written macos/aterm-bridge.h
+        (drift test: lib.rs ffi_tests::bridge_header_matches_exports)
+
+aterm-session (Rust lib) — IPC wire contract: SessionAction / ActionResponse / AtermEvent, PlatformHost
+aterm-ipc     (Rust lib) — Unix-socket NDJSON server ($ATERM_IPC_SOCKET), peer-UID auth
 
 macOS Shell (Swift/AppKit)
+  ├── Metal renderer: MetalRenderer + Shaders.metal, GlyphAtlas (Core Text)
+  │     └── cells from aterm_core_get_render_data (Rust does no rendering)
   ├── NSView + CAMetalLayer + NSTextInputClient (한글 IME)
-  ├── NSSplitView (사이드바 + 터미널)
+  ├── 사이드바 + 터미널 컨테이너 (AppDelegate)
   └── .app bundle 필수 (bare binary는 IME 미동작)
 ```
+
+No wgpu, glyphon, renderer.rs or cbindgen: rendering moved to Swift Metal, and the header is maintained by hand.
 
 ## Directory
 
 ```
-aterm-core/src/     — Rust: lib.rs, renderer.rs, terminal.rs, pty.rs, inject.rs
-macos/Sources/      — Swift: AppDelegate, TerminalView, SessionSidebarView, TeleptyBusClient
-Makefile            — make run (.app bundle)
+Cargo.toml           — workspace only (aterm-core, aterm-session, aterm-ipc), resolver 2; no root crate
+aterm-core/src/      — Rust: lib.rs (C-FFI), app.rs (IPC action routing), pty.rs, terminal.rs, inject.rs,
+                       session.rs, telepty_bridge.rs, tailscale.rs, mailbox/
+aterm-core/tests/    — cli_dispatch.rs (bin/aterm), hermetic_guard.rs, telepty_no_restart.rs
+aterm-session/src/   — action.rs, host.rs, types.rs
+aterm-ipc/src/       — server.rs, auth.rs
+macos/aterm-bridge.h — C header imported by Swift
+macos/Sources/       — Swift: AppDelegate, TerminalView, MetalRenderer, GlyphAtlas, Shaders.metal,
+                       SessionSidebarView, SettingsView, OnboardingView, Orchestrator*, Telepty*
+bin/aterm            — CLI (bash + python3), bundled as aterm.app/Contents/Resources/bin/aterm
+npm/                 — aterm launcher package + aterm-darwin-arm64 native package
+state/               — tests.md (test inventory) + verification-families/ (runner.sh)
+Makefile             — make run (.app bundle)
 ```
 
 ## Build
@@ -49,8 +68,9 @@ cd npm/aterm && npm publish --access public
 
 ## CI/CD
 
-- `.github/workflows/test-install.yml` — push/PR 시 자동 실행
-- macOS 14 ARM 러너, winit은 git clone (v0.30.13 tag)
+- `.github/workflows/test-install.yml` — push/PR 시 자동 실행 (macos-14 러너)
+- CI = `ATERM_TELEPTY_PORT=9 cargo test --workspace --locked` + npm pack + TTY-emulated `npm install -g` (user layout, `aterm --version` 검증)
+- Go 1.20.14 setup은 tsnet 빌드용
 - 버전은 package.json에서 동적 읽기
 
 ## Role Boundaries (HARD RULE — SAWP)
@@ -174,10 +194,10 @@ aterm dispatch --plan '<description>' # Free-text task → same dispatch flow
    - `architect`, `debug`, `analyze`, `design` → `claude`
    - `research`, `document`, `search`, `summarize` → `gemini`
    - Default → `claude`
-5. **Execute**: For each subtask: `aterm create` → wait 2s → `aterm inject`
-6. **Poll**: 10s intervals, max 300s. Looks for `idle` state in workspace status
+5. **Execute**: For each subtask: `CreateWorkspace` `dispatch-<task>-<run id>-sub<i>` (the run id is the dispatch PID; the call returns once the shell is ready) → `Inject` the task plus an `aterm done` contract
+6. **Wait**: one `WaitUntil state=complete` per sub-session under a shared 300s deadline; the sub-session signals with `aterm done '<result>'`
 7. **Collect**: Gathers status reports from all sub-sessions
-8. **Cleanup**: `aterm kill` for each created session
+8. **Cleanup**: `CloseWorkspace` for `complete` and `inject_failed` sub-sessions; timed-out ones are reported `left_running` and kept
 
 ### Output
 
@@ -185,7 +205,7 @@ aterm dispatch --plan '<description>' # Free-text task → same dispatch flow
 {
   "task_id": 34,
   "subtasks": 3,
-  "sessions_created": ["dispatch-34-sub0", "dispatch-34-sub1", "dispatch-34-sub2"],
+  "sessions_created": ["dispatch-34-4242-sub0", "dispatch-34-4242-sub1", "dispatch-34-4242-sub2"],
   "status": "all_complete",
   "reports": [{"name": "...", "status": "complete", "cli": "..."}, ...]
 }

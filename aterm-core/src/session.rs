@@ -12,7 +12,6 @@ struct SwiftSessionEntry {
     command: Option<String>,
     custom_command: Option<String>,
     cwd: Option<String>,
-    is_active: Option<bool>,
     is_system: Option<bool>,
     resume_command: Option<String>,
 }
@@ -28,8 +27,6 @@ fn save_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
 
     std::fs::rename(&tmp, path)
 }
-
-use crate::pty::{PtyManager, SharedPtyManager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,56 +121,6 @@ impl SessionStore {
             Err(error) => return Err(error.to_string()),
         };
         serde_json::from_str(&contents).map_err(|error| error.to_string())
-    }
-
-    pub fn save(&self, manager: &PtyManager) -> Result<(), String> {
-        let entries = manager.session_entries();
-        let data = SessionData { sessions: entries };
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        let json = serde_json::to_string_pretty(&data).map_err(|error| error.to_string())?;
-        save_atomic(&self.path, json.as_bytes()).map_err(|error| error.to_string())
-    }
-
-    pub fn save_shared(&self, manager: &SharedPtyManager) -> Result<(), String> {
-        let guard = manager.lock().map_err(|error| error.to_string())?;
-        self.save(&*guard)
-    }
-
-    pub fn restore_into(&self, manager: &SharedPtyManager) -> Result<(), String> {
-        let data = self.load()?;
-
-        for entry in data.sessions {
-            let entry_id = entry.id.clone();
-            let mut guard = manager.lock().map_err(|error| error.to_string())?;
-            match guard.restore_session_entry(entry) {
-                Ok(_) => {
-                    // Emit WorkspaceRestored event via global app EventBus
-                    if let Ok(app) = crate::global_app().lock() {
-                        app.event_bus().publish(
-                            aterm_session::action::AtermEvent::WorkspaceRestored {
-                                id: entry_id,
-                            },
-                        );
-                    }
-                }
-                Err(error) => {
-                    log_stderr!("[aterm] restore_sessions skipped entry: {}", error);
-                    // Emit WorkspaceCreationFailed event
-                    if let Ok(app) = crate::global_app().lock() {
-                        app.event_bus().publish(
-                            aterm_session::action::AtermEvent::WorkspaceCreationFailed {
-                                id: entry_id,
-                                reason: error.clone(),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -306,7 +253,7 @@ fn do_global_save() {
 }
 
 /// Mark sessions as dirty and trigger a debounced save.
-/// Called internally or via `aterm_trigger_save()` FFI.
+/// Called internally.
 pub fn trigger_save() {
     let coord = save_coordinator();
     coord.dirty.store(true, Ordering::Release);

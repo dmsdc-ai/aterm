@@ -1,21 +1,20 @@
 schema_version: 1
 id: VF-ATERM-EVENTBUS
-feature: typed events and task queue snapshot updates
+feature: event-driven state waits and completion signalling
 intent: >
-  Verify event-driven waiting semantics and task queue snapshot refreshes without timer-based polling.
-profile: integration
+  Verify event-driven waiting semantics (Condvar wake on terminal state, timeout) and MarkComplete state/report handling without timer-based polling.
+profile: unit
 package: aterm-core
-target: polling_event_tests
 source_files:
-  - aterm-core/tests/polling_event_tests.rs
+  - aterm-core/src/app.rs
 inventory_source: state/tests.md
 selectors:
-  - "wait_until_"
-  - "task_queue_"
+  - "app::tests::wait_for_state_"
+  - "app::tests::mark_complete_"
 tests:
-  - task_queue_file_change_detected
-  - task_queue_reload_reads_updated_content
-  - wait_until_blocks_until_workspace_reaches_target_state
-  - wait_until_returns_immediately_if_already_in_target_state
-  - wait_until_status_change_notifies_all_waiters
-  - wait_until_timeout_returns_after_specified_duration
+  - wait_for_state_returns_early_on_terminal_state
+  - wait_for_state_times_out
+  - mark_complete_dead_workspace_errors
+  - mark_complete_sets_state_and_report
+  - mark_complete_unknown_workspace_errors
+  - mark_complete_wakes_condvar_waiter

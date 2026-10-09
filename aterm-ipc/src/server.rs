@@ -71,7 +71,7 @@ impl IpcServer {
     }
 
     /// Broadcast a workspace event JSON to all matching subscribers.
-    /// Non-blocking writes; drops subscribers after 3 consecutive failures or 30s idle.
+    /// Non-blocking writes; drops subscribers after 3 consecutive failures.
     /// `snapshot_fn` is called lazily only when a subscriber has a sequence gap.
     pub fn broadcast(&self, event_json: &str, snapshot_fn: &dyn Fn() -> String) {
         let parsed = serde_json::from_str::<serde_json::Value>(event_json).ok();
@@ -93,12 +93,6 @@ impl IpcServer {
         let mut cached_snapshot: Option<String> = None;
 
         subs.retain_mut(|sub| {
-            // Drop ghost subscribers idle >30s
-            if now.duration_since(sub.last_write).as_secs() > 30 {
-                eprintln!("[aterm-ipc] dropping idle subscriber (>30s)");
-                return false;
-            }
-
             // Filter: skip events the subscriber didn't ask for
             if !sub.events.is_empty() {
                 if let Some(ref etype) = event_type {
@@ -247,6 +241,93 @@ fn handle_connection(
                     break;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Build a server around one subscriber without binding a socket.
+    /// The path does not exist, so `Drop` removes nothing.
+    fn server_with(name: &str, stream: UnixStream, events: Vec<String>) -> IpcServer {
+        let socket_path = std::env::temp_dir()
+            .join(format!("aterm-ipc-test-{}-{}.sock", std::process::id(), name))
+            .to_string_lossy()
+            .into_owned();
+        IpcServer {
+            socket_path,
+            subscribers: Arc::new(Mutex::new(vec![Subscriber {
+                stream,
+                events,
+                failed_writes: 0,
+                last_write: Instant::now(),
+                last_seq: 0,
+            }])),
+        }
+    }
+
+    fn age_last_write(server: &IpcServer) {
+        server.subscribers.lock().unwrap()[0].last_write =
+            Instant::now().checked_sub(Duration::from_secs(31)).unwrap();
+    }
+
+    fn subscriber_count(server: &IpcServer) -> usize {
+        server.subscribers.lock().unwrap().len()
+    }
+
+    /// Socket pair whose peer read times out after 1 s. The timeout is set
+    /// up front: macOS rejects it (EINVAL) once the other end is closed.
+    fn pair_with_1s_read() -> (UnixStream, UnixStream) {
+        let (sub, peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        (sub, peer)
+    }
+
+    fn read_line(peer: &UnixStream) -> String {
+        let mut line = String::new();
+        BufReader::new(peer).read_line(&mut line).unwrap();
+        line
+    }
+
+    #[test]
+    fn quiet_subscriber_still_receives_event() {
+        let (sub, peer) = pair_with_1s_read();
+        let server = server_with("quiet", sub, Vec::new());
+        age_last_write(&server);
+
+        server.broadcast(r#"{"type":"StatusChanged","seq":0}"#, &|| String::new());
+
+        let line = read_line(&peer);
+        assert!(line.contains("StatusChanged"), "got {:?}", line);
+        assert_eq!(subscriber_count(&server), 1);
+    }
+
+    #[test]
+    fn filtered_subscriber_survives_quiet_period() {
+        let (sub, peer) = pair_with_1s_read();
+        let server = server_with("filtered", sub, vec!["ShellReady".to_string()]);
+
+        server.broadcast(r#"{"type":"StatusChanged","seq":0}"#, &|| String::new());
+        age_last_write(&server);
+        server.broadcast(r#"{"type":"ShellReady","seq":0}"#, &|| String::new());
+
+        let line = read_line(&peer);
+        assert!(line.contains("ShellReady"), "got {:?}", line);
+        assert_eq!(subscriber_count(&server), 1);
+    }
+
+    #[test]
+    fn closed_peer_evicted_after_three_failures() {
+        let (sub, peer) = UnixStream::pair().unwrap();
+        let server = server_with("closed", sub, Vec::new());
+        drop(peer);
+
+        for expected in [1, 1, 0] {
+            server.broadcast(r#"{"type":"StatusChanged","seq":0}"#, &|| String::new());
+            assert_eq!(subscriber_count(&server), expected);
         }
     }
 }

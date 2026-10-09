@@ -14,6 +14,8 @@ selectors:
 tests:
   - detect_osc133_all_marks
   - detect_osc133_bel_terminated
+  - detect_osc133_d_with_exit_status
+  - detect_osc133_d_without_exit_status
   - detect_osc133_no_marks_in_plain_text
   - detect_osc133_st_terminated
   - detect_osc133_unterminated_ignored

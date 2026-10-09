@@ -1,14 +1,15 @@
 schema_version: 1
 name: integration
-description: Execute Rust integration-test families from polling_event_tests.rs.
+description: Execute Rust families that span the aterm-core lib harness and an integration-test target (cli_dispatch.rs).
 command:
   package: aterm-core
-  target: polling_event_tests
+  target: cli_dispatch
   template:
     - cargo
     - test
     - -p
     - "%{package}"
+    - --lib
     - --test
     - "%{target}"
     - --

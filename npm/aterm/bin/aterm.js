@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   ensureUserLayout,
@@ -21,6 +21,17 @@ const packageJson = JSON.parse(
 if (process.argv.includes('--version') || process.argv.includes('-v')) {
   console.log(packageJson.version);
   process.exit(0);
+}
+
+const sub = process.argv[2];
+if (sub && !sub.startsWith('-')) {
+  const cli = path.join(appRoot, 'Contents', 'Resources', 'bin', 'aterm');
+  if (!fs.existsSync(cli)) {
+    console.error('[aterm] bundled CLI missing: ' + cli);
+    process.exit(1);
+  }
+  const r = spawnSync(cli, process.argv.slice(2), { stdio: 'inherit' });
+  process.exit(r.status ?? 1);
 }
 
 ensureUserLayout({ version: packageJson.version });

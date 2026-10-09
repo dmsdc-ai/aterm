@@ -2,18 +2,15 @@ schema_version: 1
 id: VF-ATERM-IPC
 feature: IPC server and subscriber fanout
 intent: >
-  Verify IPC broadcast delivery, status propagation, and subscriber cleanup across polling_event_tests integration paths.
-profile: integration
-package: aterm-core
-target: polling_event_tests
+  Verify IPC subscriber delivery across quiet periods and filters, and eviction of closed peers, in the aterm-ipc server.
+profile: unit
+package: aterm-ipc
 source_files:
-  - aterm-core/tests/polling_event_tests.rs
+  - aterm-ipc/src/server.rs
 inventory_source: state/tests.md
 selectors:
-  - "ipc_event_"
-  - "ipc_subscriber_"
+  - "server::tests::"
 tests:
-  - ipc_event_broadcast_closed_event
-  - ipc_event_broadcast_status_changed
-  - ipc_event_broadcast_to_subscribers
-  - ipc_subscriber_disconnect_detected_on_write_failure
+  - closed_peer_evicted_after_three_failures
+  - filtered_subscriber_survives_quiet_period
+  - quiet_subscriber_still_receives_event

@@ -40,9 +40,6 @@ pub enum SessionAction {
     ListTasks {
         workspace: String,
     },
-    ListLessons {
-        workspace: String,
-    },
     RenameWorkspace {
         #[serde(alias = "workspace")]
         old_name: String,
@@ -60,9 +57,6 @@ pub enum SessionAction {
         #[serde(alias = "sessionID")]
         session_id: String,
     },
-    DetachWorkspace {
-        workspace: String,
-    },
     ReloadSettings,
     Subscribe {
         events: Vec<String>,
@@ -72,8 +66,6 @@ pub enum SessionAction {
         state: String,
         #[serde(default)]
         timeout_ms: Option<u64>,
-        #[serde(default)]
-        since_seq: Option<u64>,
     },
     /// Sub-session signals that its task is finished (#76). Sets state "complete".
     MarkComplete {
@@ -81,8 +73,6 @@ pub enum SessionAction {
         #[serde(default)]
         report: Option<String>,
     },
-    /// Client requests a fresh workspace snapshot (e.g. after detecting a seq gap).
-    RequestSnapshot,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -116,11 +106,5 @@ impl ActionResponse {
 pub enum AtermEvent {
     WorkspaceCreated { id: String, cli: String, cwd: String },
     WorkspaceClosed { id: String },
-    WorkspaceBatchClosed { ids: Vec<String> },
-    WorkspaceCreationFailed { id: String, reason: String },
-    WorkspaceRestored { id: String },
-    WorkspaceStatusChanged { id: String, status: String },
     ShellReady { id: String },
-    InjectDelivered { workspace: String, from: String },
-    InjectQueued { workspace: String, pending: usize },
 }

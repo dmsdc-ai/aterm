@@ -59,7 +59,7 @@ pub mod terminal;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::pty::{PtyManager, PtyOutputSignal};
@@ -144,9 +144,6 @@ fn global_event_queue() -> &'static Mutex<Vec<aterm_session::types::WorkspaceEve
     EVENT_QUEUE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Callback type for dirty notifications
-type DirtyCallback = unsafe extern "C" fn(*mut c_void);
-
 #[derive(serde::Serialize)]
 struct CliDetectionStatus {
     claude: bool,
@@ -161,13 +158,8 @@ pub struct AtermCore {
     pty_manager: PtyManager,
     pty_signal: PtyOutputSignal,
     workspace_id: Option<String>,
-    dirty: Arc<AtomicBool>,
-    dirty_callback: Option<DirtyCallback>,
-    dirty_userdata: *mut c_void,
     /// Theme mode for no-wgpu builds: 0 = dark, 1 = light.
     theme_mode_raw: u8,
-    /// IME preedit text for inline rendering (#206). Empty = no preedit.
-    preedit_text: String,
     /// PTY SIGWINCH coalescing (Fix 6): last grid cols/rows sent to PTY.
     /// Skips redundant ioctl(TIOCSWINSZ) when pixel size changes but
     /// grid dimensions stay the same.
@@ -175,18 +167,10 @@ pub struct AtermCore {
     last_pty_rows: u16,
     /// Last display_offset for scroll-change detection (dirty tracking #231).
     last_display_offset: usize,
-    /// Geometry revision counter (Fix 7): cheap monotonic counter for
-    /// stale-frame detection without expensive dimension comparison.
-    geometry_revision: AtomicU64,
 }
-
-// SAFETY: The raw pointer dirty_userdata is only used from the main thread callback
-unsafe impl Send for AtermCore {}
 
 // --- No-wgpu metric helpers (match renderer.rs defaults) ---
 
-const NO_WGPU_FONT_SIZE: f32 = 18.0;
-const NO_WGPU_LINE_HEIGHT: f32 = 21.0;
 const NO_WGPU_CELL_WIDTH: f32 = 10.8; // font_size * 0.6
 const NO_WGPU_CELL_HEIGHT: f32 = 21.0; // ~Ghostty default: ascent + descent for 18px font
 
@@ -232,15 +216,10 @@ impl AtermCore {
             pty_manager,
             pty_signal,
             workspace_id: None,
-            dirty: Arc::new(AtomicBool::new(false)),
-            dirty_callback: None,
-            dirty_userdata: std::ptr::null_mut(),
             theme_mode_raw: 0, // 0 = dark
-            preedit_text: String::new(),
             last_pty_cols: 0,
             last_pty_rows: 0,
             last_display_offset: 0,
-            geometry_revision: AtomicU64::new(0),
         }
     }
 
@@ -381,8 +360,6 @@ impl AtermCore {
         if width == 0 || height == 0 {
             return;
         }
-        self.geometry_revision.fetch_add(1, Ordering::Relaxed);
-
         let (cols, rows) = no_wgpu_grid_size(width as f32, height as f32);
         debug_log!("[no-wgpu resize] {}x{} px → {}x{} grid, terminal={}", width, height, cols, rows, self.terminal.is_some());
         if let Some(ref mut terminal) = self.terminal {
@@ -395,7 +372,6 @@ impl AtermCore {
                 let _ = self.pty_manager.resize(id, cols, rows);
             }
         }
-        self.dirty.store(true, Ordering::Relaxed);
     }
 
     fn selection_start(&mut self, col: usize, line: i32, side: u8) {
@@ -484,7 +460,6 @@ impl AtermCore {
             sel.update(end, alacritty_terminal::index::Side::Right);
             term.selection = Some(sel);
         }
-        self.dirty.store(true, Ordering::Relaxed);
     }
 }
 
@@ -630,15 +605,6 @@ pub unsafe extern "C" fn aterm_core_named_key(core: *mut AtermCore, key_code: u3
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_render(_core: *mut AtermCore) {}
 
-/// Try to render if dirty. Returns 1 if rendered, 0 if skipped.
-/// Thread-safe — used by CVDisplayLink and PTY dirty callback for immediate
-/// render without CVDisplayLink latency (Ghostty/Alacritty pattern, Fix #153).
-/// No-op stub when wgpu feature is disabled.
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_try_render(_core: *mut AtermCore) -> i32 {
-    0
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_resize(core: *mut AtermCore, width: u32, height: u32) {
     if core.is_null() {
@@ -659,27 +625,6 @@ pub unsafe extern "C" fn aterm_core_grid_size(
     let (cols, rows) = no_wgpu_grid_size(width, height);
     if !out_cols.is_null() { *out_cols = cols; }
     if !out_rows.is_null() { *out_rows = rows; }
-}
-
-/// Set IME preedit text for inline rendering (#206). Empty string clears.
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_set_preedit(
-    core: *mut AtermCore,
-    text: *const u8,
-    len: u32,
-) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!({
-        let s = if text.is_null() || len == 0 {
-            String::new()
-        } else {
-            let slice = std::slice::from_raw_parts(text, len as usize);
-            String::from_utf8_lossy(slice).into_owned()
-        };
-        (*core).preedit_text = s;
-    });
 }
 
 /// Get cursor position in backing pixels (for IME popup placement, #206).
@@ -737,14 +682,6 @@ pub unsafe extern "C" fn aterm_core_grid_padding(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn aterm_core_take_dirty(core: *mut AtermCore) -> i32 {
-    if core.is_null() {
-        return 0;
-    }
-    ffi_catch!(0, (*core).pty_signal.take_dirty() as i32)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn aterm_core_set_dirty_callback(
     core: *mut AtermCore,
     callback: Option<unsafe extern "C" fn(*mut c_void)>,
@@ -755,9 +692,6 @@ pub unsafe extern "C" fn aterm_core_set_dirty_callback(
     }
     ffi_catch!({
         let c = &mut *core;
-        c.dirty_callback = callback;
-        c.dirty_userdata = userdata;
-
         if let Some(cb) = callback {
             let ud = userdata as usize; // Convert to usize for Send
             c.pty_signal.set_wake_callback(move || unsafe {
@@ -1367,13 +1301,6 @@ pub unsafe extern "C" fn aterm_core_set_cell_width(_core: *mut AtermCore, width:
     NO_WGPU_CELL_WIDTH_ATOMIC.store(clamped.to_bits(), Ordering::Relaxed);
 }
 
-/// Deprecated compatibility no-op. Background blending has been removed and
-/// terminal cell colors are now rendered exactly as provided by the terminal.
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_set_bg_blend_threshold(_core: *mut AtermCore, _threshold: f32) {
-    ffi_catch!({});
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_scroll(core: *mut AtermCore, delta: i32) {
     if core.is_null() {
@@ -1615,40 +1542,6 @@ pub unsafe extern "C" fn aterm_core_selection_ranges(
     });
 }
 
-/// Check if the visible terminal screen contains a text pattern. Returns 1 if found, 0 otherwise.
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_screen_contains(
-    core: *const AtermCore,
-    pattern: *const c_char,
-) -> i32 {
-    if core.is_null() || pattern.is_null() {
-        return 0;
-    }
-    ffi_catch!(0, {
-        let pattern_str = CStr::from_ptr(pattern).to_string_lossy();
-        match &(*core).terminal {
-            Some(terminal) => terminal.screen_contains(&pattern_str) as i32,
-            None => 0,
-        }
-    })
-}
-
-/// Returns JSON string of internal workspaces. Caller must free with aterm_core_free_string.
-#[no_mangle]
-pub unsafe extern "C" fn aterm_core_list_workspaces(core: *const AtermCore) -> *mut c_char {
-    if core.is_null() {
-        return std::ptr::null_mut();
-    }
-    ffi_catch!(std::ptr::null_mut(), {
-        let workspaces = (*core).pty_manager.list_workspaces();
-        let json = serde_json::to_string(&workspaces).unwrap_or_else(|_| "[]".to_string());
-        match std::ffi::CString::new(json) {
-            Ok(cs) => cs.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        }
-    })
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn aterm_core_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
@@ -1791,40 +1684,6 @@ pub unsafe extern "C" fn aterm_session_free(entry: SessionEntryFFI) {
         free_ptr(entry.custom_command);
         free_ptr(entry.resume_command);
     });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn aterm_sessions_save(core: *mut AtermCore) {
-    if core.is_null() {
-        return;
-    }
-    ffi_catch!({
-        let store = SessionStore::with_path(sessions_path());
-        let _ = store.save(&(*core).pty_manager);
-    });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn aterm_sessions_restore(core: *mut AtermCore) -> u32 {
-    if core.is_null() {
-        return 0;
-    }
-    ffi_catch!(0, {
-        let core = &mut *core;
-        let store = SessionStore::with_path(sessions_path());
-        match store.load() {
-            Ok(data) => {
-                let count = data.sessions.len() as u32;
-                for entry in data.sessions {
-                    if let Err(e) = core.pty_manager.restore_session_entry(entry) {
-                        log_stderr!("[aterm] restore session skipped: {e}");
-                    }
-                }
-                count
-            }
-            Err(_) => 0,
-        }
-    })
 }
 
 // -- IPC Phase 1: AtermApp singleton + C ABI --
@@ -2031,18 +1890,6 @@ pub extern "C" fn aterm_ipc_socket_path() -> *mut c_char {
     })
 }
 
-/// Get the IPC auth token. Caller must free with aterm_core_free_string.
-#[no_mangle]
-pub extern "C" fn aterm_ipc_token() -> *mut c_char {
-    ffi_catch!(std::ptr::null_mut(), {
-        let token = global_app()
-            .lock()
-            .map(|app| app.token().to_string())
-            .unwrap_or_default();
-        ipc_to_c_string(&token)
-    })
-}
-
 fn ipc_to_c_string(s: &str) -> *mut c_char {
     match CString::new(s) {
         Ok(cs) => cs.into_raw(),
@@ -2051,7 +1898,7 @@ fn ipc_to_c_string(s: &str) -> *mut c_char {
 }
 
 // ---------------------------------------------------------------------------
-// Session lifecycle FFI — explicit close, batch close, trigger save
+// Session lifecycle FFI — explicit close
 // ---------------------------------------------------------------------------
 
 /// Explicit single workspace close — deterministic, not ARC-dependent.
@@ -2078,81 +1925,6 @@ pub unsafe extern "C" fn aterm_workspace_close(workspace_id: *const c_char) {
         // Trigger debounced save after close
         crate::session::trigger_save();
         log_stderr!("[aterm-ffi] workspace_close: {}", id);
-    });
-}
-
-/// Batch close multiple workspaces. More efficient than individual close calls.
-/// After all workspaces are closed, emits a single WorkspaceBatchClosed event
-/// and triggers a debounced save.
-#[no_mangle]
-pub unsafe extern "C" fn aterm_batch_close(
-    workspace_ids: *const *const c_char,
-    count: u32,
-) {
-    if workspace_ids.is_null() || count == 0 {
-        return;
-    }
-    ffi_catch!({
-        // Convert C strings to Rust strings
-        let ids: Vec<String> = (0..count as usize)
-            .filter_map(|i| {
-                let ptr = *workspace_ids.add(i);
-                if ptr.is_null() {
-                    None
-                } else {
-                    Some(CStr::from_ptr(ptr).to_string_lossy().to_string())
-                }
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if ids.is_empty() {
-            return;
-        }
-
-        let closed_ids: Vec<String> = {
-            let mut app = match global_app().lock() {
-                Ok(app) => app,
-                Err(_) => return,
-            };
-
-            let mut closed = Vec::with_capacity(ids.len());
-            for id in &ids {
-                app.dispatch(aterm_session::action::SessionAction::CloseWorkspace {
-                    workspace: id.clone(),
-                });
-                closed.push(id.clone());
-            }
-            closed
-        };
-
-        // Emit batch event via EventBus
-        if !closed_ids.is_empty() {
-            if let Ok(app) = global_app().lock() {
-                app.event_bus().publish(
-                    aterm_session::action::AtermEvent::WorkspaceBatchClosed {
-                        ids: closed_ids.clone(),
-                    },
-                );
-            }
-        }
-
-        // Trigger debounced save after batch
-        crate::session::trigger_save();
-        log_stderr!(
-            "[aterm-ffi] batch_close: {} workspaces closed",
-            closed_ids.len()
-        );
-    });
-}
-
-/// Hint Rust to save sessions if debounce allows.
-/// Marks the session store as dirty and starts a 500ms debounce timer.
-/// Actual save happens after 500ms of quiet (no new triggers).
-#[no_mangle]
-pub extern "C" fn aterm_trigger_save() {
-    ffi_catch!({
-        crate::session::trigger_save();
     });
 }
 
@@ -2248,6 +2020,24 @@ mod ffi_tests {
         }
     }
 
+    // render/font/IME FFI: off-limits per aterm-context.md; guard them in a render-scoped task with evidence
+    const PANIC_GUARD_EXEMPT: &[&str] = &[
+        "aterm_core_suspend_gpu",
+        "aterm_core_render",
+        "aterm_core_grid_size",
+        "aterm_core_cursor_position",
+        "aterm_core_cell_size",
+        "aterm_core_grid_padding",
+        "aterm_core_set_color_scheme",
+        "aterm_core_set_preedit_active",
+        "aterm_core_set_default_colors",
+        "aterm_core_scheme_fg_color",
+        "aterm_core_scheme_bg_color",
+        "aterm_core_set_font_size",
+        "aterm_core_set_line_height",
+        "aterm_core_set_cell_width",
+    ];
+
     #[test]
     fn all_ffi_entry_points_wrapped_in_catch_unwind() {
         let source = include_str!("lib.rs");
@@ -2258,8 +2048,20 @@ mod ffi_tests {
             "expected to discover #[no_mangle] FFI functions"
         );
 
+        let stale: Vec<&str> = PANIC_GUARD_EXEMPT
+            .iter()
+            .copied()
+            .filter(|exempt| !blocks.iter().any(|(name, _)| name == exempt))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "PANIC_GUARD_EXEMPT names no longer exported: {:?}",
+            stale
+        );
+
         let missing: Vec<String> = blocks
             .into_iter()
+            .filter(|(name, _)| !PANIC_GUARD_EXEMPT.contains(&name.as_str()))
             .filter(|(_, block)| !block.contains("ffi_catch!") && !block.contains("catch_unwind"))
             .map(|(name, _)| name)
             .collect();
@@ -2268,6 +2070,52 @@ mod ffi_tests {
             missing.is_empty(),
             "FFI entry points missing panic guard: {:?}",
             missing
+        );
+    }
+
+    /// Names of every `aterm_*(` declaration in the hand-written Swift bridge header.
+    fn header_function_names(header: &str) -> std::collections::BTreeSet<String> {
+        let bytes = header.as_bytes();
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut names = std::collections::BTreeSet::new();
+        let mut start = 0usize;
+        while let Some(offset) = header[start..].find("aterm_") {
+            let begin = start + offset;
+            let mut end = begin;
+            while end < bytes.len() && is_ident(bytes[end]) {
+                end += 1;
+            }
+            start = end;
+            if begin > 0 && is_ident(bytes[begin - 1]) {
+                continue;
+            }
+            let mut next = end;
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if next < bytes.len() && bytes[next] == b'(' {
+                names.insert(header[begin..end].to_string());
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn bridge_header_matches_exports() {
+        let header = header_function_names(include_str!("../../macos/aterm-bridge.h"));
+        let exports: std::collections::BTreeSet<String> = ffi_function_blocks(include_str!("lib.rs"))
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+
+        assert!(!exports.is_empty(), "expected to discover #[no_mangle] FFI functions");
+        let header_only: Vec<&String> = header.difference(&exports).collect();
+        let exports_only: Vec<&String> = exports.difference(&header).collect();
+        assert!(
+            header_only.is_empty() && exports_only.is_empty(),
+            "aterm-bridge.h drifted from lib.rs exports: header-only {:?}, export-only {:?}",
+            header_only,
+            exports_only
         );
     }
 }
