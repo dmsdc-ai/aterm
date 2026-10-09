@@ -1,5 +1,5 @@
 use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -12,16 +12,12 @@ pub type WorkspaceStatus = Arc<(Mutex<String>, Condvar)>;
 
 use crate::inject::{
     close_writer_handle, detect_osc133, has_prompt_pattern, normalize_terminal_text,
-    run_injector_loop, split_at_utf8_boundary, IdleState, InjectMessage, InjectMessageInfo,
+    run_injector_loop, split_at_utf8_boundary, IdleState,
     InjectQueue, InjectSignal, Osc133Mark, SharedInjectQueue,
 };
-use crate::session::{restored_session_args, strip_claude_continue_arg, SessionEntry};
 
-pub const BUFFER_MAX_BYTES: usize = 1024 * 1024;
-pub const DEFAULT_SNAPSHOT_BYTES: usize = 256 * 1024;
 const CODEX_RESUME_BUFFER_BYTES: usize = 8 * 1024;
 
-pub type SharedPtyManager = Arc<Mutex<PtyManager>>;
 pub type PtyByteQueue = Arc<Mutex<Vec<u8>>>;
 
 type WakeCallback = Arc<std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>>;
@@ -93,18 +89,6 @@ impl PtyOutputSignal {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceInfo {
-    pub id: String,
-    pub cwd: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub status: String,
-    pub created_at: String,
-    pub buffer_lines: usize,
-}
-
 struct Workspace {
     id: String,
     cwd: String,
@@ -114,21 +98,14 @@ struct Workspace {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
-    buffer: Arc<Mutex<OutputBuffer>>,
     term_bytes: PtyByteQueue,
-    created_at: String,
     status: WorkspaceStatus,
     inject_queue: SharedInjectQueue,
     inject_signal: InjectSignal,
     idle_state: Arc<Mutex<IdleState>>,
-    auto_restart: bool,
-    restart_count: Arc<AtomicU32>,
-    ephemeral: bool,
     custom_command: Option<String>,
     is_system: bool,
     resume_command: Option<String>,
-    /// Pending OSC 133 marks detected in reader_loop, drained by AdvanceHandle::advance().
-    pending_osc133: crate::terminal::PendingOsc133,
 }
 
 pub struct PtyManager {
@@ -145,83 +122,6 @@ impl Default for PtyManager {
     }
 }
 
-struct OutputBuffer {
-    chunks: VecDeque<String>,
-    bytes: usize,
-}
-
-impl OutputBuffer {
-    fn new() -> Self {
-        Self {
-            chunks: VecDeque::new(),
-            bytes: 0,
-        }
-    }
-
-    fn push(&mut self, chunk: String) {
-        self.bytes += chunk.len();
-        self.chunks.push_back(chunk);
-
-        while self.bytes > BUFFER_MAX_BYTES {
-            let Some(removed) = self.chunks.pop_front() else {
-                self.bytes = 0;
-                break;
-            };
-            self.bytes = self.bytes.saturating_sub(removed.len());
-        }
-    }
-
-    fn clear(&mut self) {
-        self.chunks.clear();
-        self.bytes = 0;
-    }
-
-    fn snapshot(&self, max_bytes: usize) -> String {
-        if self.chunks.is_empty() || max_bytes == 0 {
-            return String::new();
-        }
-
-        if self.bytes <= max_bytes {
-            let mut snapshot = String::with_capacity(self.bytes);
-            for chunk in &self.chunks {
-                snapshot.push_str(chunk);
-            }
-            return snapshot;
-        }
-
-        let mut remaining = max_bytes;
-        let mut selected: Vec<&str> = Vec::new();
-
-        for chunk in self.chunks.iter().rev() {
-            if remaining == 0 {
-                break;
-            }
-
-            if chunk.len() <= remaining {
-                selected.push(chunk.as_str());
-                remaining -= chunk.len();
-                continue;
-            }
-
-            let mut start = chunk.len().saturating_sub(remaining);
-            while start < chunk.len() && !chunk.is_char_boundary(start) {
-                start += 1;
-            }
-            selected.push(&chunk[start..]);
-            remaining = 0;
-        }
-
-        selected.reverse();
-
-        let total_len: usize = selected.iter().map(|chunk| chunk.len()).sum();
-        let mut snapshot = String::with_capacity(total_len);
-        for chunk in selected {
-            snapshot.push_str(chunk);
-        }
-        snapshot
-    }
-}
-
 struct SpawnedWorkspace {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -232,10 +132,6 @@ struct SpawnedWorkspace {
 impl PtyManager {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn shared() -> SharedPtyManager {
-        Arc::new(Mutex::new(Self::new()))
     }
 
     pub fn output_signal(&self) -> PtyOutputSignal {
@@ -285,12 +181,9 @@ impl PtyManager {
         let master: Arc<Mutex<Box<dyn MasterPty + Send>>> = Arc::new(Mutex::new(spawned.master));
         let child: Arc<Mutex<Box<dyn PtyChild + Send + Sync>>> =
             Arc::new(Mutex::new(spawned.child));
-        let buffer: Arc<Mutex<OutputBuffer>> = Arc::new(Mutex::new(OutputBuffer::new()));
         let term_bytes: PtyByteQueue = Arc::new(Mutex::new(Vec::new()));
         let status: WorkspaceStatus = Arc::new((Mutex::new("running".to_string()), Condvar::new()));
-        let now = chrono_now();
 
-        let reader_buffer = buffer.clone();
         let reader_term_bytes = term_bytes.clone();
         let reader_status = status.clone();
         let reader_idle = idle_state.clone();
@@ -321,7 +214,6 @@ impl PtyManager {
             reader_loop(
                 spawned.reader,
                 ws_id,
-                reader_buffer,
                 reader_term_bytes,
                 reader_status,
                 reader_idle,
@@ -367,20 +259,14 @@ impl PtyManager {
             master,
             writer,
             child,
-            buffer,
             term_bytes,
-            created_at: now,
             status,
             inject_queue,
             inject_signal,
             idle_state,
-            auto_restart,
-            restart_count,
-            ephemeral,
             custom_command,
             is_system,
             resume_command,
-            pending_osc133,
         };
 
         // Register with global session registry for debounced save
@@ -402,35 +288,6 @@ impl PtyManager {
         self.workspaces.insert(id.clone(), workspace);
         log_stderr!("[PTY] workspace created: {}", id);
         Ok(id)
-    }
-
-    pub fn restore_session_entry(&mut self, entry: SessionEntry) -> Result<String, String> {
-        let restored_args = restored_session_args(&entry.command, &entry.cwd, &entry.args);
-        let args = if restored_args.is_empty() {
-            None
-        } else {
-            Some(restored_args)
-        };
-        let cmd = if entry.command.is_empty() {
-            None
-        } else {
-            Some(entry.command)
-        };
-
-        self.create(
-            entry.id,
-            entry.cwd,
-            cmd,
-            args,
-            None,
-            None,
-            false,
-            entry.custom_command,
-            entry.is_system,
-            entry.resume_command,
-            None, // no terminal yet during restore
-            None, // no advance handle during restore
-        )
     }
 
     pub fn close(&mut self, id: &str) -> Result<(), String> {
@@ -470,68 +327,6 @@ impl PtyManager {
         Ok(())
     }
 
-    /// Explicit workspace close with deterministic cleanup.
-    /// 1. Transition lifecycle to Closing
-    /// 2. Send SIGHUP to child process
-    /// 3. Close master fd (via writer drop)
-    /// 4. Free writer
-    /// 5. Transition to Closed
-    /// 6. Emit event via EventBus
-    /// Idempotent: double-close is a no-op.
-    pub fn close_explicit(&mut self, id: &str) -> Result<(), String> {
-        // Idempotent: if already closing/closed/dead, no-op
-        if let Some(ws) = self.workspaces.get(id) {
-            let current_status = ws.status.0.lock()
-                .map(|s| s.clone())
-                .unwrap_or_default();
-            if matches!(current_status.as_str(), "closing" | "closed" | "dead") {
-                return Ok(());
-            }
-        }
-
-        let ws = self
-            .workspaces
-            .remove(id)
-            .ok_or_else(|| format!("Workspace '{}' not found", id))?;
-
-        // Step 1: Transition to Closing
-        set_workspace_status(&ws.status, "closing");
-        if let Ok(app) = crate::global_app().lock() {
-            app.broadcast_workspace_event(&serde_json::json!({
-                "type": "StatusChanged",
-                "id": id,
-                "status": "closing"
-            }));
-        }
-
-        // Step 2: Kill child process (SIGHUP)
-        if let Ok(mut child) = ws.child.lock() {
-            let _ = child.kill();
-        }
-
-        // Step 3-4: Close writer (drops master fd)
-        close_writer_handle(&ws.writer);
-
-        // Clear inject queue
-        if let Ok(mut queue) = ws.inject_queue.lock() {
-            queue.clear();
-        }
-
-        // Step 5: Transition to Closed
-        set_workspace_status(&ws.status, "closed");
-
-        // Deregister from global session registry
-        crate::session::deregister_session(id);
-
-        // Step 6: Emit event via EventBus + app cleanup
-        if let Ok(mut app) = crate::global_app().lock() {
-            app.handle_workspace_marked_dead(id);
-        }
-
-        log_stderr!("[PTY] workspace explicitly closed: {}", id);
-        Ok(())
-    }
-
     pub fn send_to_workspace(&self, id: &str, text: &str) -> Result<(), String> {
         let ws = self.workspace(id)?;
         if !workspace_accepts_input(ws) {
@@ -560,11 +355,6 @@ impl PtyManager {
         }
     }
 
-    pub fn send_key(&self, id: &str, key: &str) -> Result<(), String> {
-        let mapped = map_key(key)?;
-        self.send_to_workspace(id, mapped)
-    }
-
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
         let ws = self.workspace(id)?;
         let next_size = PtySize {
@@ -586,41 +376,6 @@ impl PtyManager {
         Ok(())
     }
 
-    pub fn read_screen(&self, id: &str, max_bytes: Option<usize>) -> Result<String, String> {
-        let ws = self.workspace(id)?;
-        let buffer = ws.buffer.lock().map_err(|error| error.to_string())?;
-        let bytes = max_bytes
-            .unwrap_or(DEFAULT_SNAPSHOT_BYTES)
-            .min(BUFFER_MAX_BYTES);
-        Ok(buffer.snapshot(bytes))
-    }
-
-    pub fn queue_inject(&self, id: &str, from: &str, text: String) -> Result<usize, String> {
-        let ws = self.workspace(id)?;
-        if !workspace_accepts_input(ws) {
-            return Err(format!("workspace '{}' is dead", id));
-        }
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let pending = {
-            let mut queue = ws.inject_queue.lock().map_err(|error| error.to_string())?;
-            queue.push(InjectMessage {
-                from: from.to_string(),
-                text,
-                timestamp,
-                enqueued_at: Instant::now(),
-            })?
-        };
-
-        // Wake the injector loop — message enqueued
-        ws.inject_signal.notify();
-
-        Ok(pending)
-    }
-
     /// Get a clone of the inject queue for a workspace (for external dispatch).
     pub fn inject_queue_for(&self, id: &str) -> Option<crate::inject::SharedInjectQueue> {
         self.workspaces.get(id).map(|ws| ws.inject_queue.clone())
@@ -629,57 +384,6 @@ impl PtyManager {
     /// Get the inject signal for a workspace (to wake injector on enqueue).
     pub fn inject_signal_for(&self, id: &str) -> Option<InjectSignal> {
         self.workspaces.get(id).map(|ws| ws.inject_signal.clone())
-    }
-
-    pub fn peek_queue(&self, id: &str) -> Result<Vec<InjectMessageInfo>, String> {
-        let ws = self.workspace(id)?;
-        let queue = ws.inject_queue.lock().map_err(|error| error.to_string())?;
-        Ok(queue.snapshot())
-    }
-
-    pub fn list_workspaces(&self) -> Vec<WorkspaceInfo> {
-        self.workspaces
-            .values()
-            .map(|ws| WorkspaceInfo {
-                id: ws.id.clone(),
-                cwd: ws.cwd.clone(),
-                command: ws.command.clone(),
-                args: ws.args.clone(),
-                status: ws
-                    .status
-                    .0
-                    .lock()
-                    .map(|s| s.clone())
-                    .unwrap_or_else(|_| "unknown".to_string()),
-                created_at: ws.created_at.clone(),
-                buffer_lines: ws.buffer.lock().map(|b| b.chunks.len()).unwrap_or(0),
-            })
-            .collect()
-    }
-
-    pub fn session_entries(&self) -> Vec<SessionEntry> {
-        self.workspaces
-            .values()
-            .filter(|ws| {
-                if ws.ephemeral {
-                    return false;
-                }
-                ws.status
-                    .0
-                    .lock()
-                    .map(|status| status.as_str() != "dead")
-                    .unwrap_or(false)
-            })
-            .map(|ws| SessionEntry {
-                id: ws.id.clone(),
-                cwd: ws.cwd.clone(),
-                command: ws.command.clone(),
-                args: strip_claude_continue_arg(&ws.command, &ws.args),
-                custom_command: ws.custom_command.clone(),
-                is_system: ws.is_system,
-                resume_command: ws.resume_command.clone(),
-            })
-            .collect()
     }
 
     pub fn drain_term_bytes(&self, id: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
@@ -1057,7 +761,6 @@ fn try_restart_workspace(
     master: &Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     child: &Arc<Mutex<Box<dyn PtyChild + Send + Sync>>>,
-    buffer: &Arc<Mutex<OutputBuffer>>,
     term_bytes: &PtyByteQueue,
     status: &WorkspaceStatus,
     idle_state: &Arc<Mutex<IdleState>>,
@@ -1103,9 +806,6 @@ fn try_restart_workspace(
         *s = "running".to_string();
     }
     status.1.notify_all();
-    if let Ok(mut b) = buffer.lock() {
-        b.clear();
-    }
     if let Ok(mut tb) = term_bytes.lock() {
         tb.clear();
     }
@@ -1128,7 +828,6 @@ fn try_restart_workspace(
     }
 
     // Spawn new reader thread
-    let reader_buffer = buffer.clone();
     let reader_term_bytes = term_bytes.clone();
     let reader_status = status.clone();
     let reader_idle = idle_state.clone();
@@ -1151,7 +850,6 @@ fn try_restart_workspace(
         reader_loop(
             spawned.reader,
             ws_id_clone,
-            reader_buffer,
             reader_term_bytes,
             reader_status,
             reader_idle,
@@ -1341,7 +1039,6 @@ impl TrustPromptDetector {
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     ws_id: String,
-    buffer: Arc<Mutex<OutputBuffer>>,
     term_bytes: PtyByteQueue,
     status: WorkspaceStatus,
     idle_state: Arc<Mutex<IdleState>>,
@@ -1422,10 +1119,6 @@ fn reader_loop(
 
                 if data.is_empty() {
                     continue;
-                }
-
-                if let Ok(mut b) = buffer.lock() {
-                    b.push(data.clone());
                 }
 
                 if codex_resume_monitor {
@@ -1601,7 +1294,6 @@ fn reader_loop(
                 &master,
                 &writer,
                 &child,
-                &buffer,
                 &term_bytes,
                 &status,
                 &idle_state,
@@ -1672,22 +1364,6 @@ fn is_codex_resume_session(command: &str, args: &[String]) -> bool {
     crate::session::codex_resume_index(command, args).is_some()
 }
 
-fn map_key(key: &str) -> Result<&'static str, String> {
-    match key.to_lowercase().as_str() {
-        "return" | "enter" => Ok("\r"),
-        "ctrl+c" | "ctrl-c" => Ok("\x03"),
-        "ctrl+d" | "ctrl-d" => Ok("\x04"),
-        "ctrl+l" | "ctrl-l" => Ok("\x0c"),
-        "ctrl+z" | "ctrl-z" => Ok("\x1a"),
-        "tab" => Ok("\t"),
-        "esc" | "escape" => Ok("\x1b"),
-        _ => Err(format!(
-            "Unknown key: '{}'. Supported: return, ctrl+c/ctrl-c, ctrl+d/ctrl-d, ctrl+l/ctrl-l, ctrl+z/ctrl-z, tab, esc, escape",
-            key
-        )),
-    }
-}
-
 fn clone_size(size: &PtySize) -> PtySize {
     PtySize {
         rows: size.rows,
@@ -1695,14 +1371,6 @@ fn clone_size(size: &PtySize) -> PtySize {
         pixel_width: size.pixel_width,
         pixel_height: size.pixel_height,
     }
-}
-
-fn chrono_now() -> String {
-    use std::time::SystemTime;
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}", duration.as_secs())
 }
 
 pub fn command_search_paths() -> Vec<PathBuf> {
@@ -1831,11 +1499,12 @@ pub fn resolve_command_binary(command: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        mark_workspace_dead_handles, InjectMessage, InjectQueue, PtyOutputSignal,
+        mark_workspace_dead_handles, InjectQueue, PtyOutputSignal,
         SharedInjectQueue, ShellReadyDetector, TrustPromptDetector, WorkspaceStatus,
         SHELL_READY_FALLBACK, SHELL_READY_MAX_CHUNK, TRUST_PROMPT_BUFFER_BYTES,
         TRUST_PROMPT_PATTERNS,
     };
+    use crate::inject::InjectMessage;
     use std::io::Write;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
@@ -1880,7 +1549,7 @@ mod tests {
             text: "hello".to_string(),
             timestamp: 0,
             enqueued_at: Instant::now(),
-        });
+        }).unwrap();
 
         mark_workspace_dead_handles("dead-test", &status, &writer, &queue);
 
@@ -2125,6 +1794,7 @@ mod tests {
             Arc::new(Mutex::new(Box::new(Vec::<u8>::new())));
         let queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
 
+        let _ = crate::global_app();
         let start = Instant::now();
         mark_workspace_dead_handles("no-timer-test", &status, &writer, &queue);
         let elapsed = start.elapsed();

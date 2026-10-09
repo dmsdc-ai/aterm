@@ -240,13 +240,6 @@ pub struct InjectMessage {
     pub enqueued_at: Instant,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct InjectMessageInfo {
-    pub from: String,
-    pub text: String,
-    pub timestamp: u64,
-}
-
 pub struct InjectQueue {
     messages: VecDeque<InjectMessage>,
     /// Persistent mailbox backing (None = in-memory only, for tests).
@@ -403,17 +396,6 @@ impl InjectQueue {
     pub fn clear(&mut self) {
         self.messages.clear();
     }
-
-    pub fn snapshot(&self) -> Vec<InjectMessageInfo> {
-        self.messages
-            .iter()
-            .map(|message| InjectMessageInfo {
-                from: message.from.clone(),
-                text: message.text.clone(),
-                timestamp: message.timestamp,
-            })
-            .collect()
-    }
 }
 
 #[derive(Debug)]
@@ -496,11 +478,6 @@ pub fn has_prompt_pattern(data: &str) -> bool {
 pub fn normalize_terminal_text(input: &str) -> String {
     let stripped = strip_ansi(input);
     stripped.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-pub fn with_terminal_enter(text: &str) -> String {
-    let normalized = text.trim_end_matches(|ch| matches!(ch, '\r' | '\n'));
-    format!("{}\r", normalized)
 }
 
 pub fn split_at_utf8_boundary(bytes: &[u8]) -> (&[u8], &[u8]) {
@@ -1133,7 +1110,7 @@ mod tests {
         for i in 0..INJECT_QUEUE_CAPACITY {
             queue
                 .push(InjectMessage {
-                    from: "test".to_string(),
+                    from: format!("s{}", i / 10),
                     text: format!("msg{}", i),
                     timestamp: i as u64,
                     enqueued_at: Instant::now(),
@@ -1143,7 +1120,7 @@ mod tests {
         assert_eq!(queue.len(), INJECT_QUEUE_CAPACITY);
 
         let result = queue.push(InjectMessage {
-            from: "test".to_string(),
+            from: "s9".to_string(),
             text: "overflow".to_string(),
             timestamp: 999,
             enqueued_at: Instant::now(),

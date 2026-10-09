@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write as IoWrite;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -22,59 +21,6 @@ use aterm_session::types::{WorkspaceEvent, WorkspaceInfo};
 use crate::inject::{InjectMessage, InjectSignal, SharedInjectQueue};
 use crate::pty::WorkspaceStatus;
 use crate::telepty_bridge::TeleptyBridge;
-
-pub struct EventBus {
-    subscribers: Mutex<Vec<mpsc::Sender<AtermEvent>>>,
-    host_waker: Option<Arc<AtomicBool>>,
-    pending_events: Mutex<Vec<AtermEvent>>,
-}
-
-impl EventBus {
-    pub fn new() -> Self {
-        Self {
-            subscribers: Mutex::new(Vec::new()),
-            host_waker: None,
-            pending_events: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn set_host_waker(&mut self, waker: Arc<AtomicBool>) {
-        self.host_waker = Some(waker);
-    }
-
-    pub fn subscribe(&self) -> mpsc::Receiver<AtermEvent> {
-        let (tx, rx) = mpsc::channel();
-        if let Ok(mut subs) = self.subscribers.lock() {
-            subs.push(tx);
-        }
-        rx
-    }
-
-    pub fn publish(&self, event: AtermEvent) {
-        // Wake C-FFI host if waker is set
-        if let Some(ref waker) = self.host_waker {
-            waker.store(true, Ordering::Release);
-        }
-
-        // Store in pending for poll-based consumers
-        if let Ok(mut pending) = self.pending_events.lock() {
-            pending.push(event.clone());
-        }
-
-        // Send to channel subscribers, remove dead ones
-        if let Ok(mut subs) = self.subscribers.lock() {
-            subs.retain(|tx| tx.send(event.clone()).is_ok());
-        }
-    }
-
-    pub fn drain_pending(&self) -> Vec<AtermEvent> {
-        if let Ok(mut pending) = self.pending_events.lock() {
-            std::mem::take(&mut *pending)
-        } else {
-            Vec::new()
-        }
-    }
-}
 
 /// App-level singleton that owns the IPC server and routes inject messages.
 /// Workspace PTY processes are owned by per-view AtermCore instances.
@@ -96,11 +42,9 @@ pub struct AtermApp {
     host: Option<Box<dyn PlatformHost>>,
     telepty_bridge: Option<TeleptyBridge>,
     socket_path: String,
-    token: String,
     /// Condvar pulsed when any workspace is registered. Used by CreateWorkspace
     /// to avoid polling for workspace availability.
     registration_signal: Arc<(Mutex<()>, Condvar)>,
-    event_bus: EventBus,
 }
 
 #[derive(Clone)]
@@ -114,7 +58,6 @@ impl AtermApp {
     pub fn new() -> Self {
         cleanup_stale_socket_files();
         let socket_path = format!("/tmp/aterm-{}.sock", std::process::id());
-        let token = generate_token();
         let telepty_bridge = TeleptyBridge::try_connect();
         Self {
             inject_queues: HashMap::new(),
@@ -127,9 +70,7 @@ impl AtermApp {
             host: None,
             telepty_bridge,
             socket_path,
-            token,
             registration_signal: Arc::new((Mutex::new(()), Condvar::new())),
-            event_bus: EventBus::new(),
         }
     }
 
@@ -148,18 +89,12 @@ impl AtermApp {
             host: None,
             telepty_bridge: None,
             socket_path: String::new(),
-            token: String::new(),
             registration_signal: Arc::new((Mutex::new(()), Condvar::new())),
-            event_bus: EventBus::new(),
         }
     }
 
     pub fn socket_path(&self) -> &str {
         &self.socket_path
-    }
-
-    pub fn token(&self) -> &str {
-        &self.token
     }
 
     pub fn registration_signal(&self) -> Arc<(Mutex<()>, Condvar)> {
@@ -404,7 +339,6 @@ impl AtermApp {
                     ref workspace,
                     ref state,
                     timeout_ms,
-                    since_seq: _,
                 } = action
                 {
                     let status_arc = {
@@ -638,7 +572,7 @@ impl AtermApp {
                     self.completion_reports
                         .insert(workspace.clone(), truncate_report(&report));
                 }
-                // Reaches IPC subscribers only (mirrors pty.rs "closing"), not the EventBus.
+                // Reaches IPC subscribers only (mirrors pty.rs "closing").
                 self.broadcast_workspace_event(&serde_json::json!({
                     "type": "StatusChanged",
                     "id": workspace,
@@ -665,6 +599,9 @@ impl AtermApp {
                 ActionResponse::ok()
             }
             SessionAction::CreateWorkspace { name, cli, cwd } => {
+                if self.workspace_exists(&name) {
+                    return ActionResponse::error(format!("workspace '{}' already exists", name));
+                }
                 let created = if let Some(ref host) = self.host {
                     let config = aterm_session::types::WorkspaceConfig {
                         name: name.clone(),
@@ -816,25 +753,6 @@ impl AtermApp {
                     ActionResponse::error(format!("workspace '{}' not found", workspace))
                 }
             }
-            SessionAction::ListLessons { workspace } => {
-                if let Some(meta) = self.workspace_meta.get(&workspace) {
-                    let file_path = std::path::Path::new(&meta.cwd)
-                        .join("state")
-                        .join("lessons.json");
-                    let data = if file_path.exists() {
-                        match std::fs::read_to_string(&file_path) {
-                            Ok(content) => serde_json::from_str(&content)
-                                .unwrap_or(serde_json::json!({"invariants":[],"failed":[]})),
-                            Err(_) => serde_json::json!({"invariants":[],"failed":[]}),
-                        }
-                    } else {
-                        serde_json::json!({"invariants":[],"failed":[]})
-                    };
-                    ActionResponse::data(data)
-                } else {
-                    ActionResponse::error(format!("workspace '{}' not found", workspace))
-                }
-            }
             SessionAction::RenameWorkspace { old_name, new_name } => {
                 let new_name = new_name.trim().to_string();
                 if new_name.is_empty() {
@@ -893,21 +811,6 @@ impl AtermApp {
                     ActionResponse::unsupported()
                 }
             }
-            SessionAction::DetachWorkspace { workspace } => {
-                if !self.workspace_exists(&workspace) {
-                    return ActionResponse::error(format!("workspace '{}' not found", workspace));
-                }
-                if let Some(ref host) = self.host {
-                    host.close_workspace_view(&workspace);
-                    self.deregister_workspace(&workspace);
-                    self.publish_event(AtermEvent::WorkspaceClosed {
-                        id: workspace.to_string(),
-                    });
-                    ActionResponse::ok()
-                } else {
-                    ActionResponse::unsupported()
-                }
-            }
             SessionAction::ReloadSettings => {
                 if let Some(ref host) = self.host {
                     host.reload_settings();
@@ -924,10 +827,6 @@ impl AtermApp {
                 // Return workspace snapshot so IPC server can send it on subscribe
                 ActionResponse::data(self.workspace_snapshot())
             }
-            SessionAction::RequestSnapshot => {
-                // Client detected a seq gap — return fresh snapshot
-                ActionResponse::data(self.workspace_snapshot())
-            }
             SessionAction::WaitUntil { .. } => {
                 // Handled in start_ipc dispatcher (outside app lock); should not reach here
                 ActionResponse::error("WaitUntil must be handled outside app lock")
@@ -935,17 +834,11 @@ impl AtermApp {
         }
     }
 
-    pub fn event_bus(&self) -> &EventBus {
-        &self.event_bus
-    }
-
     fn publish_event(&self, event: AtermEvent) {
         // Serialize to JSON for IPC broadcast (existing mechanism)
         if let Ok(json) = serde_json::to_value(&event) {
             self.broadcast_event(&json);
         }
-        // Also publish to EventBus
-        self.event_bus.publish(event);
     }
 
     /// Broadcast a workspace event to all IPC subscribers.
@@ -1087,15 +980,6 @@ fn is_supported_send_key(key: &str) -> bool {
             | "esc"
             | "escape"
     )
-}
-
-fn generate_token() -> String {
-    let mut buf = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut buf);
-    }
-    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -1285,5 +1169,32 @@ mod tests {
         let data = status_data(&mut app, "w1");
         assert_eq!(data["state"], "running");
         assert!(data["report"].is_null());
+    }
+
+    fn create_workspace(app: &mut AtermApp, name: &str) -> ActionResponse {
+        app.dispatch(SessionAction::CreateWorkspace {
+            name: name.to_string(),
+            cli: "zsh".to_string(),
+            cwd: "/tmp".to_string(),
+        })
+    }
+
+    #[test]
+    fn create_workspace_rejects_existing_name() {
+        let status = status_with("running");
+        let mut app = detached_with("w1", &status);
+
+        let message = error_message(create_workspace(&mut app, "w1"));
+        assert!(message.contains("already exists"), "got {:?}", message);
+        assert_eq!(message, "workspace 'w1' already exists");
+    }
+
+    #[test]
+    fn create_workspace_unknown_name_without_host_is_unsupported() {
+        let status = status_with("running");
+        let mut app = detached_with("w1", &status);
+
+        let resp = create_workspace(&mut app, "w2");
+        assert!(matches!(resp, ActionResponse::Unsupported), "got {:?}", resp);
     }
 }

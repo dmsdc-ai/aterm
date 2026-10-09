@@ -79,13 +79,11 @@ void aterm_core_named_key(AtermCore* core, uint32_t key_code);
 
 // Rendering
 void aterm_core_render(AtermCore* core);
-int32_t aterm_core_try_render(AtermCore* core);
 void aterm_core_resize(AtermCore* core, uint32_t width, uint32_t height);
 void aterm_core_grid_size(const AtermCore* core, float width, float height, uint16_t* out_cols, uint16_t* out_rows);
 void aterm_core_cell_size(const AtermCore* core, float* out_width, float* out_height);
 void aterm_core_grid_padding(const AtermCore* core, float width, float height, float* out_pad_x, float* out_pad_y);
 void aterm_core_cursor_position(const AtermCore* core, float width, float height, float* out_x, float* out_y);
-void aterm_core_set_preedit(AtermCore* core, const uint8_t* text, uint32_t len);
 void aterm_core_set_preedit_active(AtermCore* core, bool active);
 void aterm_core_suspend_gpu(AtermCore* core);
 
@@ -93,7 +91,6 @@ void aterm_core_suspend_gpu(AtermCore* core);
 int32_t aterm_core_get_render_data(AtermCore* core, CellDataFFI* out_cells, uint32_t max_cells, uint32_t* out_count, uint16_t* out_cols, uint16_t* out_rows, uint8_t* out_dirty_rows);
 
 // Dirty state
-int32_t aterm_core_take_dirty(AtermCore* core);
 void aterm_core_set_dirty_callback(AtermCore* core, AtermDirtyCallback callback, void* userdata);
 void aterm_core_sync_pty(AtermCore* core);
 void aterm_core_set_theme_mode(AtermCore* core, uint8_t mode);
@@ -108,8 +105,6 @@ void aterm_core_set_default_colors(AtermCore* core, uint8_t fg_r, uint8_t fg_g, 
 void aterm_core_set_font_size(AtermCore* core, float size);
 void aterm_core_set_line_height(AtermCore* core, float height);
 void aterm_core_set_cell_width(AtermCore* core, float width);
-// Deprecated compatibility no-op.
-void aterm_core_set_bg_blend_threshold(AtermCore* core, float threshold);
 
 // Scroll
 void aterm_core_scroll(AtermCore* core, int32_t delta);
@@ -139,11 +134,6 @@ typedef struct SelectionRangeFFI {
 // Export selection as per-row ranges for Metal selection overlay
 void aterm_core_selection_ranges(const AtermCore* core, SelectionRangeFFI* out_ranges, uint32_t max_ranges, uint32_t* out_count);
 
-// Screen text search
-int32_t aterm_core_screen_contains(const AtermCore* core, const char* pattern);
-
-// Workspace list (JSON string, caller must free)
-char* aterm_core_list_workspaces(const AtermCore* core);
 char* aterm_core_detect_clis(void);
 void aterm_core_free_string(char* ptr);
 
@@ -161,8 +151,6 @@ typedef struct SessionEntryFFI {
 uint32_t aterm_session_count(const AtermCore* core);
 SessionEntryFFI aterm_session_get(const AtermCore* core, uint32_t index);
 void aterm_session_free(SessionEntryFFI entry);
-void aterm_sessions_save(AtermCore* core);
-uint32_t aterm_sessions_restore(AtermCore* core);
 
 // Tailscale
 int32_t aterm_tailscale_connect(const char* hostname, const char* control_url, const char* auth_key);
@@ -188,7 +176,6 @@ void aterm_set_host(AtermHostCallbacks callbacks);
 char* aterm_dispatch(const char* action_json, size_t action_len);
 void aterm_sync_telepty(void);
 char* aterm_ipc_socket_path(void);
-char* aterm_ipc_token(void);
 
 // Wakeup+drain event API
 AtermEventBatch aterm_drain_events(void);
@@ -196,8 +183,6 @@ void aterm_free_events(AtermEventBatch batch);
 
 // Session lifecycle — explicit workspace close (deterministic, not ARC-dependent)
 void aterm_workspace_close(const char *workspace_id);
-void aterm_batch_close(const char *const *workspace_ids, uint32_t count);
-void aterm_trigger_save(void);
 
 // Mark workspace as system (orchestrator) in global session registry.
 // Call after spawn_shell for isSystem workspaces so SaveCoordinator writes the correct flag.
