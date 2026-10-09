@@ -1,23 +1,27 @@
 schema_version: 1
 id: VF-ATERM-SESSION
-feature: workspace create, restore, and cleanup lifecycle
+feature: workspace create guard and CLI dispatch lifecycle
 intent: >
-  Verify workspace registration waits, readiness completion, timeout behavior, and stale-session cleanup flows.
+  Verify CreateWorkspace name handling and the bin/aterm dispatch, done and tasks flows (create, inject, wait, close) against a fake IPC socket.
 profile: integration
 package: aterm-core
-target: polling_event_tests
+target: cli_dispatch
 source_files:
-  - aterm-core/tests/polling_event_tests.rs
+  - aterm-core/src/app.rs
+  - aterm-core/tests/cli_dispatch.rs
 inventory_source: state/tests.md
 selectors:
-  - "create_workspace_"
-  - "stale_cleanup_"
+  - "app::tests::create_workspace_"
+  - "dispatch_"
+  - "done_"
+  - "tasks_"
 tests:
-  - create_workspace_blocks_until_registered
-  - create_workspace_no_sleep_2_in_ready_detection
-  - create_workspace_returns_after_shell_running
-  - create_workspace_returns_immediately_if_already_registered
-  - create_workspace_timeout_after_15s_if_never_registered
-  - create_workspace_timeout_returns_after_specified_duration
-  - stale_cleanup_fires_once_on_closed_event
-  - stale_cleanup_not_repeating_timer
+  - create_workspace_rejects_existing_name
+  - create_workspace_unknown_name_without_host_is_unsupported
+  - dispatch_create_unsupported_skips_inject
+  - dispatch_timeout_leaves_session_running
+  - dispatch_wait_error_reports_dead_not_left_running
+  - dispatch_waits_for_complete_and_closes_completed
+  - done_sends_mark_complete_with_workspace_and_report
+  - tasks_add_ids_unique_and_atomic
+  - tasks_workspace_flag_uses_list_tasks

@@ -3,20 +3,9 @@ dist/
 out/
 .DS_Store
 
-# Tauri
-src-tauri/target/
-src-tauri/gen/
-src-tauri/node_modules/
-src-tauri/server-bundle.mjs
-
-# Build metadata
-.build-number
 target/
 build/
 .context-snapshot.md
-
-# cbindgen-generated (build.rs writes it on every build)
-aterm-core/aterm_core.h
 
 # npm pack artifacts — publish via npm registry / GitHub Releases, never git
 *.tgz

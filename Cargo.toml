@@ -1,5 +1,6 @@
 [workspace]
 members = ["aterm-core", "aterm-session", "aterm-ipc"]
+resolver = "2"
 
 [workspace.package]
 license = "MIT"

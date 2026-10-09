@@ -1,9 +1,9 @@
 schema_version: 1
 inventory:
-  requested_total_from_task: 70
-  enumerated_total_from_state_tests_md: 70
-  verified_total_from_source: 70
-  note: state/tests.md and verification-family intents track 70 regression tests post Phase 1 cleanup; renderer family retired (wgpu renderer + renderer_glyph deleted in 61d63c1).
+  requested_total_from_task: 89
+  enumerated_total_from_state_tests_md: 89
+  verified_total_from_source: 89
+  note: state/tests.md is generated from `ATERM_TELEPTY_PORT=9 cargo test --offline --workspace -- --list` (89 tests across aterm-core, aterm-ipc and the aterm-core integration tests); the standalone Condvar re-implementation tests were deleted in task 1209 B7 (R1).
 packs:
   smoke:
     description: Fast regression for inject, PTY lifecycle, shell readiness, IPC fanout, and workspace lifecycle.
@@ -15,7 +15,7 @@ packs:
       - id: VF-ATERM-SHELLREADY
         profile: unit
       - id: VF-ATERM-IPC
-        profile: integration
+        profile: unit
       - id: VF-ATERM-SESSION
         profile: integration
   nightly:
@@ -28,9 +28,9 @@ packs:
       - id: VF-ATERM-SHELLREADY
         profile: unit
       - id: VF-ATERM-IPC
-        profile: integration
+        profile: unit
       - id: VF-ATERM-EVENTBUS
-        profile: integration
+        profile: unit
       - id: VF-ATERM-SESSION
         profile: integration
   release:
@@ -43,8 +43,8 @@ packs:
       - id: VF-ATERM-SHELLREADY
         profile: unit
       - id: VF-ATERM-IPC
-        profile: integration
+        profile: unit
       - id: VF-ATERM-EVENTBUS
-        profile: integration
+        profile: unit
       - id: VF-ATERM-SESSION
         profile: integration

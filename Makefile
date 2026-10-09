@@ -11,6 +11,10 @@ INSTALL_ROOT := $(HOME)/Applications
 INSTALL_APP := $(INSTALL_ROOT)/aterm.app
 DIST_ZIP := $(BUILD_DIR)/aterm.zip
 GOTOOLCHAIN := go1.20.14
+# Bundle version follows the npm package; the literals are the fallback when node is missing
+NPM_VERSION := $(shell node -p "require('$(ROOT)/npm/aterm/package.json').version" 2>/dev/null)
+BUNDLE_VERSION ?= $(if $(NPM_VERSION),$(NPM_VERSION),3.0.0)
+BUNDLE_SHORT_VERSION ?= $(if $(NPM_VERSION),$(NPM_VERSION),3.0)
 
 # Rust
 DYLIB := $(TARGET_DIR)/libaterm_core.dylib
@@ -70,9 +74,9 @@ app: swift metal
 	@echo '    <key>CFBundleName</key>' >> $(APP_DIR)/Info.plist
 	@echo '    <string>aterm</string>' >> $(APP_DIR)/Info.plist
 	@echo '    <key>CFBundleVersion</key>' >> $(APP_DIR)/Info.plist
-	@echo '    <string>3.0.0</string>' >> $(APP_DIR)/Info.plist
+	@echo '    <string>$(BUNDLE_VERSION)</string>' >> $(APP_DIR)/Info.plist
 	@echo '    <key>CFBundleShortVersionString</key>' >> $(APP_DIR)/Info.plist
-	@echo '    <string>3.0</string>' >> $(APP_DIR)/Info.plist
+	@echo '    <string>$(BUNDLE_SHORT_VERSION)</string>' >> $(APP_DIR)/Info.plist
 	@echo '    <key>CFBundlePackageType</key>' >> $(APP_DIR)/Info.plist
 	@echo '    <string>APPL</string>' >> $(APP_DIR)/Info.plist
 	@echo '    <key>NSHighResolutionCapable</key>' >> $(APP_DIR)/Info.plist
