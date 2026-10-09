@@ -13,7 +13,7 @@ pub fn verify_peer(stream: &UnixStream) -> bool {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = stream;
-        true // Fallback: allow on unsupported platforms
+        false // Fail closed: no peer-credential check on this platform
     }
 }
 
