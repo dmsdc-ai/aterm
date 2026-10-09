@@ -1,7 +1,7 @@
 [env]
 GOTOOLCHAIN = "go1.20.14"
 # Marks every cargo-spawned process as a test process for TeleptyBridge, which
-# then refuses the production daemon port and refuses to restart the daemon.
+# then refuses the production daemon port.
 # There is no bin target here — the shipped app is a cdylib loaded by the Swift
 # host — so this never reaches a running aterm. Guarded by
 # aterm-core/tests/hermetic_guard.rs.
