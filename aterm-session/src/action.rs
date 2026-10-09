@@ -75,6 +75,12 @@ pub enum SessionAction {
         #[serde(default)]
         since_seq: Option<u64>,
     },
+    /// Sub-session signals that its task is finished (#76). Sets state "complete".
+    MarkComplete {
+        workspace: String,
+        #[serde(default)]
+        report: Option<String>,
+    },
     /// Client requests a fresh workspace snapshot (e.g. after detecting a seq gap).
     RequestSnapshot,
 }

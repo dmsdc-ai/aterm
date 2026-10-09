@@ -90,6 +90,8 @@ pub struct AtermApp {
     workspace_statuses: HashMap<String, WorkspaceStatus>,
     /// workspace metadata for ListWorkspaces fallback
     workspace_meta: HashMap<String, WorkspaceMeta>,
+    /// workspace_name → report passed to MarkComplete (capped at MAX_REPORT_BYTES)
+    completion_reports: HashMap<String, String>,
     ipc_server: Option<IpcServer>,
     host: Option<Box<dyn PlatformHost>>,
     telepty_bridge: Option<TeleptyBridge>,
@@ -120,11 +122,33 @@ impl AtermApp {
             workspace_writers: HashMap::new(),
             workspace_statuses: HashMap::new(),
             workspace_meta: HashMap::new(),
+            completion_reports: HashMap::new(),
             ipc_server: None,
             host: None,
             telepty_bridge,
             socket_path,
             token,
+            registration_signal: Arc::new((Mutex::new(()), Condvar::new())),
+            event_bus: EventBus::new(),
+        }
+    }
+
+    /// Test-only constructor: no telepty bridge (never probes or POSTs to a live
+    /// daemon), no stale-socket cleanup, no /tmp socket path.
+    #[cfg(test)]
+    fn new_detached() -> Self {
+        Self {
+            inject_queues: HashMap::new(),
+            inject_signals: HashMap::new(),
+            workspace_writers: HashMap::new(),
+            workspace_statuses: HashMap::new(),
+            workspace_meta: HashMap::new(),
+            completion_reports: HashMap::new(),
+            ipc_server: None,
+            host: None,
+            telepty_bridge: None,
+            socket_path: String::new(),
+            token: String::new(),
             registration_signal: Arc::new((Mutex::new(()), Condvar::new())),
             event_bus: EventBus::new(),
         }
@@ -221,6 +245,9 @@ impl AtermApp {
         }
         self.workspace_meta
             .insert(new_name.to_string(), meta.clone());
+        if let Some(report) = self.completion_reports.remove(old_name) {
+            self.completion_reports.insert(new_name.to_string(), report);
+        }
 
         if let Some(ref bridge) = self.telepty_bridge {
             bridge.deregister(old_name);
@@ -287,6 +314,7 @@ impl AtermApp {
         self.workspace_writers.remove(name);
         self.workspace_statuses.remove(name);
         self.workspace_meta.remove(name);
+        self.completion_reports.remove(name);
         if let Some(ref bridge) = self.telepty_bridge {
             bridge.deregister(name);
         }
@@ -394,31 +422,10 @@ impl AtermApp {
                         ));
                     };
                     let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(300_000));
-                    let deadline = std::time::Instant::now() + timeout;
-                    let (ref mutex, ref condvar) = *status_arc;
-                    // Condvar wait — zero CPU when idle, instant response on state change
-                    let mut current = match mutex.lock() {
-                        Ok(guard) => guard,
-                        Err(_) => return ActionResponse::error("status lock poisoned"),
-                    };
-                    loop {
-                        if *current == *state {
-                            return ActionResponse::data(serde_json::json!({
-                                "reached": true, "state": *current
-                            }));
-                        }
-                        let remaining =
-                            deadline.saturating_duration_since(std::time::Instant::now());
-                        if remaining.is_zero() {
-                            return ActionResponse::data(serde_json::json!({
-                                "reached": false, "state": *current, "timeout": true
-                            }));
-                        }
-                        let result = condvar
-                            .wait_timeout(current, remaining)
-                            .unwrap_or_else(|e| e.into_inner());
-                        current = result.0;
+                    if status_arc.0.is_poisoned() {
+                        return ActionResponse::error("status lock poisoned");
                     }
+                    return ActionResponse::data(wait_for_state(&status_arc, state, timeout));
                 }
 
                 // CreateWorkspace: dispatch, then wait for shell "running" before returning.
@@ -610,8 +617,34 @@ impl AtermApp {
                     .unwrap_or_else(|| "unknown".to_string());
                 ActionResponse::data(serde_json::json!({
                     "alive": exists && !matches!(state.as_str(), "dead" | "closing"),
-                    "state": state
+                    "state": state,
+                    "report": self.completion_reports.get(&workspace)
                 }))
+            }
+            SessionAction::MarkComplete { workspace, report } => {
+                if !self.workspace_exists(&workspace) {
+                    return ActionResponse::error(format!("workspace '{}' not found", workspace));
+                }
+                if self.workspace_is_dead(&workspace) {
+                    return ActionResponse::error(format!("workspace '{}' is dead", workspace));
+                }
+                if let Some(status) = self.workspace_statuses.get(&workspace) {
+                    if let Ok(mut current) = status.0.lock() {
+                        *current = "complete".to_string();
+                    }
+                    status.1.notify_all();
+                }
+                if let Some(report) = report {
+                    self.completion_reports
+                        .insert(workspace.clone(), truncate_report(&report));
+                }
+                // Reaches IPC subscribers only (mirrors pty.rs "closing"), not the EventBus.
+                self.broadcast_workspace_event(&serde_json::json!({
+                    "type": "StatusChanged",
+                    "id": workspace,
+                    "status": "complete"
+                }));
+                ActionResponse::ok()
             }
             SessionAction::FocusWorkspace { workspace } => {
                 if let Some(ref host) = self.host {
@@ -989,6 +1022,54 @@ fn cleanup_stale_socket_files() {
     }
 }
 
+/// Block on a workspace status Condvar until `target` is reached, `timeout`
+/// elapses, or the workspace enters a terminal state it can never leave for
+/// `target` (dead/closing/closed) — then return immediately with `terminal`.
+fn wait_for_state(
+    status: &WorkspaceStatus,
+    target: &str,
+    timeout: std::time::Duration,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + timeout;
+    let (ref mutex, ref condvar) = **status;
+    // Condvar wait — zero CPU when idle, instant response on state change
+    let mut current = mutex.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if *current == target {
+            return serde_json::json!({
+                "reached": true, "state": *current
+            });
+        }
+        if matches!(current.as_str(), "dead" | "closing" | "closed") {
+            return serde_json::json!({
+                "reached": false, "state": *current, "terminal": true
+            });
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return serde_json::json!({
+                "reached": false, "state": *current, "timeout": true
+            });
+        }
+        let result = condvar
+            .wait_timeout(current, remaining)
+            .unwrap_or_else(|e| e.into_inner());
+        current = result.0;
+    }
+}
+
+/// Max bytes kept from a MarkComplete report.
+const MAX_REPORT_BYTES: usize = 4096;
+
+/// Truncate to at most MAX_REPORT_BYTES without splitting a UTF-8 char.
+fn truncate_report(report: &str) -> String {
+    let mut end = report.len().min(MAX_REPORT_BYTES);
+    while !report.is_char_boundary(end) {
+        end -= 1;
+    }
+    report[..end].to_string()
+}
+
 fn is_supported_send_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
@@ -1015,4 +1096,194 @@ fn generate_token() -> String {
         let _ = f.read_exact(&mut buf);
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inject::InjectQueue;
+    use std::time::Duration;
+
+    fn status_with(state: &str) -> WorkspaceStatus {
+        Arc::new((Mutex::new(state.to_string()), Condvar::new()))
+    }
+
+    /// Register `name` on a detached app (no telepty bridge, no IPC socket).
+    fn detached_with(name: &str, status: &WorkspaceStatus) -> AtermApp {
+        let mut app = AtermApp::new_detached();
+        let queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+        app.register_workspace(name, queue, None, None, Some(status.clone()), "zsh", "/tmp");
+        app
+    }
+
+    fn mark_complete(app: &mut AtermApp, name: &str, report: Option<&str>) -> ActionResponse {
+        app.dispatch(SessionAction::MarkComplete {
+            workspace: name.to_string(),
+            report: report.map(str::to_string),
+        })
+    }
+
+    fn status_data(app: &mut AtermApp, name: &str) -> serde_json::Value {
+        match app.dispatch(SessionAction::WorkspaceStatus {
+            workspace: name.to_string(),
+        }) {
+            ActionResponse::Data { data } => data,
+            other => panic!("WorkspaceStatus should return Data, got {:?}", other),
+        }
+    }
+
+    fn error_message(resp: ActionResponse) -> String {
+        match resp {
+            ActionResponse::Error { message } => message,
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mark_complete_sets_state_and_report() {
+        let status = status_with("running");
+        let mut app = detached_with("w1", &status);
+
+        let resp = mark_complete(&mut app, "w1", Some("done: x"));
+        assert!(matches!(resp, ActionResponse::Ok), "got {:?}", resp);
+        assert_eq!(*status.0.lock().unwrap(), "complete");
+
+        let data = status_data(&mut app, "w1");
+        assert_eq!(data["state"], "complete");
+        assert_eq!(data["report"], "done: x");
+        assert_eq!(data["alive"], true);
+    }
+
+    #[test]
+    fn mark_complete_unknown_workspace_errors() {
+        let mut app = AtermApp::new_detached();
+        let message = error_message(mark_complete(&mut app, "nope", Some("x")));
+        assert_eq!(message, "workspace 'nope' not found");
+    }
+
+    #[test]
+    fn mark_complete_dead_workspace_errors() {
+        let status = status_with("dead");
+        let mut app = detached_with("w1", &status);
+
+        let message = error_message(mark_complete(&mut app, "w1", Some("x")));
+        assert_eq!(message, "workspace 'w1' is dead");
+        assert_eq!(*status.0.lock().unwrap(), "dead");
+        assert!(status_data(&mut app, "w1")["report"].is_null());
+    }
+
+    #[test]
+    fn mark_complete_wakes_condvar_waiter() {
+        let status = status_with("running");
+        let mut app = detached_with("w1", &status);
+
+        let status2 = status.clone();
+        let handle = std::thread::spawn(move || {
+            let start = Instant::now();
+            let (ref mutex, ref condvar) = *status2;
+            let guard = mutex.lock().unwrap();
+            // Bounded so a regression fails the assert instead of hanging the suite.
+            let (guard, _) = condvar
+                .wait_timeout_while(guard, Duration::from_secs(2), |s| s != "complete")
+                .unwrap();
+            (start.elapsed(), guard.clone())
+        });
+
+        // Give waiter time to block
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(matches!(
+            mark_complete(&mut app, "w1", None),
+            ActionResponse::Ok
+        ));
+
+        let (elapsed, seen) = handle.join().unwrap();
+        assert_eq!(seen, "complete");
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "Condvar waiter should wake promptly on complete, got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn wait_for_state_returns_early_on_terminal_state() {
+        let status = status_with("running");
+        let status2 = status.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            if let Ok(mut current) = status2.0.lock() {
+                *current = "dead".to_string();
+            }
+            status2.1.notify_all();
+        });
+
+        let start = Instant::now();
+        let result = wait_for_state(&status, "complete", Duration::from_secs(5));
+        let elapsed = start.elapsed();
+        setter.join().unwrap();
+
+        assert_eq!(result["reached"], false);
+        assert_eq!(result["state"], "dead");
+        assert_eq!(result["terminal"], true);
+        assert!(result.get("timeout").is_none(), "got {}", result);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "terminal state should return early, got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn wait_for_state_times_out() {
+        let status = status_with("running");
+
+        let start = Instant::now();
+        let result = wait_for_state(&status, "complete", Duration::from_millis(50));
+        let elapsed = start.elapsed();
+
+        assert_eq!(result["reached"], false);
+        assert_eq!(result["state"], "running");
+        assert_eq!(result["timeout"], true);
+        assert!(result.get("terminal").is_none(), "got {}", result);
+        assert!(elapsed >= Duration::from_millis(50), "got {:?}", elapsed);
+    }
+
+    #[test]
+    fn report_truncated_to_4096_bytes_on_char_boundary() {
+        let status = status_with("running");
+        let mut app = detached_with("w1", &status);
+        // 3-byte chars: 4096 is not a char boundary (4096 = 3 * 1365 + 1).
+        let long = "가".repeat(2000);
+
+        assert!(matches!(
+            mark_complete(&mut app, "w1", Some(&long)),
+            ActionResponse::Ok
+        ));
+
+        let data = status_data(&mut app, "w1");
+        let report = data["report"].as_str().expect("report should be a string");
+        assert_eq!(report.len(), 4095);
+        assert_eq!(report, "가".repeat(1365));
+    }
+
+    #[test]
+    fn deregister_clears_report() {
+        let status = status_with("running");
+        let mut app = detached_with("w1", &status);
+        assert!(matches!(
+            mark_complete(&mut app, "w1", Some("done")),
+            ActionResponse::Ok
+        ));
+
+        app.deregister_workspace("w1");
+        assert!(!app.completion_reports.contains_key("w1"));
+
+        // A new workspace reusing the name must not inherit the old report.
+        let fresh = status_with("running");
+        let queue: SharedInjectQueue = Arc::new(Mutex::new(InjectQueue::new()));
+        app.register_workspace("w1", queue, None, None, Some(fresh), "zsh", "/tmp");
+        let data = status_data(&mut app, "w1");
+        assert_eq!(data["state"], "running");
+        assert!(data["report"].is_null());
+    }
 }
