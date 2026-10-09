@@ -88,13 +88,14 @@ show_help() {
 | `aterm kill <workspace>` | 워크스페이스 종료 |
 | `aterm restart-all` | 죽은 세션 전체 재시작 |
 | `aterm tasks` | 대기 중인 태스크 목록 표시 |
+| `aterm tasks --workspace <name>` | 다른 워크스페이스 태스크 보기 (읽기 전용) |
 | `aterm tasks add '<description>'` | 새 태스크 추가 |
 | `aterm tasks done <id>` | 태스크 완료 처리 |
 | `aterm lessons` | 기록된 교훈 표시 |
 | `aterm lessons add '<lesson>'` | 교훈 추가 (`invariant`) |
 | `aterm lessons add '<lesson>' --type failed` | 실패 패턴 추가 |
-| `aterm dispatch <task-id>` | 태스크 분해 → 서브세션 생성 → 실행 → 수집 → 정리 |
-| `aterm dispatch --plan '<desc>'` | 자유 텍스트 태스크 → 동일한 dispatch 흐름 |
+| `aterm dispatch <task-id>` | 태스크 분해 → 서브세션 생성 → 실행 → 수집 → 정리 (타임아웃 서브세션은 유지) |
+| `aterm dispatch --plan '<desc>'` | 자유 텍스트 태스크 → 동일한 dispatch 흐름 (타임아웃 서브세션은 유지) |
 | `aterm done '<result>'` | 현재 워크스페이스 작업 완료 신호 (dispatch 서브세션이 호출, 결과 보고 포함) |
 | `aterm log <workspace> [--lines N]` | 워크스페이스 화면 텍스트 읽기 (기본 100줄) |
 | `aterm export <workspace> [--format md\|txt]` | 세션 출력을 파일로 저장 |
@@ -103,15 +104,8 @@ show_help() {
 | `aterm theme <name>` | 테마 변경 (colorScheme 설정 단축키) |
 | `aterm attach <external-id>` | 외부 세션 연결 |
 | `aterm send-key <workspace> <key>` | 키 전송 (ctrl+c, enter, tab, esc 등) |
-| `aterm subscribe [--events e1,e2]` | 워크스페이스 이벤트 실시간 스트림 (Created,Closed,StatusChanged,TitleChanged) |
+| `aterm subscribe [--events e1,e2]` | 워크스페이스 이벤트 실시간 스트림 (WorkspaceCreated,WorkspaceClosed,StatusChanged,ShellReady,TrustPromptDetected) |
 | `aterm help` | 이 도움말 표시 |
-
-## 에코시스템
-
-✅ brain (AI 프로필 관리) — 이미 설치됨  
-✅ telepty (터미널 간 통신) — 이미 설치됨  
-✅ deliberation (멀티 AI 토론) — 이미 설치됨  
-✅ devkit (워크스페이스 부트스트랩) — 이미 설치됨
 
 ## 자연어 → 명령어 매핑
 
@@ -178,13 +172,14 @@ HELP
 | `aterm kill <workspace>` | Close a workspace |
 | `aterm restart-all` | Restart all dead sessions |
 | `aterm tasks` | List pending tasks |
+| `aterm tasks --workspace <name>` | View another workspace's task board (read-only) |
 | `aterm tasks add '<description>'` | Add a new task |
 | `aterm tasks done <id>` | Mark a task as completed |
 | `aterm lessons` | List recorded lessons |
 | `aterm lessons add '<lesson>'` | Add a lesson (`invariant`) |
 | `aterm lessons add '<lesson>' --type failed` | Add a failed pattern |
-| `aterm dispatch <task-id>` | Break down task -> create sub-sessions -> execute -> collect -> cleanup |
-| `aterm dispatch --plan '<desc>'` | Free-text task -> same dispatch flow |
+| `aterm dispatch <task-id>` | Break down task -> create sub-sessions -> execute -> collect -> cleanup (timed-out sub-sessions are left running) |
+| `aterm dispatch --plan '<desc>'` | Free-text task -> same dispatch flow (timed-out sub-sessions are left running) |
 | `aterm done '<result>'` | Signal this workspace's task is complete (called by dispatch sub-sessions; optional result report) |
 | `aterm log <workspace> [--lines N]` | Read workspace screen text (default 100 lines) |
 | `aterm export <workspace> [--format md\|txt]` | Save session output to file |
@@ -193,15 +188,8 @@ HELP
 | `aterm theme <name>` | Change theme (shortcut for settings set colorScheme) |
 | `aterm attach <external-id>` | Attach an external session |
 | `aterm send-key <workspace> <key>` | Send key to workspace (ctrl+c, enter, tab, esc, etc.) |
-| `aterm subscribe [--events e1,e2]` | Stream workspace events in real-time (Created,Closed,StatusChanged,TitleChanged) |
+| `aterm subscribe [--events e1,e2]` | Stream workspace events in real-time (WorkspaceCreated,WorkspaceClosed,StatusChanged,ShellReady,TrustPromptDetected) |
 | `aterm help` | Show this help |
-
-## Ecosystem
-
-✅ brain (AI profile management) — already installed  
-✅ telepty (cross-terminal communication) — already installed  
-✅ deliberation (multi-AI discussions) — already installed  
-✅ devkit (workspace bootstrapping) — already installed
 
 ## Natural Language -> Command Mapping
 
@@ -261,14 +249,9 @@ args = sys.argv[3:]
 lang = os.environ.get("ATERM_UI_LANG", "en")
 
 payloads = {
-    "list":        lambda: {"action": "ListWorkspaces"},
     "inject":      lambda: {"action": "Inject", "workspace": args[0],
                             "text": " ".join(args[1:]),
                             "from": __import__("os").environ.get("ATERM_WORKSPACE_NAME")},
-    "inject-force": lambda: {"action": "Inject", "workspace": args[0],
-                            "text": " ".join(args[1:]),
-                            "from": __import__("os").environ.get("ATERM_WORKSPACE_NAME"),
-                            "force": True},
     "status":      lambda: {"action": "WorkspaceStatus", "workspace": args[0]},
     "focus":       lambda: {"action": "FocusWorkspace", "workspace": args[0]},
     "rename":      lambda: {"action": "RenameWorkspace", "old_name": args[0], "new_name": args[1]},
@@ -305,40 +288,13 @@ try:
         if b"\n" in data:
             break
     resp = json.loads(data.decode().strip().split("\n")[0])
+    if resp.get("status") == "Unsupported":
+        print(json.dumps({"error": "not supported by this aterm"}), file=sys.stderr)
+        sys.exit(2)
 
     if resp.get("status") == "Error":
         print(json.dumps({"error": resp["message"]}), file=sys.stderr)
         sys.exit(1)
-    elif action == "list":
-        if __import__("os").environ.get("ATERM_LIST_JSON"):
-            sessions = [
-                session for session in resp.get("data", [])
-                if session.get("status") not in ("dead", "closing")
-            ]
-            print(json.dumps({"sessions": sessions}))
-        else:
-            sessions = [
-                session for session in resp.get("data", [])
-                if session.get("status") not in ("dead", "closing")
-            ]
-            if not sessions:
-                print("(워크스페이스 없음)" if lang == "ko" else "(no workspaces)")
-            else:
-                import os.path
-                rows = []
-                for s in sessions:
-                    name = s.get("name") or os.path.basename(s.get("cwd", "")) or s.get("id", "?")
-                    cli = s.get("cli", "")
-                    cwd = s.get("cwd", "")
-                    terminal = s.get("terminal", "aterm")
-                    rows.append((name, cli, cwd, terminal))
-                cols = ["이름", "CLI", "경로", "터미널"] if lang == "ko" else ["NAME", "CLI", "CWD", "TERMINAL"]
-                widths = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(cols)]
-                fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-                print(fmt.format(*cols))
-                print("  ".join("\u2500" * w for w in widths))
-                for r in rows:
-                    print(fmt.format(*r))
     elif action == "status":
         print(json.dumps(resp.get("data", {})))
     elif action == "list-tasks":
@@ -730,22 +686,22 @@ for i, t in enumerate(data["tasks"]):
             add)
                 [ "$#" -lt 3 ] && { echo '{"error":"usage: aterm tasks add <description>"}' >&2; exit 1; }
                 python3 -c '
-import json, sys, os
+import json, sys, os, tempfile
 f = sys.argv[1]; desc = " ".join(sys.argv[2:])
 with open(f) as fh: data = json.load(fh)
 ids = [t["id"] for t in data.get("tasks", []) + data.get("completed", [])
        if isinstance(t, dict) and type(t.get("id")) is int]
 tid = max(ids, default=0) + 1
 data["tasks"].append({"id": tid, "description": desc})
-tmp = f + ".tmp"
-with open(tmp, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f), prefix=".tmp-", suffix=".json")
+with os.fdopen(fd, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
 os.replace(tmp, f)
 print(json.dumps({"status":"ok","id": tid}))
 ' "$(tasks_file)" "${@:3}" ;;
             done)
                 [ "$#" -lt 3 ] && { echo '{"error":"usage: aterm tasks done <id>"}' >&2; exit 1; }
                 python3 -c '
-import json, sys, os
+import json, sys, os, tempfile
 f = sys.argv[1]; target = int(sys.argv[2])
 with open(f) as fh: data = json.load(fh)
 found = None
@@ -757,8 +713,8 @@ for i, t in enumerate(data["tasks"]):
 if not found:
     print(json.dumps({"error": f"task {target} not found"}), file=sys.stderr); sys.exit(1)
 data.setdefault("completed", []).append(found)
-tmp = f + ".tmp"
-with open(tmp, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f), prefix=".tmp-", suffix=".json")
+with os.fdopen(fd, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
 os.replace(tmp, f)
 print(json.dumps({"status":"ok","id": target}))
 ' "$(tasks_file)" "$3" ;;
@@ -786,7 +742,7 @@ if fail:
             add)
                 [ "$#" -lt 3 ] && { echo '{"error":"usage: aterm lessons add <lesson> [--type invariant|failed]"}' >&2; exit 1; }
                 python3 -c '
-import json, sys
+import json, sys, os, tempfile
 f = sys.argv[1]; lesson = sys.argv[2]
 ltype = "invariants"
 if "--type" in sys.argv:
@@ -795,7 +751,9 @@ if "--type" in sys.argv:
         ltype = "failed"
 with open(f) as fh: data = json.load(fh)
 data.setdefault(ltype, []).append(lesson)
-with open(f, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(f), prefix=".tmp-", suffix=".json")
+with os.fdopen(fd, "w") as fh: json.dump(data, fh, indent=2, ensure_ascii=False); fh.write("\n")
+os.replace(tmp, f)
 print(json.dumps({"status":"ok","type": ltype}))
 ' "$(lessons_file)" "${@:3}" ;;
             *) echo '{"error":"usage: aterm lessons [list|add]"}' >&2; exit 1 ;;
@@ -1000,13 +958,14 @@ def main():
 
     # Create sub-sessions, inject, poll, collect, kill
     cwd = os.getcwd()
+    run = str(os.getpid())
     sessions_created = []
     reports = []
 
     for i, st in enumerate(subtasks):
         desc = st.get("description", st) if isinstance(st, dict) else str(st)
         cli = select_cli(desc)
-        name = f"dispatch-{task_id}-sub{i}"
+        name = f"dispatch-{task_id}-{run}-sub{i}"
 
         # Create session
         try:
@@ -1039,7 +998,7 @@ def main():
             continue
         cli = "unknown"
         for i, st in enumerate(subtasks):
-            if f"dispatch-{task_id}-sub{i}" == name:
+            if f"dispatch-{task_id}-{run}-sub{i}" == name:
                 desc = st.get("description", st) if isinstance(st, dict) else str(st)
                 cli = select_cli(desc)
                 break
@@ -1055,9 +1014,9 @@ def main():
             entry["status"] = "left_running"  # unfinished work is kept, not killed
         reports.append(entry)
 
-    # Close only completed sub-sessions; timed-out ones stay running
+    # Close completed and inject-failed sub-sessions; timed-out ones stay running
     for r in reports:
-        if r["status"] != "complete":
+        if r["status"] not in ("complete", "inject_failed"):
             continue
         try:
             ipc_kill(sock_path, r["name"])
@@ -1197,6 +1156,10 @@ try:
     resp = json.loads(data.decode().strip().split("\n")[0])
 finally:
     sock.close()
+
+if resp.get("status") == "Unsupported":
+    print(json.dumps({"error": "not supported by this aterm"}), file=sys.stderr)
+    sys.exit(2)
 
 text = resp.get("data", {}).get("text", "") if isinstance(resp.get("data"), dict) else ""
 ts = time.strftime("%Y%m%d-%H%M%S")

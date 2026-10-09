@@ -29,7 +29,8 @@ struct FakeServer {
 
 impl FakeServer {
     /// One request line per connection (as `bin/aterm` sends): record it,
-    /// answer with `respond(request)` as one NDJSON line, close.
+    /// answer with `respond(request)` as one NDJSON line, close. A `Null`
+    /// response closes the connection without replying.
     fn start(sock: &Path, respond: impl Fn(&Value) -> Value + Send + 'static) -> Self {
         let listener = UnixListener::bind(sock).expect("bind fake socket");
         listener.set_nonblocking(true).expect("nonblocking listener");
@@ -55,7 +56,9 @@ impl FakeServer {
                 let request: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
                 let response = respond(&request);
                 reqs.lock().unwrap().push(request);
-                let _ = (&stream).write_all(format!("{}\n", response).as_bytes());
+                if !response.is_null() {
+                    let _ = (&stream).write_all(format!("{}\n", response).as_bytes());
+                }
             }
         });
         Self { requests, stop, handle: Some(handle) }
@@ -110,6 +113,11 @@ impl Sandbox {
     /// Run `bin/aterm <args>`. `with_socket` controls `ATERM_IPC_SOCKET`.
     /// stdout/stderr go to files (a child can never hang on a pipe).
     fn run(&self, args: &[&str], with_socket: bool) -> Output {
+        self.run_env(args, with_socket, &[])
+    }
+
+    /// `run` with extra env vars on top of the explicit child env.
+    fn run_env(&self, args: &[&str], with_socket: bool, envs: &[(&str, &str)]) -> Output {
         let aterm = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bin/aterm");
         let (out_path, err_path) = (self.dir.join("stdout.log"), self.dir.join("stderr.log"));
         let mut cmd = Command::new("/bin/bash");
@@ -126,6 +134,7 @@ impl Sandbox {
         if with_socket {
             cmd.env("ATERM_IPC_SOCKET", self.sock());
         }
+        cmd.envs(envs.iter().copied());
         let mut child = cmd.spawn().expect("spawn bin/aterm");
         let deadline = Instant::now() + CHILD_TIMEOUT;
         let status = loop {
@@ -177,9 +186,26 @@ fn dispatch_responder(create: Value, wait_until: Value) -> impl Fn(&Value) -> Va
     }
 }
 
+/// The sub-session name dispatch sent in its first `CreateWorkspace`.
+fn created_name(requests: &[Value]) -> String {
+    let create = requests.iter().find(|r| r["action"] == "CreateWorkspace").expect("CreateWorkspace sent");
+    create["name"].as_str().expect("CreateWorkspace name").to_string()
+}
+
+/// Files in `dir` whose name starts with `prefix`.
+fn files_with_prefix(dir: &Path, prefix: &str) -> Vec<String> {
+    fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(prefix))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // No file-extension hint in the description, so dispatch takes the sub-session path.
 const PLAN_DESC: &str = "implement the widget feature";
-const SUB: &str = "dispatch-plan-sub0";
 
 // ── Tests ────────────────────────────────────────────────────
 
@@ -208,18 +234,19 @@ fn dispatch_waits_for_complete_and_closes_completed() {
     let out = sb.run(&["dispatch", "--plan", PLAN_DESC], true);
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let reqs = server.requests();
+    let sub = created_name(&reqs);
 
     let inject = reqs.iter().find(|r| r["action"] == "Inject").expect("Inject sent");
     assert!(inject["text"].as_str().unwrap().contains("aterm done"), "inject: {}", inject);
 
     let wait_idx = reqs
         .iter()
-        .position(|r| r["action"] == "WaitUntil" && r["workspace"] == SUB && r["state"] == "complete")
+        .position(|r| r["action"] == "WaitUntil" && r["workspace"] == sub.as_str() && r["state"] == "complete")
         .unwrap_or_else(|| panic!("WaitUntil state=complete missing: {:?}", actions(&reqs)));
     assert!(reqs[wait_idx]["timeout_ms"].as_u64().unwrap() <= 300_000);
     let close_idx = reqs
         .iter()
-        .position(|r| r["action"] == "CloseWorkspace" && r["workspace"] == SUB)
+        .position(|r| r["action"] == "CloseWorkspace" && r["workspace"] == sub.as_str())
         .unwrap_or_else(|| panic!("CloseWorkspace missing: {:?}", actions(&reqs)));
     assert!(wait_idx < close_idx, "order: {:?}", actions(&reqs));
 
@@ -317,4 +344,144 @@ fn dispatch_wait_error_reports_dead_not_left_running() {
     assert!(!actions(&server.requests()).contains(&"CloseWorkspace"));
     let result: Value = serde_json::from_str(&out.stdout).expect("dispatch stdout is JSON");
     assert_eq!(result["reports"][0]["status"], "dead", "{}", result);
+}
+
+#[test]
+fn unsupported_reply_is_an_error() {
+    let sb = Sandbox::new("t8");
+    let server = FakeServer::start(&sb.sock(), |_| json!({"status":"Unsupported"}));
+    let out = sb.run(&["focus", "w1"], true);
+    assert_eq!(out.code, Some(2), "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stderr.contains("not supported"), "stderr: {}", out.stderr);
+    assert!(!out.stdout.contains("\"ok\""), "stdout: {}", out.stdout);
+    assert_eq!(server.requests(), vec![json!({"action":"FocusWorkspace","workspace":"w1"})]);
+}
+
+#[test]
+fn export_unsupported_writes_no_file() {
+    let sb = Sandbox::new("t9");
+    let server = FakeServer::start(&sb.sock(), |_| json!({"status":"Unsupported"}));
+    let out = sb.run(&["export", "w1"], true);
+    assert_eq!(out.code, Some(2), "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stderr.contains("not supported"), "stderr: {}", out.stderr);
+    assert_eq!(actions(&server.requests()), vec!["ReadScreenText"]);
+    let exported: Vec<String> =
+        files_with_prefix(&sb.dir, "w1-").into_iter().filter(|n| n.ends_with(".txt")).collect();
+    assert!(exported.is_empty(), "export wrote {:?}", exported);
+}
+
+#[test]
+fn dispatch_names_carry_run_id() {
+    let sb = Sandbox::new("ta");
+    let server = FakeServer::start(
+        &sb.sock(),
+        dispatch_responder(
+            json!({"status":"Data","data":{"ready":true}}),
+            json!({"status":"Data","data":{"reached":true,"state":"complete"}}),
+        ),
+    );
+    let out = sb.run(&["dispatch", "--plan", PLAN_DESC], true);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let name = created_name(&server.requests());
+    // ^dispatch-plan-\d+-sub0$
+    let run = name
+        .strip_prefix("dispatch-plan-")
+        .and_then(|rest| rest.strip_suffix("-sub0"))
+        .unwrap_or_else(|| panic!("unexpected sub name: {}", name));
+    assert!(!run.is_empty() && run.chars().all(|c| c.is_ascii_digit()), "run id in {}", name);
+}
+
+#[test]
+fn dispatch_closes_inject_failed_subs() {
+    let sb = Sandbox::new("tb");
+    let respond = dispatch_responder(
+        json!({"status":"Data","data":{"ready":true}}),
+        json!({"status":"Data","data":{"reached":true,"state":"complete"}}),
+    );
+    // Inject: close the connection without replying.
+    let server = FakeServer::start(&sb.sock(), move |req: &Value| {
+        if req["action"] == "Inject" { Value::Null } else { respond(req) }
+    });
+    let out = sb.run(&["dispatch", "--plan", PLAN_DESC], true);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let reqs = server.requests();
+    let sub = created_name(&reqs);
+    assert!(!actions(&reqs).contains(&"WaitUntil"), "{:?}", actions(&reqs));
+    assert!(
+        reqs.iter().any(|r| r["action"] == "CloseWorkspace" && r["workspace"] == sub.as_str()),
+        "CloseWorkspace missing: {:?}",
+        actions(&reqs)
+    );
+    let result: Value = serde_json::from_str(&out.stdout).expect("dispatch stdout is JSON");
+    assert_eq!(result["reports"][0]["status"], "inject_failed", "{}", result);
+}
+
+#[test]
+fn tasks_add_replaces_inode() {
+    use std::os::unix::fs::MetadataExt;
+    let sb = Sandbox::new("tc");
+    let board_path = sb.dir.join("state/task-queue.json");
+    let first = sb.run(&["tasks", "add", "first task"], false);
+    assert_eq!(first.code, Some(0), "stderr: {}", first.stderr);
+    let ino_before = fs::metadata(&board_path).unwrap().ino();
+    let second = sb.run(&["tasks", "add", "second task"], false);
+    assert_eq!(second.code, Some(0), "stderr: {}", second.stderr);
+    let ino_after = fs::metadata(&board_path).unwrap().ino();
+    assert_ne!(ino_before, ino_after, "tasks add rewrote the board in place");
+    let board: Value = serde_json::from_str(&fs::read_to_string(&board_path).unwrap()).unwrap();
+    assert_eq!(board["tasks"].as_array().unwrap().len(), 2);
+    let leftovers = files_with_prefix(&sb.dir.join("state"), ".tmp-");
+    assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers);
+}
+
+#[test]
+fn lessons_add_is_atomic() {
+    use std::os::unix::fs::MetadataExt;
+    let sb = Sandbox::new("td");
+    let lessons_path = sb.dir.join("state/lessons.json");
+    let first = sb.run(&["lessons", "add", "first lesson"], false);
+    assert_eq!(first.code, Some(0), "stderr: {}", first.stderr);
+    let ino_before = fs::metadata(&lessons_path).unwrap().ino();
+    let second = sb.run(&["lessons", "add", "second lesson", "--type", "failed"], false);
+    assert_eq!(second.code, Some(0), "stderr: {}", second.stderr);
+    let ino_after = fs::metadata(&lessons_path).unwrap().ino();
+    assert_ne!(ino_before, ino_after, "lessons add rewrote the file in place");
+    let lessons: Value = serde_json::from_str(&fs::read_to_string(&lessons_path).unwrap()).unwrap();
+    assert_eq!(lessons["invariants"], json!(["first lesson"]));
+    assert_eq!(lessons["failed"], json!(["second lesson"]));
+    let leftovers = files_with_prefix(&sb.dir.join("state"), ".tmp-");
+    assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers);
+}
+
+#[test]
+fn help_has_no_hardcoded_installed_block() {
+    let sb = Sandbox::new("te");
+    for (lang, marker) in [("en", "## Commands"), ("ko", "## 명령어")] {
+        let out = sb.run_env(&["help"], false, &[("ATERM_UI_LANG", lang)]);
+        assert_eq!(out.code, Some(0), "{}: stderr: {}", lang, out.stderr);
+        assert!(out.stdout.contains(marker), "{}: help not in that language: {}", lang, out.stdout);
+        assert!(!out.stdout.contains("already installed"), "{}: {}", lang, out.stdout);
+        assert!(!out.stdout.contains("이미 설치됨"), "{}: {}", lang, out.stdout);
+    }
+}
+
+#[test]
+fn subscribe_help_lists_emitted_types() {
+    let sb = Sandbox::new("tf");
+    for lang in ["en", "ko"] {
+        let out = sb.run_env(&["help"], false, &[("ATERM_UI_LANG", lang)]);
+        assert_eq!(out.code, Some(0), "{}: stderr: {}", lang, out.stderr);
+        let row = out
+            .stdout
+            .lines()
+            .find(|l| l.contains("aterm subscribe"))
+            .unwrap_or_else(|| panic!("{}: no subscribe row", lang));
+        assert!(
+            row.contains("(WorkspaceCreated,WorkspaceClosed,StatusChanged,ShellReady,TrustPromptDetected)"),
+            "{}: {}",
+            lang,
+            row
+        );
+        assert!(!row.contains("TitleChanged"), "{}: {}", lang, row);
+    }
 }
