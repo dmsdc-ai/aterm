@@ -21,8 +21,9 @@ platform is pulled in as an optional platform package.
 ## The `aterm` CLI
 
 Inside an aterm workspace the CLI talks to the app over `$ATERM_IPC_SOCKET`.
-Outside aterm it transparently falls back to
+Outside the app, `aterm list`, `aterm inject` and `aterm status` fall back to
 [`telepty`](https://github.com/dmsdc-ai/aigentry-telepty).
+Run `aterm` with no arguments to open the app.
 
 | Command | Description |
 |---------|-------------|
