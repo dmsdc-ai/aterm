@@ -301,3 +301,20 @@ fn tasks_workspace_flag_uses_list_tasks() {
     assert!(out.stdout.contains("[7] remote task"), "stdout: {}", out.stdout);
     assert!(!sb.dir.join("state").exists(), "--workspace must not touch the local board");
 }
+
+#[test]
+fn dispatch_wait_error_reports_dead_not_left_running() {
+    let sb = Sandbox::new("t7");
+    let server = FakeServer::start(
+        &sb.sock(),
+        dispatch_responder(
+            json!({"status":"Data","data":{"ready":true}}),
+            json!({"status":"Error","message":"workspace 'dispatch-plan-sub0' not found"}),
+        ),
+    );
+    let out = sb.run(&["dispatch", "--plan", PLAN_DESC], true);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert!(!actions(&server.requests()).contains(&"CloseWorkspace"));
+    let result: Value = serde_json::from_str(&out.stdout).expect("dispatch stdout is JSON");
+    assert_eq!(result["reports"][0]["status"], "dead", "{}", result);
+}

@@ -919,6 +919,8 @@ def ipc_wait_until(sock_path, workspace, state="complete", timeout_ms=300000):
             if b"\n" in data:
                 break
         resp = json.loads(data.decode().strip().split("\n")[0])
+        if resp.get("status") == "Error":
+            return "dead"  # not found = deregistered: the sub died or was closed before this wait
         resp_data = resp.get("data", resp)
         if resp_data.get("reached", False):
             return "complete"
