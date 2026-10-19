@@ -6,6 +6,12 @@ All notable changes to **aterm** are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Dispatch closes sessions whose injection fails or is unsupported without waiting for completion.
+- Export reports IPC errors before creating an output file.
+- CLI availability checks use a non-login shell.
+
 ### Removed — dead code and build cruft (task #1209 audit, wave 1)
 - R1: `aterm-core/tests/polling_event_tests.rs` (18 tests that never imported `aterm_core`).
 - R2/R3: the undrained in-process `EventBus` and its six never-broadcast `AtermEvent` variants.

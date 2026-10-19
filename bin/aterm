@@ -984,7 +984,9 @@ def main():
 
         # Inject task description + completion contract (sub-session calls `aterm done`)
         try:
-            ipc_inject(sock_path, name, desc + "\n\nWhen this task is finished, run: aterm done \x27<one-line result>\x27")
+            inject_resp = ipc_inject(sock_path, name, desc + "\n\nWhen this task is finished, run: aterm done \x27<one-line result>\x27")
+            if inject_resp.get("status") in ("Error", "Unsupported"):
+                raise RuntimeError(inject_resp.get("message") or json.dumps(inject_resp))
         except Exception as e:
             reports.append({"name": name, "status": "inject_failed", "cli": cli, "error": str(e)})
             continue
@@ -1160,6 +1162,10 @@ finally:
 if resp.get("status") == "Unsupported":
     print(json.dumps({"error": "not supported by this aterm"}), file=sys.stderr)
     sys.exit(2)
+
+if resp.get("status") == "Error":
+    print(json.dumps({"error": resp.get("message") or json.dumps(resp)}), file=sys.stderr)
+    sys.exit(1)
 
 text = resp.get("data", {}).get("text", "") if isinstance(resp.get("data"), dict) else ""
 ts = time.strftime("%Y%m%d-%H%M%S")
