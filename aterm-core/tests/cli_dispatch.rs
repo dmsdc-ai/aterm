@@ -485,3 +485,109 @@ fn subscribe_help_lists_emitted_types() {
         assert!(!row.contains("TitleChanged"), "{}: {}", lang, row);
     }
 }
+
+#[test]
+fn dispatch_inject_error_closes_without_wait() {
+    let sb = Sandbox::new("ng");
+    let server = FakeServer::start(&sb.sock(), |req| match req["action"].as_str().unwrap_or("") {
+        "CreateWorkspace" => json!({"status":"Data","data":{"ready":true}}),
+        "Inject" => json!({"status":"Error","message":"inject queue full"}),
+        // Let the unfixed path finish promptly; this request must not occur.
+        "WaitUntil" => json!({"status":"Data","data":{"reached":false}}),
+        _ => json!({"status":"Ok"}),
+    });
+    let out = sb.run(&["dispatch", "--plan", PLAN_DESC], true);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let reqs = server.requests();
+    let sub = created_name(&reqs);
+    assert_eq!(actions(&reqs), vec!["CreateWorkspace", "Inject", "CloseWorkspace"]);
+    assert_eq!(reqs[1]["workspace"], sub.as_str());
+    assert_eq!(reqs[2]["workspace"], sub.as_str());
+    let result: Value = serde_json::from_str(&out.stdout).expect("dispatch stdout is JSON");
+    assert_eq!(result["sessions_created"], json!([sub]));
+    assert_eq!(result["status"], "failed", "{}", result);
+    assert_eq!(result["reports"].as_array().unwrap().len(), 1);
+    assert_eq!(result["reports"][0]["name"], reqs[0]["name"]);
+    assert_eq!(result["reports"][0]["status"], "inject_failed");
+    assert!(result["reports"][0]["error"].as_str().unwrap().contains("inject queue full"));
+}
+
+#[test]
+fn dispatch_inject_unsupported_closes_without_wait() {
+    let sb = Sandbox::new("nh");
+    let server = FakeServer::start(&sb.sock(), |req| match req["action"].as_str().unwrap_or("") {
+        "CreateWorkspace" => json!({"status":"Data","data":{"ready":true}}),
+        "Inject" => json!({"status":"Unsupported"}),
+        // Let the unfixed path finish promptly; this request must not occur.
+        "WaitUntil" => json!({"status":"Data","data":{"reached":false}}),
+        _ => json!({"status":"Ok"}),
+    });
+    let out = sb.run(&["dispatch", "--plan", PLAN_DESC], true);
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let reqs = server.requests();
+    let sub = created_name(&reqs);
+    assert_eq!(actions(&reqs), vec!["CreateWorkspace", "Inject", "CloseWorkspace"]);
+    assert_eq!(reqs[1]["workspace"], sub.as_str());
+    assert_eq!(reqs[2]["workspace"], sub.as_str());
+    let result: Value = serde_json::from_str(&out.stdout).expect("dispatch stdout is JSON");
+    assert_eq!(result["sessions_created"], json!([sub]));
+    assert_eq!(result["status"], "failed", "{}", result);
+    assert_eq!(result["reports"].as_array().unwrap().len(), 1);
+    assert_eq!(result["reports"][0]["name"], reqs[0]["name"]);
+    assert_eq!(result["reports"][0]["status"], "inject_failed");
+    let error = result["reports"][0]["error"].as_str().expect("inject diagnostic");
+    assert!(error.to_lowercase().contains("unsupported") || error.to_lowercase().contains("not supported"), "{}", error);
+}
+
+#[test]
+fn export_error_writes_no_file() {
+    for (format, tag) in [("txt", "ni"), ("md", "nj")] {
+        let sb = Sandbox::new(tag);
+        let server = FakeServer::start(&sb.sock(), |_| {
+            json!({"status":"Error","message":"screen unavailable"})
+        });
+        // Include the runner's output files in the original directory snapshot.
+        fs::write(sb.dir.join("stdout.log"), "").unwrap();
+        fs::write(sb.dir.join("stderr.log"), "").unwrap();
+        let mut before = files_with_prefix(&sb.dir, "");
+        before.sort();
+        let out = sb.run(&["export", "w1", "--format", format], true);
+        assert_eq!(out.code, Some(1), "{}: stdout: {} stderr: {}", format, out.stdout, out.stderr);
+        let error: Value = serde_json::from_str(&out.stderr).expect("export stderr is JSON");
+        assert!(error["error"].as_str().unwrap().contains("screen unavailable"));
+        assert!(out.stdout.trim().is_empty(), "stdout: {}", out.stdout);
+        assert_eq!(server.requests(), vec![json!({"action":"ReadScreenText","workspace":"w1","lines":10000})]);
+        let mut after = files_with_prefix(&sb.dir, "");
+        after.sort();
+        assert_eq!(after, before, "{}: export created a file", format);
+    }
+}
+
+#[test]
+fn export_data_writes_expected_file() {
+    for (format, tag) in [("txt", "nk"), ("md", "nl")] {
+        let sb = Sandbox::new(tag);
+        let text = "widget output\nsecond line";
+        let server = FakeServer::start(&sb.sock(), move |_| {
+            json!({"status":"Data","data":{"text":text}})
+        });
+        let out = sb.run(&["export", "w1", "--format", format], true);
+        assert_eq!(out.code, Some(0), "{}: stderr: {}", format, out.stderr);
+        assert!(out.stderr.trim().is_empty(), "stderr: {}", out.stderr);
+        let result: Value = serde_json::from_str(&out.stdout).expect("export stdout is JSON");
+        assert_eq!(result["status"], "ok");
+        let file = PathBuf::from(result["file"].as_str().expect("export file path"));
+        assert!(file.is_absolute());
+        assert_eq!(file.parent().unwrap().canonicalize().unwrap(), sb.dir.canonicalize().unwrap());
+        assert!(file.file_name().unwrap().to_str().unwrap().starts_with("w1-"));
+        assert_eq!(file.extension().unwrap().to_str().unwrap(), format);
+        let expected = if format == "md" {
+            format!("# Session Export: w1\n\n```\n{}\n```\n", text)
+        } else {
+            text.to_string()
+        };
+        assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+        assert_eq!(files_with_prefix(&sb.dir, "w1-").len(), 1);
+        assert_eq!(server.requests(), vec![json!({"action":"ReadScreenText","workspace":"w1","lines":10000})]);
+    }
+}

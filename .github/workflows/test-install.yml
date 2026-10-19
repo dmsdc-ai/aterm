@@ -42,8 +42,33 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.20.14'
+          cache: false
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Native toolchain preflight
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          printf 'Runner architecture: %s\n' "$ARCH"
+          node --version
+          npm --version
+          go version
+          rustc -vV
+          cargo --version
+          swift --version
+          xcodebuild -version
+          xcrun --show-sdk-version
+          if [ "$ARCH" != arm64 ]; then
+            echo "Native build requires arm64; macos-14 reported $ARCH" >&2
+            exit 1
+          fi
+          case "$(rustc -vV)" in
+            *'host: aarch64-apple-darwin'*) ;;
+            *) echo 'Rust host must be aarch64-apple-darwin' >&2; exit 1 ;;
+          esac
 
       - name: Cargo test
         run: ATERM_TELEPTY_PORT=9 cargo test --workspace --locked
@@ -58,21 +83,44 @@ jobs:
           cd ../aterm
           npm pack
 
-      - name: Install with TTY emulation
-        env:
-          ATERM_HOME: ${{ runner.temp }}/aterm-home
-          ATERM_PREFIX: ${{ runner.temp }}/aterm-prefix
+      - name: Prepare private install roots
+        shell: bash
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./npm/aterm/package.json').version")
-          mkdir -p "$ATERM_HOME" "$ATERM_PREFIX"
-          script -q /dev/null bash -lc "set -euo pipefail; HOME='$ATERM_HOME' npm install -g --prefix '$ATERM_PREFIX' '$GITHUB_WORKSPACE/npm/aterm-darwin-arm64/dmsdc-ai-aterm-darwin-arm64-${VERSION}.tgz' '$GITHUB_WORKSPACE/npm/aterm/dmsdc-ai-aterm-${VERSION}.tgz'"
+          umask 077
+          INSTALL_ROOT=$(mktemp -d "$RUNNER_TEMP/aterm-install.XXXXXX")
+          mkdir -p "$INSTALL_ROOT"/{home,prefix,system,config,data,tmp,npm-cache,aterm-data,project}
+          {
+            printf 'ATERM_HOME=%s/home\n' "$INSTALL_ROOT"
+            printf 'ATERM_PREFIX=%s/prefix\n' "$INSTALL_ROOT"
+            printf 'HOME=%s/home\n' "$INSTALL_ROOT"
+            printf 'USERPROFILE=%s/home\n' "$INSTALL_ROOT"
+            printf 'AIGENTRY_SYSTEM_ROOT=%s/system\n' "$INSTALL_ROOT"
+            printf 'XDG_CONFIG_HOME=%s/config\n' "$INSTALL_ROOT"
+            printf 'XDG_DATA_HOME=%s/data\n' "$INSTALL_ROOT"
+            printf 'TMPDIR=%s/tmp\n' "$INSTALL_ROOT"
+            printf 'npm_config_cache=%s/npm-cache\n' "$INSTALL_ROOT"
+            printf 'ATERM_DATA_ROOT=%s/aterm-data\n' "$INSTALL_ROOT"
+            printf 'INIT_CWD=%s/project\n' "$INSTALL_ROOT"
+          } >> "$GITHUB_ENV"
+
+      - name: Install with TTY emulation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          unset SUDO_USER
+          VERSION=$(node -p "require(process.env.GITHUB_WORKSPACE + '/npm/aterm/package.json').version")
+          cd "$INIT_CWD"
+          # Postinstall's inner login shell requires a separate correction before install acceptance.
+          script -q /dev/null /bin/bash --noprofile --norc -c 'set -euo pipefail; npm install -g --prefix "$ATERM_PREFIX" "$@"' bash "$GITHUB_WORKSPACE/npm/aterm-darwin-arm64/dmsdc-ai-aterm-darwin-arm64-${VERSION}.tgz" "$GITHUB_WORKSPACE/npm/aterm/dmsdc-ai-aterm-${VERSION}.tgz"
 
       - name: Verify user layout
-        env:
-          ATERM_HOME: ${{ runner.temp }}/aterm-home
+        shell: bash
         run: |
           set -euo pipefail
+          unset SUDO_USER
+          cd "$INIT_CWD"
           test -d "$ATERM_HOME/.aigentry/config"
           test -d "$ATERM_HOME/.aigentry/data"
           test -d "$ATERM_HOME/.aigentry/brain/local"
@@ -84,12 +132,12 @@ jobs:
           test -f "$ATERM_HOME/.aigentry/config/aterm.json"
 
       - name: Verify binary and version
-        env:
-          ATERM_HOME: ${{ runner.temp }}/aterm-home
-          ATERM_PREFIX: ${{ runner.temp }}/aterm-prefix
+        shell: bash
         run: |
           set -euo pipefail
-          EXPECTED=$(node -p "require('./npm/aterm/package.json').version")
+          unset SUDO_USER
+          cd "$INIT_CWD"
+          EXPECTED=$(node -p "require(process.env.GITHUB_WORKSPACE + '/npm/aterm/package.json').version")
           test -x "$ATERM_PREFIX/bin/aterm"
           version="$(HOME="$ATERM_HOME" "$ATERM_PREFIX/bin/aterm" --version)"
           test "$version" = "$EXPECTED"
