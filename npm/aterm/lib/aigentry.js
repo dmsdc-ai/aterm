@@ -111,7 +111,7 @@ function resolveUserHomeFromSudoUser() {
 }
 
 function commandAvailable(command) {
-  const result = spawnSync('/bin/sh', ['-lc', `command -v ${command} >/dev/null 2>&1`], {
+  const result = spawnSync('/bin/sh', ['-c', `command -v ${command} >/dev/null 2>&1`], {
     stdio: 'ignore',
   });
   return result.status === 0;
