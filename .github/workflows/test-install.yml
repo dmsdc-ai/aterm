@@ -28,6 +28,11 @@ on:
       - '.cargo/**'
       - 'Makefile'
   workflow_dispatch:
+    inputs:
+      perform_install:
+        description: Run packaging and installation acceptance after controller admission
+        type: boolean
+        default: false
 
 jobs:
   install-check:
@@ -46,7 +51,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Test-only scope summary
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.perform_install == true) }}
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH=$(uname -m)
+          printf 'TEST-ONLY / INSTALL NOTRUN\nRegression host architecture: %s\nA green test run is not installation, native application, or release acceptance.\n' "$ARCH" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Native toolchain preflight
+        env:
+          PERFORM_INSTALL: ${{ github.event_name == 'workflow_dispatch' && inputs.perform_install == true }}
         timeout-minutes: 2
         shell: bash
         run: |
@@ -61,14 +77,16 @@ jobs:
           swift --version
           xcodebuild -version
           xcrun --show-sdk-version
-          if [ "$ARCH" != arm64 ]; then
-            echo "Native build requires arm64; macos-14 reported $ARCH" >&2
-            exit 1
+          if [ "$PERFORM_INSTALL" = true ]; then
+            if [ "$ARCH" != arm64 ]; then
+              echo "Native build requires arm64; macos-14 reported $ARCH" >&2
+              exit 1
+            fi
+            case "$(rustc -vV)" in
+              *'host: aarch64-apple-darwin'*) ;;
+              *) echo 'Rust host must be aarch64-apple-darwin' >&2; exit 1 ;;
+            esac
           fi
-          case "$(rustc -vV)" in
-            *'host: aarch64-apple-darwin'*) ;;
-            *) echo 'Rust host must be aarch64-apple-darwin' >&2; exit 1 ;;
-          esac
 
       - name: Cargo test
         run: ATERM_TELEPTY_PORT=9 cargo test --workspace --locked
@@ -77,6 +95,7 @@ jobs:
         run: node --test npm/aterm/test/launcher.test.mjs
 
       - name: Pack npm packages
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.perform_install == true }}
         run: |
           cd npm/aterm-darwin-arm64
           npm pack
@@ -84,6 +103,7 @@ jobs:
           npm pack
 
       - name: Prepare private install roots
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.perform_install == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -105,6 +125,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install with TTY emulation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.perform_install == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -116,6 +137,7 @@ jobs:
           script -q /dev/null /bin/bash --noprofile --norc -c 'set -euo pipefail; npm install -g --prefix "$ATERM_PREFIX" "$@"' bash "$GITHUB_WORKSPACE/npm/aterm-darwin-arm64/dmsdc-ai-aterm-darwin-arm64-${VERSION}.tgz" "$GITHUB_WORKSPACE/npm/aterm/dmsdc-ai-aterm-${VERSION}.tgz"
 
       - name: Verify user layout
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.perform_install == true }}
         shell: bash
         run: |
           set -euo pipefail
@@ -132,6 +154,7 @@ jobs:
           test -f "$ATERM_HOME/.aigentry/config/aterm.json"
 
       - name: Verify binary and version
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.perform_install == true }}
         shell: bash
         run: |
           set -euo pipefail
